@@ -1,0 +1,3265 @@
+from __future__ import annotations
+
+import csv
+import hashlib
+import html
+import hmac
+import io
+import json
+import os
+import re
+import secrets
+import sqlite3
+import uuid
+import zipfile
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from .llm import validate_openai_compatible_config
+
+
+WORKSPACE_WRITE_ROLES = {"owner", "admin", "member"}
+WORKSPACE_ADMIN_ROLES = {"owner", "admin"}
+API_TOKEN_SCOPES = ("read", "write", "audit")
+MAX_CONVERSATION_MESSAGE_CHARS = 4000
+CHAT_TRACE_QUERY = "[conversation message redacted]"
+_UNSET = object()
+_AUDIT_SINK_SECRET_VALUE = re.compile(r"(pit_[A-Za-z0-9_-]+|Bearer\s+\S+|sk-[A-Za-z0-9_-]+)", re.IGNORECASE)
+_ENV_VAR_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _now_dt() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _normalize_expires_at(expires_at: str | None) -> str | None:
+    if expires_at is None:
+        return None
+    expires_at = expires_at.strip()
+    if not expires_at:
+        return None
+    parsed = _parse_iso_datetime(expires_at)
+    return parsed.isoformat()
+
+
+def _is_expired(expires_at: str | None) -> bool:
+    if not expires_at:
+        return False
+    try:
+        return _parse_iso_datetime(expires_at) <= _now_dt()
+    except ValueError:
+        return True
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def expires_at_from_days(days: int | None) -> str | None:
+    if days is None:
+        return None
+    if days <= 0:
+        raise ValueError("expires-in-days must be positive")
+    return (_now_dt() + timedelta(days=days)).isoformat()
+
+
+def _normalize_policy_days(days: int | None, name: str) -> int | None:
+    if days is None:
+        return None
+    if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return days
+
+
+def _normalize_provider_timeout(timeout_seconds: float | None) -> float | None:
+    if timeout_seconds is None:
+        return None
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    return float(timeout_seconds)
+
+
+def _normalize_provider_env_var(api_key_env_var: str | None) -> str | None:
+    if api_key_env_var is None:
+        return None
+    api_key_env_var = api_key_env_var.strip()
+    if not api_key_env_var:
+        return None
+    if not _ENV_VAR_NAME.fullmatch(api_key_env_var):
+        raise ValueError("api_key_env_var must be an uppercase environment variable name")
+    return api_key_env_var
+
+
+def _rotation_metadata(created_at: str, rotation_due_in_days: int | None) -> dict[str, Any]:
+    if rotation_due_in_days is None:
+        return {"rotation_due_at": None, "rotation_due": False}
+    try:
+        due_at = _parse_iso_datetime(created_at) + timedelta(days=rotation_due_in_days)
+    except ValueError:
+        return {"rotation_due_at": None, "rotation_due": True}
+    return {
+        "rotation_due_at": due_at.isoformat(),
+        "rotation_due": due_at <= _now_dt(),
+    }
+
+
+def _normalize_datetime_filter(value: str | None, name: str) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return _parse_iso_datetime(value).isoformat()
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an ISO-8601 datetime") from exc
+
+
+def _normalize_api_token_scopes(scopes: list[str] | None) -> list[str]:
+    if scopes is None:
+        return list(API_TOKEN_SCOPES)
+    normalized = {scope.strip().casefold() for scope in scopes if scope.strip()}
+    if not normalized:
+        raise ValueError("At least one api token scope is required.")
+    unsupported = sorted(normalized - set(API_TOKEN_SCOPES))
+    if unsupported:
+        raise ValueError(f"Unsupported api token scope: {unsupported[0]}")
+    return [scope for scope in API_TOKEN_SCOPES if scope in normalized]
+
+
+def _decode_api_token_scopes(scopes_json: str | None) -> list[str] | None:
+    if not scopes_json:
+        return list(API_TOKEN_SCOPES)
+    try:
+        decoded = json.loads(scopes_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, list) or not all(isinstance(scope, str) for scope in decoded):
+        return None
+    try:
+        return _normalize_api_token_scopes(decoded)
+    except ValueError:
+        return None
+
+
+def _api_token_scopes_for_role(role: str | None) -> list[str]:
+    if role in WORKSPACE_ADMIN_ROLES:
+        return list(API_TOKEN_SCOPES)
+    if role in WORKSPACE_WRITE_ROLES:
+        return ["read", "write"]
+    if role == "viewer":
+        return ["read"]
+    return []
+
+
+def _cap_api_token_scopes_to_role(scopes: list[str], role: str | None) -> list[str]:
+    allowed = _api_token_scopes_for_role(role)
+    return [scope for scope in scopes if scope in allowed]
+
+
+def _token_owner_user_id(actor_user_id: str, token_owner_user_id: str | None) -> str:
+    owner = actor_user_id if token_owner_user_id is None else token_owner_user_id.strip()
+    if not owner:
+        raise ValueError("Token owner user id is required.")
+    if owner != actor_user_id:
+        raise PermissionError("cross-user token management is not supported")
+    return owner
+
+
+def _audit_sink_path(root: Path) -> Path | None:
+    raw = os.environ.get("PAGEINDEX_AUDIT_SINK_JSONL", "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        root = root.resolve()
+        path = (root / path).resolve()
+        if not _path_is_relative_to(path, root):
+            return None
+        return path
+    return path.resolve()
+
+
+def _redact_audit_sink_event(event: dict[str, Any]) -> dict[str, Any]:
+    return _redact_audit_sink_mapping(event)
+
+
+def _rows(rows: Any) -> list[dict[str, Any]]:
+    return [dict(row) for row in rows]
+
+
+def _jsonl(rows: list[dict[str, Any]]) -> str:
+    return "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
+
+
+def _workspace_audit_export_rows(conn: sqlite3.Connection, workspace_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM audit_events
+        WHERE workspace_id = ?
+        ORDER BY created_at, id
+        """,
+        (workspace_id,),
+    )
+    events = []
+    for row in rows:
+        event = dict(row)
+        event["details"] = json.loads(event.pop("details_json"))
+        events.append(_redact_audit_sink_event(event))
+    return events
+
+
+def _redact_audit_sink_value(key: str, value: Any) -> Any:
+    if isinstance(value, dict):
+        return _redact_audit_sink_mapping(value)
+    if isinstance(value, list):
+        return [_redact_audit_sink_value(key, item) for item in value]
+    if isinstance(value, str) and _AUDIT_SINK_SECRET_VALUE.search(value):
+        return "[redacted]"
+    return value
+
+
+def _redact_audit_sink_mapping(data: dict[str, Any]) -> dict[str, Any]:
+    redacted = {}
+    for key, value in data.items():
+        if _audit_sink_secret_key(key):
+            continue
+        redacted[key] = _redact_audit_sink_value(key, value)
+    return redacted
+
+
+def _audit_sink_secret_key(key: str) -> bool:
+    key_lower = key.casefold()
+    return any(secret in key_lower for secret in ("token", "secret", "authorization", "api_key", "password"))
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+class EnterpriseStore:
+    """SQLite/filesystem corpus store for the clean-room enterprise layer."""
+
+    def __init__(self, root: str | Path):
+        self.root = Path(root).expanduser().resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.index_dir = self.root / "pageindex-workspace"
+        self.index_dir.mkdir(exist_ok=True)
+        self.db_path = self.root / "enterprise.sqlite3"
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
+        self._transaction_depth = 0
+        self._pending_audit_sink_events: list[dict[str, Any]] = []
+        self._init_schema()
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def _init_schema(self) -> None:
+        self.conn.executescript(
+            """
+            PRAGMA foreign_keys = ON;
+
+            CREATE TABLE IF NOT EXISTS workspaces (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_members (
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              user_id TEXT NOT NULL,
+              role TEXT NOT NULL DEFAULT 'member',
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (workspace_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS api_tokens (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              user_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              token_hash TEXT NOT NULL UNIQUE,
+              created_at TEXT NOT NULL,
+              expires_at TEXT,
+              scopes_json TEXT,
+              last_used_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS api_token_policies (
+              workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+              default_expires_in_days INTEGER,
+              rotation_due_in_days INTEGER,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_provider_configs (
+              workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+              provider TEXT NOT NULL,
+              base_url TEXT NOT NULL,
+              model TEXT NOT NULL,
+              api_key_env_var TEXT,
+              timeout_seconds REAL,
+              updated_at TEXT NOT NULL,
+              updated_by TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_retention_policies (
+              workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+              retention_days INTEGER,
+              updated_at TEXT NOT NULL,
+              updated_by TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_events (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+              user_id TEXT NOT NULL,
+              action TEXT NOT NULL,
+              target_type TEXT NOT NULL,
+              target_id TEXT,
+              details_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS folders (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+              parent_id TEXT REFERENCES folders(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              path TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS documents (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+              folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
+              name TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              source_path TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              page_count INTEGER,
+              line_count INTEGER,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS document_pages (
+              doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+              page INTEGER NOT NULL,
+              content TEXT NOT NULL,
+              PRIMARY KEY (doc_id, page)
+            );
+
+            CREATE TABLE IF NOT EXISTS document_versions (
+              id TEXT PRIMARY KEY,
+              doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+              workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+              version INTEGER NOT NULL,
+              action TEXT NOT NULL,
+              actor_user_id TEXT,
+              name TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              source_name TEXT NOT NULL,
+              page_count INTEGER,
+              line_count INTEGER,
+              created_at TEXT NOT NULL,
+              UNIQUE(doc_id, version)
+            );
+
+            CREATE TABLE IF NOT EXISTS query_runs (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+              query TEXT NOT NULL,
+              scope_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              completed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS conversations (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              created_by TEXT NOT NULL,
+              title TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+              id TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              user_id TEXT NOT NULL,
+              role TEXT NOT NULL,
+              content TEXT NOT NULL,
+              run_id TEXT REFERENCES query_runs(id) ON DELETE SET NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS evidence (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES query_runs(id) ON DELETE CASCADE,
+              doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+              node_id TEXT,
+              page_start INTEGER,
+              page_end INTEGER,
+              text TEXT NOT NULL,
+              reason TEXT NOT NULL,
+              score REAL NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS citations (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES query_runs(id) ON DELETE CASCADE,
+              evidence_id TEXT NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
+              doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+              label TEXT NOT NULL,
+              page_start INTEGER NOT NULL,
+              page_end INTEGER NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS virtual_nodes (
+              id TEXT PRIMARY KEY,
+              parent_id TEXT REFERENCES virtual_nodes(id) ON DELETE CASCADE,
+              doc_id TEXT REFERENCES documents(id) ON DELETE CASCADE,
+              axis TEXT NOT NULL,
+              label TEXT NOT NULL,
+              path TEXT NOT NULL UNIQUE,
+              summary TEXT NOT NULL DEFAULT '',
+              source_node_id TEXT,
+              page_start INTEGER,
+              page_end INTEGER,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS virtual_node_docs (
+              virtual_node_id TEXT NOT NULL REFERENCES virtual_nodes(id) ON DELETE CASCADE,
+              doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+              reason TEXT NOT NULL,
+              score REAL NOT NULL DEFAULT 0,
+              PRIMARY KEY (virtual_node_id, doc_id)
+            );
+            """
+        )
+        self._ensure_schema_columns()
+        self._commit()
+
+    @contextmanager
+    def _atomic(self):
+        outer = self._transaction_depth == 0
+        self._transaction_depth += 1
+        try:
+            yield
+        except Exception:
+            if outer:
+                self.conn.rollback()
+                self._pending_audit_sink_events.clear()
+            raise
+        else:
+            if outer:
+                self.conn.commit()
+                self._flush_audit_sink_events()
+        finally:
+            self._transaction_depth -= 1
+
+    def _commit(self) -> None:
+        if self._transaction_depth == 0:
+            self.conn.commit()
+            self._flush_audit_sink_events()
+
+    def _ensure_schema_columns(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(virtual_nodes)")}
+        additions = {
+            "folders": {
+                "workspace_id": "TEXT",
+            },
+            "documents": {
+                "workspace_id": "TEXT",
+            },
+            "query_runs": {
+                "workspace_id": "TEXT",
+            },
+            "api_tokens": {
+                "expires_at": "TEXT",
+                "scopes_json": "TEXT",
+                "last_used_at": "TEXT",
+            },
+            "workspace_provider_configs": {
+                "provider": "TEXT",
+                "base_url": "TEXT",
+                "model": "TEXT",
+                "api_key_env_var": "TEXT",
+                "timeout_seconds": "REAL",
+                "updated_at": "TEXT",
+                "updated_by": "TEXT",
+            },
+            "document_versions": {
+                "workspace_id": "TEXT",
+                "actor_user_id": "TEXT",
+                "source_name": "TEXT",
+                "page_count": "INTEGER",
+                "line_count": "INTEGER",
+            },
+            "virtual_nodes": {
+                "doc_id": "TEXT REFERENCES documents(id) ON DELETE CASCADE",
+                "source_node_id": "TEXT",
+                "page_start": "INTEGER",
+                "page_end": "INTEGER",
+            },
+        }
+        for table, table_additions in additions.items():
+            columns = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+            for name, definition in table_additions.items():
+                if name not in columns:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        self.conn.execute(
+            "UPDATE api_tokens SET scopes_json = ? WHERE scopes_json IS NULL OR scopes_json = ''",
+            (json.dumps(list(API_TOKEN_SCOPES)),),
+        )
+        self._ensure_folder_workspace_path_index()
+
+    def _ensure_folder_workspace_path_index(self) -> None:
+        unique_indexes = []
+        for index in self.conn.execute("PRAGMA index_list(folders)"):
+            if index["unique"]:
+                columns = [column["name"] for column in self.conn.execute(f"PRAGMA index_info({index['name']})")]
+                unique_indexes.append(columns)
+        if ["path"] in unique_indexes:
+            self._rebuild_folders_without_global_path_unique()
+            unique_indexes = []
+            for index in self.conn.execute("PRAGMA index_list(folders)"):
+                if index["unique"]:
+                    columns = [column["name"] for column in self.conn.execute(f"PRAGMA index_info({index['name']})")]
+                    unique_indexes.append(columns)
+        if ["workspace_id", "path"] not in unique_indexes:
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_workspace_path ON folders (workspace_id, path)")
+
+    def _rebuild_folders_without_global_path_unique(self) -> None:
+        self.conn.commit()
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.conn.execute("ALTER TABLE folders RENAME TO folders_old")
+            self.conn.execute(
+                """
+                CREATE TABLE folders (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+                  parent_id TEXT REFERENCES folders(id) ON DELETE CASCADE,
+                  name TEXT NOT NULL,
+                  path TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                INSERT INTO folders (id, workspace_id, parent_id, name, path, created_at)
+                SELECT id, workspace_id, parent_id, name, path, created_at FROM folders_old
+                """
+            )
+            self.conn.execute("DROP TABLE folders_old")
+            self.conn.commit()
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
+
+    def create_workspace(self, name: str, workspace_id: str | None = None) -> str:
+        name = name.strip()
+        if not name:
+            raise ValueError("Workspace name is required.")
+        workspace_id = workspace_id or f"ws_{uuid.uuid4().hex}"
+        self.conn.execute(
+            """
+            INSERT INTO workspaces (id, name, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name = excluded.name
+            """,
+            (workspace_id, name, _now()),
+        )
+        self._commit()
+        return workspace_id
+
+    def add_workspace_member(
+        self,
+        workspace_id: str,
+        user_id: str,
+        role: str = "member",
+        *,
+        actor_user_id: str | None = None,
+    ) -> None:
+        self._require_workspace(workspace_id)
+        user_id = user_id.strip()
+        role = role.strip() or "member"
+        if not user_id:
+            raise ValueError("User id is required.")
+        if role not in {"owner", "admin", "member", "viewer"}:
+            raise ValueError(f"Unsupported workspace role: {role}")
+        if actor_user_id:
+            self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        previous_role = self.workspace_role(workspace_id, user_id)
+        if previous_role == "owner" and role != "owner" and self._workspace_owner_count(workspace_id) <= 1:
+            raise ValueError("workspace must keep at least one owner")
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(workspace_id, user_id) DO UPDATE SET role = excluded.role
+                """,
+                (workspace_id, user_id, role, _now()),
+            )
+            if actor_user_id:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "workspace_member.upsert",
+                    target_type="workspace_member",
+                    target_id=user_id,
+                    details={"role": role, "previous_role": previous_role},
+                )
+
+    def list_workspace_members(self, workspace_id: str, actor_user_id: str) -> list[dict[str, Any]]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        rows = self.conn.execute(
+            """
+            SELECT workspace_id, user_id, role, created_at
+            FROM workspace_members
+            WHERE workspace_id = ?
+            ORDER BY user_id
+            """,
+            (workspace_id,),
+        )
+        return [dict(row) for row in rows]
+
+    def remove_workspace_member(self, workspace_id: str, user_id: str, actor_user_id: str) -> bool:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        user_id = user_id.strip()
+        if not user_id:
+            raise ValueError("User id is required.")
+        previous_role = self.workspace_role(workspace_id, user_id)
+        if not previous_role:
+            return False
+        if previous_role == "owner" and self._workspace_owner_count(workspace_id) <= 1:
+            raise ValueError("workspace must keep at least one owner")
+        with self._atomic():
+            cursor = self.conn.execute(
+                "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, user_id),
+            )
+            removed = cursor.rowcount > 0
+            if removed:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "workspace_member.remove",
+                    target_type="workspace_member",
+                    target_id=user_id,
+                    details={"previous_role": previous_role},
+                )
+        return removed
+
+    def _workspace_owner_count(self, workspace_id: str) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM workspace_members WHERE workspace_id = ? AND role = 'owner'",
+            (workspace_id,),
+        ).fetchone()
+        return int(row["count"])
+
+    def user_can_access_workspace(self, workspace_id: str, user_id: str) -> bool:
+        return bool(
+            self._one(
+                "SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, user_id),
+            )
+        )
+
+    def workspace_role(self, workspace_id: str, user_id: str) -> str | None:
+        row = self._one(
+            "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+            (workspace_id, user_id.strip()),
+        )
+        return row["role"] if row else None
+
+    def require_workspace_access(self, workspace_id: str, user_id: str) -> None:
+        self._require_workspace(workspace_id)
+        if not user_id.strip() or not self.user_can_access_workspace(workspace_id, user_id):
+            raise PermissionError("workspace access denied")
+
+    def require_workspace_role(self, workspace_id: str, user_id: str, allowed_roles: set[str]) -> None:
+        self.require_workspace_access(workspace_id, user_id)
+        if self.workspace_role(workspace_id, user_id) not in allowed_roles:
+            raise PermissionError("workspace role denied")
+
+    def require_workspace_write(self, workspace_id: str | None, actor_user_id: str | None) -> None:
+        if not workspace_id:
+            return
+        if not actor_user_id:
+            raise PermissionError("actor_user_id is required for workspace writes")
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_WRITE_ROLES)
+
+    def create_api_token(
+        self,
+        workspace_id: str,
+        user_id: str,
+        name: str = "default",
+        *,
+        expires_at: str | None = None,
+        scopes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.require_workspace_access(workspace_id, user_id)
+        user_id = user_id.strip()
+        name = name.strip() or "default"
+        expires_at = _normalize_expires_at(expires_at)
+        policy = self._api_token_policy(workspace_id)
+        policy_default_applied = expires_at is None and policy["default_expires_in_days"] is not None
+        if policy_default_applied:
+            expires_at = expires_at_from_days(policy["default_expires_in_days"])
+        role = self.workspace_role(workspace_id, user_id)
+        allowed_scopes = _api_token_scopes_for_role(role)
+        requested_scopes = _normalize_api_token_scopes(scopes) if scopes is not None else allowed_scopes
+        unsupported_for_role = [scope for scope in requested_scopes if scope not in allowed_scopes]
+        if unsupported_for_role:
+            raise PermissionError(f"api token scope not allowed for workspace role: {unsupported_for_role[0]}")
+        scopes = requested_scopes
+        scopes_json = json.dumps(scopes)
+        token = f"pit_{secrets.token_urlsafe(32)}"
+        token_id = f"tok_{uuid.uuid4().hex}"
+        created_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO api_tokens (id, workspace_id, user_id, name, token_hash, created_at, expires_at, scopes_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (token_id, workspace_id, user_id, name, _hash_token(token), created_at, expires_at, scopes_json),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                user_id,
+                "api_token.create",
+                target_type="api_token",
+                target_id=token_id,
+                details={
+                    "name": name,
+                    "expires_at": expires_at,
+                    "scopes": scopes,
+                    "policy_default_applied": policy_default_applied,
+                },
+            )
+        return {
+            "id": token_id,
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "name": name,
+            "expires_at": expires_at,
+            "scopes": scopes,
+            **_rotation_metadata(created_at, policy["rotation_due_in_days"]),
+            "token": token,
+        }
+
+    def _api_token_policy(self, workspace_id: str) -> dict[str, Any]:
+        self._require_workspace(workspace_id)
+        row = self._one(
+            """
+            SELECT workspace_id, default_expires_in_days, rotation_due_in_days, updated_at
+            FROM api_token_policies
+            WHERE workspace_id = ?
+            """,
+            (workspace_id,),
+        )
+        if row:
+            return dict(row)
+        return {
+            "workspace_id": workspace_id,
+            "default_expires_in_days": None,
+            "rotation_due_in_days": None,
+            "updated_at": None,
+        }
+
+    def get_api_token_policy(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        return self._api_token_policy(workspace_id)
+
+    def set_api_token_policy(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        *,
+        default_expires_in_days: int | None | object = _UNSET,
+        rotation_due_in_days: int | None | object = _UNSET,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        current = self._api_token_policy(workspace_id)
+        default_days = current["default_expires_in_days"]
+        rotation_days = current["rotation_due_in_days"]
+        if default_expires_in_days is not _UNSET:
+            default_days = _normalize_policy_days(default_expires_in_days, "default_expires_in_days")
+        if rotation_due_in_days is not _UNSET:
+            rotation_days = _normalize_policy_days(rotation_due_in_days, "rotation_due_in_days")
+        updated_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO api_token_policies (workspace_id, default_expires_in_days, rotation_due_in_days, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET
+                  default_expires_in_days = excluded.default_expires_in_days,
+                  rotation_due_in_days = excluded.rotation_due_in_days,
+                  updated_at = excluded.updated_at
+                """,
+                (workspace_id, default_days, rotation_days, updated_at),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id.strip(),
+                "api_token.policy_update",
+                target_type="api_token_policy",
+                target_id=workspace_id,
+                details={
+                    "default_expires_in_days": default_days,
+                    "rotation_due_in_days": rotation_days,
+                },
+            )
+        return self._api_token_policy(workspace_id)
+
+    def get_workspace_provider_config(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        return self._workspace_provider_config_metadata(workspace_id)
+
+    def set_workspace_provider_config(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        *,
+        base_url: str,
+        model: str,
+        api_key_env_var: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        base_url = base_url.strip()
+        model = model.strip()
+        api_key_env_var = _normalize_provider_env_var(api_key_env_var)
+        timeout_seconds = _normalize_provider_timeout(timeout_seconds)
+        if not model:
+            raise ValueError("model is required")
+        validate_openai_compatible_config(
+            base_url=base_url,
+            api_key=os.environ.get(api_key_env_var) if api_key_env_var else None,
+            model=model,
+            timeout=timeout_seconds,
+        )
+        updated_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO workspace_provider_configs (
+                  workspace_id, provider, base_url, model, api_key_env_var,
+                  timeout_seconds, updated_at, updated_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET
+                  provider = excluded.provider,
+                  base_url = excluded.base_url,
+                  model = excluded.model,
+                  api_key_env_var = excluded.api_key_env_var,
+                  timeout_seconds = excluded.timeout_seconds,
+                  updated_at = excluded.updated_at,
+                  updated_by = excluded.updated_by
+                """,
+                (
+                    workspace_id,
+                    "openai-compatible",
+                    base_url,
+                    model,
+                    api_key_env_var,
+                    timeout_seconds,
+                    updated_at,
+                    actor_user_id.strip(),
+                ),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id.strip(),
+                "provider_config.set",
+                target_type="provider_config",
+                target_id=workspace_id,
+                details={
+                    "provider": "openai-compatible",
+                    "model": model,
+                    "api_key_env_var": api_key_env_var,
+                    "api_key_configured": bool(api_key_env_var and os.environ.get(api_key_env_var)),
+                    "timeout_seconds": timeout_seconds,
+                },
+            )
+        return self._workspace_provider_config_metadata(workspace_id)
+
+    def clear_workspace_provider_config(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        with self._atomic():
+            self.conn.execute("DELETE FROM workspace_provider_configs WHERE workspace_id = ?", (workspace_id,))
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id.strip(),
+                "provider_config.clear",
+                target_type="provider_config",
+                target_id=workspace_id,
+                details={},
+            )
+        return self._workspace_provider_config_metadata(workspace_id)
+
+    def workspace_provider_request_options(self, workspace_id: str, fallback_model: str) -> dict[str, Any]:
+        row = self._one(
+            """
+            SELECT provider, base_url, model, api_key_env_var, timeout_seconds
+            FROM workspace_provider_configs
+            WHERE workspace_id = ?
+            """,
+            (workspace_id,),
+        )
+        if not row:
+            return {"model": fallback_model}
+        api_key_env_var = row["api_key_env_var"]
+        return {
+            "model": row["model"],
+            "base_url": row["base_url"],
+            "api_key": os.environ.get(api_key_env_var) if api_key_env_var else None,
+            "timeout": row["timeout_seconds"],
+            "prefer_env_model": False,
+            "prefer_env_api_key": False,
+        }
+
+    def _workspace_provider_config_metadata(self, workspace_id: str) -> dict[str, Any]:
+        self._require_workspace(workspace_id)
+        row = self._one(
+            """
+            SELECT workspace_id, provider, base_url, model, api_key_env_var,
+                   timeout_seconds, updated_at, updated_by
+            FROM workspace_provider_configs
+            WHERE workspace_id = ?
+            """,
+            (workspace_id,),
+        )
+        if not row:
+            return {
+                "workspace_id": workspace_id,
+                "configured": False,
+                "provider": "openai-compatible",
+                "base_url": None,
+                "model": None,
+                "api_key_env_var": None,
+                "api_key_configured": False,
+                "timeout_seconds": None,
+                "updated_at": None,
+                "updated_by": None,
+            }
+        config = dict(row)
+        config["configured"] = True
+        config["api_key_configured"] = bool(config["api_key_env_var"] and os.environ.get(config["api_key_env_var"]))
+        return config
+
+    def verify_api_token(self, token: str) -> dict[str, Any] | None:
+        token = token.strip()
+        if not token:
+            return None
+        token_hash = _hash_token(token)
+        row = self._one("SELECT * FROM api_tokens WHERE token_hash = ?", (token_hash,))
+        if not row or not hmac.compare_digest(row["token_hash"], token_hash):
+            return None
+        if not self.user_can_access_workspace(row["workspace_id"], row["user_id"]):
+            return None
+        if _is_expired(row["expires_at"]):
+            return None
+        scopes = _decode_api_token_scopes(row["scopes_json"])
+        if scopes is None:
+            return None
+        self.conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (_now(), row["id"]))
+        self._commit()
+        return {
+            "id": row["id"],
+            "workspace_id": row["workspace_id"],
+            "user_id": row["user_id"],
+            "name": row["name"],
+            "expires_at": row["expires_at"],
+            "scopes": scopes,
+        }
+
+    def list_api_tokens(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        token_owner_user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        actor_user_id = actor_user_id.strip()
+        token_owner_user_id = _token_owner_user_id(actor_user_id, token_owner_user_id)
+        self.require_workspace_access(workspace_id, actor_user_id)
+        rows = self.conn.execute(
+            """
+            SELECT id, workspace_id, user_id, name, created_at, expires_at, scopes_json, last_used_at
+            FROM api_tokens
+            WHERE workspace_id = ? AND user_id = ?
+            ORDER BY created_at DESC, name
+            """,
+            (workspace_id, token_owner_user_id),
+        )
+        tokens = []
+        policy = self._api_token_policy(workspace_id)
+        for row in rows:
+            token = dict(row)
+            token["scopes"] = _decode_api_token_scopes(token.pop("scopes_json")) or []
+            token.update(_rotation_metadata(token["created_at"], policy["rotation_due_in_days"]))
+            tokens.append(token)
+        return tokens
+
+    def revoke_api_token(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        token_id: str,
+        token_owner_user_id: str | None = None,
+    ) -> bool:
+        actor_user_id = actor_user_id.strip()
+        token_owner_user_id = _token_owner_user_id(actor_user_id, token_owner_user_id)
+        self.require_workspace_access(workspace_id, actor_user_id)
+        token_id = token_id.strip()
+        if not token_id:
+            raise ValueError("Token id is required.")
+        with self._atomic():
+            cursor = self.conn.execute(
+                "DELETE FROM api_tokens WHERE id = ? AND workspace_id = ? AND user_id = ?",
+                (token_id, workspace_id, token_owner_user_id),
+            )
+            revoked = cursor.rowcount > 0
+            if revoked:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "api_token.revoke",
+                    target_type="api_token",
+                    target_id=token_id,
+                    details={"token_owner_user_id": token_owner_user_id},
+                )
+        return revoked
+
+    def rotate_api_token(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        token_id: str,
+        token_owner_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        actor_user_id = actor_user_id.strip()
+        token_owner_user_id = _token_owner_user_id(actor_user_id, token_owner_user_id)
+        self.require_workspace_access(workspace_id, actor_user_id)
+        token_id = token_id.strip()
+        if not token_id:
+            raise ValueError("Token id is required.")
+        token = f"pit_{secrets.token_urlsafe(32)}"
+        replacement_id = f"tok_{uuid.uuid4().hex}"
+        created_at = _now()
+        policy = self._api_token_policy(workspace_id)
+        with self._atomic():
+            current = self._one(
+                """
+                SELECT id, workspace_id, user_id, name, expires_at, scopes_json
+                FROM api_tokens
+                WHERE id = ? AND workspace_id = ? AND user_id = ?
+                """,
+                (token_id, workspace_id, token_owner_user_id),
+            )
+            if not current:
+                return None
+            scopes = _decode_api_token_scopes(current["scopes_json"])
+            if scopes is None:
+                raise ValueError("Stored api token scopes are invalid.")
+            scopes = _cap_api_token_scopes_to_role(scopes, self.workspace_role(workspace_id, token_owner_user_id))
+            if not scopes:
+                raise PermissionError("api token scope not allowed for workspace role")
+            self.conn.execute(
+                """
+                INSERT INTO api_tokens (id, workspace_id, user_id, name, token_hash, created_at, expires_at, scopes_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    replacement_id,
+                    current["workspace_id"],
+                    current["user_id"],
+                    current["name"],
+                    _hash_token(token),
+                    created_at,
+                    current["expires_at"],
+                    json.dumps(scopes),
+                ),
+            )
+            self.conn.execute(
+                "DELETE FROM api_tokens WHERE id = ? AND workspace_id = ? AND user_id = ?",
+                (token_id, workspace_id, token_owner_user_id),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "api_token.rotate",
+                target_type="api_token",
+                target_id=replacement_id,
+                details={
+                    "name": current["name"],
+                    "rotated_from": token_id,
+                    "expires_at": current["expires_at"],
+                    "scopes": scopes,
+                },
+            )
+        return {
+            "id": replacement_id,
+            "workspace_id": current["workspace_id"],
+            "user_id": current["user_id"],
+            "name": current["name"],
+            "expires_at": current["expires_at"],
+            "scopes": scopes,
+            **_rotation_metadata(created_at, policy["rotation_due_in_days"]),
+            "rotated_from": token_id,
+            "token": token,
+        }
+
+    def record_audit_event(
+        self,
+        workspace_id: str | None,
+        user_id: str,
+        action: str,
+        *,
+        target_type: str,
+        target_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        event_id = self._insert_audit_event(
+            workspace_id,
+            user_id,
+            action,
+            target_type=target_type,
+            target_id=target_id,
+            details=details,
+        )
+        self._commit()
+        return event_id
+
+    def _insert_audit_event(
+        self,
+        workspace_id: str | None,
+        user_id: str,
+        action: str,
+        *,
+        target_type: str,
+        target_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        if workspace_id:
+            self._require_workspace(workspace_id)
+        user_id = user_id.strip()
+        action = action.strip()
+        target_type = target_type.strip()
+        if not user_id:
+            raise ValueError("Audit user id is required.")
+        if not action:
+            raise ValueError("Audit action is required.")
+        if not target_type:
+            raise ValueError("Audit target type is required.")
+        event_id = f"aud_{uuid.uuid4().hex}"
+        created_at = _now()
+        details_json = json.dumps(details or {}, sort_keys=True)
+        self.conn.execute(
+            """
+            INSERT INTO audit_events (
+              id, workspace_id, user_id, action, target_type, target_id, details_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                workspace_id,
+                user_id,
+                action,
+                target_type,
+                target_id,
+                details_json,
+                created_at,
+            ),
+        )
+        self._pending_audit_sink_events.append(
+            {
+                "id": event_id,
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "action": action,
+                "target_type": target_type,
+                "target_id": target_id,
+                "details": json.loads(details_json),
+                "created_at": created_at,
+            }
+        )
+        return event_id
+
+    def _flush_audit_sink_events(self) -> None:
+        events = self._pending_audit_sink_events
+        self._pending_audit_sink_events = []
+        try:
+            sink_path = _audit_sink_path(self.root)
+            if not sink_path or not events:
+                return
+            sink_path.parent.mkdir(parents=True, exist_ok=True)
+            with sink_path.open("a", encoding="utf-8") as sink:
+                for event in events:
+                    sink.write(json.dumps(_redact_audit_sink_event(event), sort_keys=True) + "\n")
+        except OSError:
+            return
+
+    def list_audit_events(
+        self,
+        workspace_id: str,
+        user_id: str,
+        limit: int = 100,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        action: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.require_workspace_role(workspace_id, user_id, {"owner", "admin"})
+        limit = max(1, min(int(limit), 500))
+        since = _normalize_datetime_filter(since, "since")
+        until = _normalize_datetime_filter(until, "until")
+        if since and until and since > until:
+            raise ValueError("since must be before until")
+        action = action.strip() if action else None
+        where = ["workspace_id = ?"]
+        args: list[Any] = [workspace_id]
+        if since:
+            where.append("created_at >= ?")
+            args.append(since)
+        if until:
+            where.append("created_at <= ?")
+            args.append(until)
+        if action:
+            where.append("action = ?")
+            args.append(action)
+        args.append(limit)
+        rows = self.conn.execute(
+            f"""
+            SELECT *
+            FROM audit_events
+            WHERE {' AND '.join(where)}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            args,
+        )
+        events = []
+        for row in rows:
+            event = dict(row)
+            event["details"] = json.loads(event.pop("details_json"))
+            events.append(event)
+        return events
+
+    def export_audit_events(
+        self,
+        workspace_id: str,
+        user_id: str,
+        limit: int = 500,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        action: str | None = None,
+        format: str = "jsonl",
+    ) -> str:
+        events = self.list_audit_events(
+            workspace_id,
+            user_id,
+            limit=limit,
+            since=since,
+            until=until,
+            action=action,
+        )
+        ordered = list(reversed(events))
+        export_format = format.strip().casefold()
+        if export_format == "jsonl":
+            return "\n".join(json.dumps(event, sort_keys=True) for event in ordered)
+        if export_format == "csv":
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(["id", "workspace_id", "user_id", "action", "target_type", "target_id", "created_at", "details_json"])
+            for event in ordered:
+                writer.writerow(
+                    [
+                        event["id"],
+                        event["workspace_id"],
+                        event["user_id"],
+                        event["action"],
+                        event["target_type"],
+                        event["target_id"] or "",
+                        event["created_at"],
+                        json.dumps(event["details"], sort_keys=True),
+                    ]
+                )
+            return output.getvalue()
+        raise ValueError("format must be jsonl or csv")
+
+    def export_workspace_bundle(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        output_path: str | Path,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        output = Path(output_path).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        workspace = dict(self._one("SELECT id, name, created_at FROM workspaces WHERE id = ?", (workspace_id,)))
+        documents = _rows(self.conn.execute(
+            """
+            SELECT id, workspace_id, folder_id, name, description, kind,
+                   page_count, line_count, created_at, updated_at
+            FROM documents
+            WHERE workspace_id = ?
+            ORDER BY created_at, id
+            """,
+            (workspace_id,),
+        ))
+        exports: dict[str, list[dict[str, Any]]] = {
+            "workspace.jsonl": [workspace],
+            "workspace_members.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT workspace_id, user_id, role, created_at
+                    FROM workspace_members
+                    WHERE workspace_id = ?
+                    ORDER BY user_id
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "folders.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT id, workspace_id, parent_id, name, path, created_at
+                    FROM folders
+                    WHERE workspace_id = ?
+                    ORDER BY path
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "documents.jsonl": documents,
+            "document_pages.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT p.doc_id, p.page, p.content
+                    FROM document_pages p
+                    JOIN documents d ON d.id = p.doc_id
+                    WHERE d.workspace_id = ?
+                    ORDER BY p.doc_id, p.page
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "document_versions.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT id, doc_id, workspace_id, version, action, actor_user_id,
+                           name, kind, source_name, page_count, line_count, created_at
+                    FROM document_versions
+                    WHERE workspace_id = ?
+                    ORDER BY doc_id, version
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "conversations.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT id, workspace_id, created_by, title, created_at, updated_at
+                    FROM conversations
+                    WHERE workspace_id = ?
+                    ORDER BY created_at, id
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "conversation_messages.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT id, conversation_id, workspace_id, user_id, role, content, run_id, created_at
+                    FROM conversation_messages
+                    WHERE workspace_id = ?
+                    ORDER BY conversation_id, created_at, id
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "query_runs.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT id, workspace_id, query, scope_json, created_at, completed_at
+                    FROM query_runs
+                    WHERE workspace_id = ?
+                    ORDER BY created_at, id
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "evidence.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT e.id, e.run_id, e.doc_id, e.node_id, e.page_start, e.page_end,
+                           e.text, e.reason, e.score, e.created_at
+                    FROM evidence e
+                    JOIN query_runs q ON q.id = e.run_id
+                    WHERE q.workspace_id = ?
+                    ORDER BY e.run_id, e.created_at, e.id
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "citations.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT c.id, c.run_id, c.evidence_id, c.doc_id, c.label,
+                           c.page_start, c.page_end, c.created_at
+                    FROM citations c
+                    JOIN query_runs q ON q.id = c.run_id
+                    WHERE q.workspace_id = ?
+                    ORDER BY c.run_id, c.created_at, c.id
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "virtual_nodes.jsonl": self.list_virtual_nodes(workspace_id=workspace_id),
+            "api_token_policy.jsonl": [self._api_token_policy(workspace_id)],
+            "audit_retention_policy.jsonl": [self._audit_retention_policy(workspace_id)],
+            "provider_config.jsonl": [self._workspace_provider_config_metadata(workspace_id)],
+            "audit_events.jsonl": _workspace_audit_export_rows(self.conn, workspace_id),
+        }
+        manifest = {
+            "format": "pageindex.workspace-export.v1",
+            "workspace_id": workspace_id,
+            "exported_at": _now(),
+            "artifact": output.name,
+            "tables": {name.removesuffix(".jsonl"): len(rows) for name, rows in exports.items()},
+            "omitted": ["api_tokens", "document filesystem paths"],
+        }
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            for name, rows in exports.items():
+                archive.writestr(name, _jsonl(rows))
+        with self._atomic():
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "workspace.export",
+                target_type="workspace",
+                target_id=workspace_id,
+                details={
+                    "artifact": output.name,
+                    "format": manifest["format"],
+                    "tables": manifest["tables"],
+                },
+            )
+        return manifest
+
+    def _audit_retention_policy(self, workspace_id: str) -> dict[str, Any]:
+        self._require_workspace(workspace_id)
+        row = self._one(
+            """
+            SELECT workspace_id, retention_days, updated_at, updated_by
+            FROM audit_retention_policies
+            WHERE workspace_id = ?
+            """,
+            (workspace_id,),
+        )
+        if not row:
+            return {
+                "workspace_id": workspace_id,
+                "retention_days": None,
+                "updated_at": None,
+                "updated_by": None,
+            }
+        return dict(row)
+
+    def get_audit_retention_policy(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        return self._audit_retention_policy(workspace_id)
+
+    def set_audit_retention_policy(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        *,
+        retention_days: int | None,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        retention_days = _normalize_policy_days(retention_days, "retention_days")
+        updated_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO audit_retention_policies (
+                  workspace_id, retention_days, updated_at, updated_by
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET
+                  retention_days = excluded.retention_days,
+                  updated_at = excluded.updated_at,
+                  updated_by = excluded.updated_by
+                """,
+                (workspace_id, retention_days, updated_at, actor_user_id.strip()),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "audit.retention_policy_update",
+                target_type="audit_retention_policy",
+                target_id=workspace_id,
+                details={"retention_days": retention_days},
+            )
+        return self._audit_retention_policy(workspace_id)
+
+    def purge_audit_events_by_retention(self, workspace_id: str, actor_user_id: str, *, dry_run: bool = False) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        policy = self._audit_retention_policy(workspace_id)
+        retention_days = policy["retention_days"]
+        if retention_days is None:
+            raise ValueError("audit retention policy is not set")
+        cutoff = (_now_dt() - timedelta(days=retention_days)).isoformat()
+        if dry_run:
+            matched = int(
+                self.conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM audit_events
+                    WHERE workspace_id = ? AND created_at < ?
+                    """,
+                    (workspace_id, cutoff),
+                ).fetchone()["count"]
+            )
+            return {
+                "workspace_id": workspace_id,
+                "retention_days": retention_days,
+                "cutoff": cutoff,
+                "matched": matched,
+                "purged": 0,
+                "dry_run": True,
+            }
+        with self._atomic():
+            deleted = self.conn.execute(
+                """
+                DELETE FROM audit_events
+                WHERE workspace_id = ? AND created_at < ?
+                """,
+                (workspace_id, cutoff),
+            )
+            purged = max(0, deleted.rowcount)
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "audit.retention_purge",
+                target_type="audit_retention_policy",
+                target_id=workspace_id,
+                details={
+                    "retention_days": retention_days,
+                    "cutoff": cutoff,
+                    "purged": purged,
+                },
+            )
+        result = {
+            "workspace_id": workspace_id,
+            "retention_days": retention_days,
+            "cutoff": cutoff,
+            "matched": purged,
+            "purged": purged,
+            "dry_run": False,
+        }
+        return result
+
+    def _conversation_for_actor(
+        self,
+        conversation_id: str,
+        actor_user_id: str,
+        *,
+        expected_workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        actor_user_id = actor_user_id.strip()
+        conversation_id = conversation_id.strip()
+        if not conversation_id:
+            raise ValueError("Conversation id is required.")
+        row = self._one("SELECT * FROM conversations WHERE id = ?", (conversation_id,))
+        if not row:
+            raise ValueError(f"Conversation not found: {conversation_id}")
+        conversation = dict(row)
+        if expected_workspace_id and conversation["workspace_id"] != expected_workspace_id:
+            raise PermissionError("conversation access denied")
+        self.require_workspace_access(conversation["workspace_id"], actor_user_id)
+        if conversation["created_by"] != actor_user_id:
+            raise PermissionError("conversation access denied")
+        return conversation
+
+    def _require_workspace(self, workspace_id: str | None) -> None:
+        if workspace_id and self._one("SELECT id FROM workspaces WHERE id = ?", (workspace_id,)):
+            return
+        raise ValueError(f"Workspace not found: {workspace_id}")
+
+    def create_folder(
+        self,
+        name: str,
+        parent_id: str | None = None,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> str:
+        name = name.strip()
+        if not name or "/" in name:
+            raise ValueError("Folder name must be non-empty and must not contain '/'.")
+        folder_id = f"fld_{uuid.uuid4().hex}"
+        parent_path = ""
+        if parent_id:
+            parent = self._one("SELECT path, workspace_id FROM folders WHERE id = ?", (parent_id,))
+            if not parent:
+                raise ValueError(f"Parent folder not found: {parent_id}")
+            if workspace_id and parent["workspace_id"] != workspace_id:
+                raise PermissionError("folder access denied")
+            workspace_id = workspace_id or parent["workspace_id"]
+            parent_path = parent["path"]
+        self.require_workspace_write(workspace_id, actor_user_id)
+        path = f"{parent_path}/{name}" if parent_path else f"/{name}"
+        existing = self._one(
+            """
+            SELECT id
+            FROM folders
+            WHERE path = ? AND (workspace_id = ? OR (workspace_id IS NULL AND ? IS NULL))
+            """,
+            (path, workspace_id, workspace_id),
+        )
+        if existing:
+            raise ValueError("Folder path already exists in this workspace.")
+        try:
+            self.conn.execute(
+                "INSERT INTO folders (id, workspace_id, parent_id, name, path, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (folder_id, workspace_id, parent_id, name, path, _now()),
+            )
+            self._commit()
+        except sqlite3.IntegrityError as exc:
+            self.conn.rollback()
+            message = str(exc).casefold()
+            if "folders" in message and "path" in message:
+                raise ValueError("Folder path already exists in this workspace.") from exc
+            raise
+        return folder_id
+
+    def list_folders(self, workspace_id: str | None = None) -> list[dict[str, Any]]:
+        if workspace_id:
+            rows = self.conn.execute("SELECT * FROM folders WHERE workspace_id = ? ORDER BY path", (workspace_id,))
+        else:
+            rows = self.conn.execute("SELECT * FROM folders ORDER BY path")
+        return [dict(row) for row in rows]
+
+    def register_document(
+        self,
+        *,
+        doc_id: str | None = None,
+        name: str,
+        source_path: str,
+        kind: str,
+        description: str = "",
+        folder_id: str | None = None,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+        page_count: int | None = None,
+        line_count: int | None = None,
+    ) -> str:
+        if folder_id:
+            folder = self._one("SELECT id, workspace_id FROM folders WHERE id = ?", (folder_id,))
+            if not folder:
+                raise ValueError(f"Folder not found: {folder_id}")
+            if workspace_id and folder["workspace_id"] != workspace_id:
+                raise PermissionError("folder access denied")
+            workspace_id = workspace_id or folder["workspace_id"]
+        self.require_workspace_write(workspace_id, actor_user_id)
+        if not name.strip():
+            raise ValueError("Document name is required.")
+        if kind not in {"pdf", "md", "markdown", "txt", "unknown"}:
+            raise ValueError(f"Unsupported document kind: {kind}")
+        doc_id = doc_id or f"doc_{uuid.uuid4().hex}"
+        if "/" in doc_id or "%" in doc_id:
+            raise ValueError("doc_id must be URL-safe")
+        existing = self.get_document(doc_id)
+        if existing and existing["workspace_id"] and existing["workspace_id"] != workspace_id:
+            raise ValueError("Document belongs to another workspace.")
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO documents (
+              id, workspace_id, folder_id, name, description, source_path, kind,
+              page_count, line_count, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              workspace_id = excluded.workspace_id,
+              folder_id = excluded.folder_id,
+              name = excluded.name,
+              description = excluded.description,
+              source_path = excluded.source_path,
+              kind = excluded.kind,
+              page_count = excluded.page_count,
+              line_count = excluded.line_count,
+              updated_at = excluded.updated_at
+            """,
+            (
+                doc_id,
+                workspace_id,
+                folder_id,
+                name.strip(),
+                description.strip(),
+                str(Path(source_path).expanduser()),
+                kind,
+                page_count,
+                line_count,
+                now,
+                now,
+            ),
+        )
+        self._commit()
+        return doc_id
+
+    def ingest_file(
+        self,
+        file_path: str | Path,
+        *,
+        folder_id: str | None = None,
+        doc_id: str | None = None,
+        name: str | None = None,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+        audit_action: str = "document.ingest",
+        audit_details: dict[str, Any] | None = None,
+    ) -> str:
+        path = Path(file_path).expanduser().resolve()
+        if not path.exists():
+            raise FileNotFoundError(path)
+        self.require_workspace_write(workspace_id, actor_user_id)
+        pages = _extract_pages(path)
+        kind = _kind_for(path)
+        existing_doc_id = doc_id.strip() if doc_id else None
+        existing = self.get_document(existing_doc_id) if existing_doc_id else None
+        if existing and existing["workspace_id"] and existing["workspace_id"] != workspace_id:
+            raise ValueError("Document belongs to another workspace.")
+        with self._atomic():
+            if existing:
+                self._purge_document_index(existing["id"])
+            version_action = audit_action
+            doc_id = self.register_document(
+                doc_id=doc_id,
+                name=name or path.name,
+                source_path=str(path),
+                kind=kind,
+                description=_summarize_pages(pages),
+                folder_id=folder_id,
+                workspace_id=workspace_id,
+                actor_user_id=actor_user_id,
+                page_count=len(pages) if kind == "pdf" else None,
+                line_count=sum(page.count("\n") + 1 for page in pages) if kind != "pdf" else None,
+            )
+            self.put_pages(doc_id, pages)
+            document = self.get_document(doc_id)
+            if document:
+                self._insert_document_version(document, action=version_action, actor_user_id=actor_user_id)
+            if actor_user_id and workspace_id:
+                details = {"kind": kind, "name": name or path.name}
+                if audit_details:
+                    details.update(audit_details)
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    audit_action,
+                    target_type="document",
+                    target_id=doc_id,
+                    details=details,
+                )
+        return doc_id
+
+    def _insert_document_version(
+        self,
+        document: dict[str, Any],
+        *,
+        action: str,
+        actor_user_id: str | None,
+    ) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM document_versions WHERE doc_id = ?",
+            (document["id"],),
+        ).fetchone()
+        version = int(row["version"])
+        created_at = _now()
+        version_id = f"docver_{uuid.uuid4().hex}"
+        source_name = Path(str(document["source_path"])).name
+        self.conn.execute(
+            """
+            INSERT INTO document_versions (
+              id, doc_id, workspace_id, version, action, actor_user_id, name,
+              kind, source_name, page_count, line_count, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                version_id,
+                document["id"],
+                document["workspace_id"],
+                version,
+                action,
+                actor_user_id,
+                document["name"],
+                document["kind"],
+                source_name,
+                document["page_count"],
+                document["line_count"],
+                created_at,
+            ),
+        )
+        return {
+            "id": version_id,
+            "doc_id": document["id"],
+            "workspace_id": document["workspace_id"],
+            "version": version,
+            "action": action,
+            "actor_user_id": actor_user_id,
+            "name": document["name"],
+            "kind": document["kind"],
+            "source_name": source_name,
+            "page_count": document["page_count"],
+            "line_count": document["line_count"],
+            "created_at": created_at,
+        }
+
+    def list_document_versions(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        doc_id = doc_id.strip()
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        document = self.get_document(doc_id)
+        if not document:
+            return []
+        if workspace_id and document["workspace_id"] != workspace_id:
+            return []
+        if document["workspace_id"]:
+            if not actor_user_id:
+                raise PermissionError("workspace access denied")
+            self.require_workspace_access(document["workspace_id"], actor_user_id)
+        rows = self.conn.execute(
+            """
+            SELECT id, doc_id, workspace_id, version, action, actor_user_id, name,
+                   kind, source_name, page_count, line_count, created_at
+            FROM document_versions
+            WHERE doc_id = ?
+            ORDER BY version DESC
+            LIMIT ?
+            """,
+            (doc_id, limit),
+        )
+        return [dict(row) for row in rows]
+
+    def list_document_pages(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        max_chars: int = 4000,
+    ) -> dict[str, Any]:
+        doc_id = doc_id.strip()
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        document = self.get_document(doc_id)
+        if not document:
+            return {"doc_id": doc_id, "pages": [], "total_pages": 0}
+        if workspace_id and document["workspace_id"] != workspace_id:
+            return {"doc_id": doc_id, "pages": [], "total_pages": 0}
+        if document["workspace_id"]:
+            if not actor_user_id:
+                raise PermissionError("workspace access denied")
+            self.require_workspace_access(document["workspace_id"], actor_user_id)
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+        max_chars = max(200, min(int(max_chars), 20000))
+        total_pages = int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS count FROM document_pages WHERE doc_id = ?",
+                (doc_id,),
+            ).fetchone()["count"]
+        )
+        rows = self.conn.execute(
+            """
+            SELECT page, content
+            FROM document_pages
+            WHERE doc_id = ?
+            ORDER BY page
+            LIMIT ? OFFSET ?
+            """,
+            (doc_id, limit, offset),
+        )
+        pages = []
+        for row in rows:
+            content = row["content"]
+            truncated = len(content) > max_chars
+            pages.append(
+                {
+                    "page": row["page"],
+                    "content": content[:max_chars],
+                    "truncated": truncated,
+                }
+            )
+        return {"doc_id": doc_id, "pages": pages, "total_pages": total_pages}
+
+    def reindex_document_file(
+        self,
+        doc_id: str,
+        file_path: str | Path,
+        *,
+        name: str | None = None,
+        folder_id: str | None = None,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        doc_id = doc_id.strip()
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        document = self.get_document(doc_id)
+        if not document:
+            return None
+        if workspace_id and document["workspace_id"] != workspace_id:
+            return None
+        self.require_workspace_write(document["workspace_id"], actor_user_id)
+        replacement_name = document["name"] if name is None else name.strip()
+        if not replacement_name:
+            raise ValueError("Document name is required.")
+        target_folder_id = document["folder_id"] if folder_id is None else folder_id
+        updated_id = self.ingest_file(
+            file_path,
+            folder_id=target_folder_id,
+            doc_id=doc_id,
+            name=replacement_name,
+            workspace_id=document["workspace_id"],
+            actor_user_id=actor_user_id,
+            audit_action="document.reindex",
+            audit_details={"previous_kind": document["kind"]},
+        )
+        return self.get_document(updated_id)
+
+    def put_pages(self, doc_id: str, pages: list[str]) -> None:
+        if not self.get_document(doc_id):
+            raise ValueError(f"Document not found: {doc_id}")
+        self.conn.execute("DELETE FROM document_pages WHERE doc_id = ?", (doc_id,))
+        self.conn.executemany(
+            "INSERT INTO document_pages (doc_id, page, content) VALUES (?, ?, ?)",
+            [(doc_id, i + 1, content) for i, content in enumerate(pages)],
+        )
+        self._commit()
+
+    def _purge_document_index(self, doc_id: str) -> None:
+        self.conn.execute("DELETE FROM citations WHERE doc_id = ?", (doc_id,))
+        self.conn.execute("DELETE FROM evidence WHERE doc_id = ?", (doc_id,))
+        self.conn.execute("DELETE FROM virtual_node_docs WHERE doc_id = ?", (doc_id,))
+        self.conn.execute("DELETE FROM virtual_nodes WHERE doc_id = ?", (doc_id,))
+        self.conn.execute("DELETE FROM document_pages WHERE doc_id = ?", (doc_id,))
+
+    def get_document(self, doc_id: str) -> dict[str, Any] | None:
+        row = self._one("SELECT * FROM documents WHERE id = ?", (doc_id,))
+        return dict(row) if row else None
+
+    def list_documents(
+        self,
+        folder_id: str | None = None,
+        workspace_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        if folder_id and workspace_id:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM documents
+                WHERE folder_id = ? AND workspace_id = ?
+                ORDER BY created_at DESC LIMIT ? OFFSET ?
+                """,
+                (folder_id, workspace_id, limit, offset),
+            )
+        elif folder_id:
+            rows = self.conn.execute(
+                "SELECT * FROM documents WHERE folder_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (folder_id, limit, offset),
+            )
+        elif workspace_id:
+            rows = self.conn.execute(
+                "SELECT * FROM documents WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (workspace_id, limit, offset),
+            )
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM documents ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            )
+        return [dict(row) for row in rows]
+
+    def delete_document(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> bool:
+        doc_id = doc_id.strip()
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        document = self.get_document(doc_id)
+        if not document:
+            return False
+        if workspace_id and document["workspace_id"] != workspace_id:
+            return False
+        self.require_workspace_write(document["workspace_id"], actor_user_id)
+        with self._atomic():
+            cursor = self.conn.execute(
+                "DELETE FROM documents WHERE id = ?",
+                (doc_id,),
+            )
+            deleted = cursor.rowcount > 0
+            if deleted and actor_user_id and document["workspace_id"]:
+                self._insert_audit_event(
+                    document["workspace_id"],
+                    actor_user_id,
+                    "document.delete",
+                    target_type="document",
+                    target_id=doc_id,
+                    details={"name": document["name"], "kind": document["kind"]},
+                )
+        return deleted
+
+    def create_conversation(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        actor_user_id = actor_user_id.strip()
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_WRITE_ROLES)
+        title = (title or "New conversation").strip() or "New conversation"
+        conversation_id = f"conv_{uuid.uuid4().hex}"
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO conversations (id, workspace_id, created_by, title, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (conversation_id, workspace_id, actor_user_id, title, now, now),
+        )
+        self._commit()
+        return {
+            "id": conversation_id,
+            "workspace_id": workspace_id,
+            "created_by": actor_user_id,
+            "title": title,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def list_conversations(self, workspace_id: str, actor_user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        actor_user_id = actor_user_id.strip()
+        self.require_workspace_access(workspace_id, actor_user_id)
+        limit = max(1, min(int(limit), 100))
+        rows = self.conn.execute(
+            """
+            SELECT c.*,
+                   COUNT(m.id) AS message_count
+            FROM conversations c
+            LEFT JOIN conversation_messages m ON m.conversation_id = c.id
+            WHERE c.workspace_id = ? AND c.created_by = ?
+            GROUP BY c.id
+            ORDER BY c.updated_at DESC, c.created_at DESC
+            LIMIT ?
+            """,
+            (workspace_id, actor_user_id, limit),
+        )
+        return [dict(row) for row in rows]
+
+    def list_conversation_messages(
+        self,
+        conversation_id: str,
+        actor_user_id: str,
+        limit: int = 100,
+        expected_workspace_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        conversation = self._conversation_for_actor(
+            conversation_id,
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+        )
+        limit = max(1, min(int(limit), 500))
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM conversation_messages
+            WHERE conversation_id = ?
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?
+            """,
+            (conversation["id"], limit),
+        )
+        return [dict(row) for row in rows]
+
+    def export_conversation_transcript(
+        self,
+        conversation_id: str,
+        actor_user_id: str,
+        *,
+        format: str = "jsonl",
+        limit: int = 500,
+        expected_workspace_id: str | None = None,
+    ) -> str:
+        conversation = self._conversation_for_actor(
+            conversation_id,
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+        )
+        limit = max(1, min(int(limit), 1000))
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM conversation_messages
+            WHERE conversation_id = ?
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?
+            """,
+            (conversation["id"], limit),
+        )
+        messages = [dict(row) for row in rows]
+        export_format = format.strip().casefold()
+        if export_format == "md":
+            export_format = "markdown"
+        if export_format == "jsonl":
+            transcript = _conversation_transcript_jsonl(conversation, messages)
+        elif export_format == "markdown":
+            transcript = _conversation_transcript_markdown(conversation, messages)
+        else:
+            raise ValueError("format must be jsonl or markdown")
+        self._insert_audit_event(
+            conversation["workspace_id"],
+            actor_user_id,
+            "conversation.export",
+            target_type="conversation",
+            target_id=conversation["id"],
+            details={"format": export_format, "message_count": len(messages)},
+        )
+        self._commit()
+        return transcript
+
+    def chat_message(
+        self,
+        conversation_id: str,
+        actor_user_id: str,
+        message: str,
+        *,
+        doc_ids: list[str] | None = None,
+        expert_hints: list[str] | None = None,
+        limit: int = 8,
+        expected_workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        actor_user_id = actor_user_id.strip()
+        message = message.strip()
+        if not message:
+            raise ValueError("message is required")
+        if len(message) > MAX_CONVERSATION_MESSAGE_CHARS:
+            raise ValueError("message is too large")
+        conversation = self._conversation_for_actor(
+            conversation_id,
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+        )
+        self.require_workspace_role(conversation["workspace_id"], actor_user_id, WORKSPACE_WRITE_ROLES)
+        history_rows = self.conn.execute(
+            """
+            SELECT content
+            FROM conversation_messages
+            WHERE conversation_id = ? AND role = 'user'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 3
+            """,
+            (conversation["id"],),
+        ).fetchall()
+        history = [row["content"] for row in reversed(history_rows)]
+        retrieval_query = _conversation_query_text(message, history)
+        now = _now()
+        user_message = {
+            "id": f"msg_{uuid.uuid4().hex}",
+            "conversation_id": conversation["id"],
+            "workspace_id": conversation["workspace_id"],
+            "user_id": actor_user_id,
+            "role": "user",
+            "content": message,
+            "run_id": None,
+            "created_at": now,
+        }
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO conversation_messages
+                  (id, conversation_id, workspace_id, user_id, role, content, run_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_message["id"],
+                    user_message["conversation_id"],
+                    user_message["workspace_id"],
+                    user_message["user_id"],
+                    user_message["role"],
+                    user_message["content"],
+                    user_message["run_id"],
+                    user_message["created_at"],
+                ),
+            )
+            result = self.query_corpus(
+                retrieval_query,
+                doc_ids=doc_ids,
+                expert_hints=expert_hints,
+                workspace_id=conversation["workspace_id"],
+                limit=limit,
+                actor_user_id=actor_user_id,
+                scope_extra={
+                    "conversation": {
+                        "id": conversation["id"],
+                        "user_message_id": user_message["id"],
+                        "history_user_message_count": len(history),
+                    }
+                },
+                stored_query=CHAT_TRACE_QUERY,
+                redact_query_tree=True,
+            )
+            assistant_message = {
+                "id": f"msg_{uuid.uuid4().hex}",
+                "conversation_id": conversation["id"],
+                "workspace_id": conversation["workspace_id"],
+                "user_id": actor_user_id,
+                "role": "assistant",
+                "content": result["answer"],
+                "run_id": result["run_id"],
+                "created_at": _now(),
+            }
+            self.conn.execute(
+                """
+                INSERT INTO conversation_messages
+                  (id, conversation_id, workspace_id, user_id, role, content, run_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    assistant_message["id"],
+                    assistant_message["conversation_id"],
+                    assistant_message["workspace_id"],
+                    assistant_message["user_id"],
+                    assistant_message["role"],
+                    assistant_message["content"],
+                    assistant_message["run_id"],
+                    assistant_message["created_at"],
+                ),
+            )
+            self.conn.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (assistant_message["created_at"], conversation["id"]),
+            )
+            conversation["updated_at"] = assistant_message["created_at"]
+        return {
+            "conversation": conversation,
+            "user_message": user_message,
+            "assistant_message": assistant_message,
+            "retrieval": {
+                "query": retrieval_query,
+                "history_user_messages": history,
+            },
+            "result": result,
+        }
+
+    def search_documents(self, query: str, limit: int = 20, workspace_id: str | None = None) -> list[dict[str, Any]]:
+        terms = [t.casefold() for t in query.split() if t.strip()]
+        if not terms:
+            return []
+        haystack_sql = "lower(name || ' ' || description || ' ' || source_path)"
+        where = " AND ".join([f"{haystack_sql} LIKE ? ESCAPE '\\'" for _ in terms])
+        patterns = [f"%{_escape_like(term)}%" for term in terms]
+        if workspace_id:
+            where = f"workspace_id = ? AND {where}"
+            patterns.insert(0, workspace_id)
+        rows = self.conn.execute(
+            f"SELECT * FROM documents WHERE {where}",
+            patterns,
+        )
+        scored = []
+        for row in rows:
+            doc = dict(row)
+            haystack = f"{doc['name']} {doc['description']} {doc['source_path']}".casefold()
+            doc["score"] = sum(haystack.count(term) for term in terms)
+            scored.append(doc)
+        scored.sort(key=lambda d: (-d["score"], d["name"]))
+        return scored[:limit]
+
+    def retrieve_pages(
+        self,
+        query: str,
+        *,
+        doc_ids: list[str] | None = None,
+        expert_hints: list[str] | None = None,
+        workspace_id: str | None = None,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        terms = _terms_for(query, expert_hints)
+        if not terms:
+            return []
+        haystack_sql = "lower(d.name || ' ' || d.description || ' ' || p.content)"
+        term_where = " OR ".join([f"{haystack_sql} LIKE ? ESCAPE '\\'" for _ in terms])
+        args: list[Any] = [f"%{_escape_like(term)}%" for term in terms]
+        where_parts = [f"({term_where})"]
+        if doc_ids:
+            where_parts.append(f"d.id IN ({','.join('?' for _ in doc_ids)})")
+            args.extend(doc_ids)
+        if workspace_id:
+            where_parts.append("d.workspace_id = ?")
+            args.append(workspace_id)
+        rows = self.conn.execute(
+            f"""
+            SELECT d.id AS doc_id, d.name AS doc_name, d.page_count, p.page, p.content
+            FROM document_pages p
+            JOIN documents d ON d.id = p.doc_id
+            WHERE {' AND '.join(where_parts)}
+            """,
+            args,
+        )
+        hits = []
+        for row in rows:
+            hit = dict(row)
+            haystack = f"{hit['doc_name']} {hit['content']}".casefold()
+            hit["score"] = sum(haystack.count(term) for term in terms)
+            if hit["score"]:
+                hits.append(hit)
+        hits.sort(key=lambda h: (-h["score"], h["doc_name"], h["page"]))
+        return hits[:limit]
+
+    def query_corpus(
+        self,
+        query: str,
+        *,
+        doc_ids: list[str] | None = None,
+        expert_hints: list[str] | None = None,
+        workspace_id: str | None = None,
+        limit: int = 8,
+        actor_user_id: str | None = None,
+        scope_extra: dict[str, Any] | None = None,
+        stored_query: str | None = None,
+        redact_query_tree: bool = False,
+    ) -> dict[str, Any]:
+        if actor_user_id and workspace_id:
+            self.require_workspace_access(workspace_id, actor_user_id)
+        search = self.hybrid_search(
+            query,
+            doc_ids=doc_ids,
+            expert_hints=expert_hints,
+            workspace_id=workspace_id,
+            limit=limit,
+        )
+        with self._atomic():
+            query_tree = search["query_tree"]
+            if redact_query_tree:
+                query_tree = {**query_tree, "query": CHAT_TRACE_QUERY}
+            scope = {
+                "doc_ids": doc_ids or [],
+                "workspace_id": workspace_id,
+                "expert_hints": search["expert_hints"],
+                "hint_safety": search["hint_safety"],
+                "query_tree": query_tree,
+                "hybrid_policy": search["policy"],
+            }
+            if scope_extra:
+                scope.update(scope_extra)
+            run_id = self.start_query(stored_query or query, scope, workspace_id=workspace_id)
+            hits = search["hits"]
+            citations = []
+            for hit in hits:
+                evidence_id = self.add_evidence(
+                    run_id=run_id,
+                    doc_id=hit["doc_id"],
+                    node_id=hit["node_id"],
+                    page_start=hit["page_start"],
+                    page_end=hit["page_end"],
+                    text=hit["content"],
+                    reason=hit["reason"],
+                    score=hit["score"],
+                )
+                citations.append(self.add_citation(run_id=run_id, evidence_id=evidence_id))
+            self.finish_query(run_id)
+            trace = self.get_trace(run_id)
+            verification = self.verify_trace(run_id)
+            if actor_user_id and workspace_id:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "query.run",
+                    target_type="query_run",
+                    target_id=run_id,
+                    details={"citation_count": len(citations), "evidence_count": len(hits)},
+                )
+        return {
+            "run_id": run_id,
+            "answer": _synthesize_answer(hits),
+            "citations": citations,
+            "query_tree": search["query_tree"],
+            "hybrid_search": search,
+            "trace": trace,
+            "verification": verification,
+        }
+
+    def import_pageindex_structure(
+        self,
+        structure_path: str | Path,
+        *,
+        doc_id: str | None = None,
+        folder_id: str | None = None,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> str:
+        path = Path(structure_path).expanduser().resolve()
+        self.require_workspace_write(workspace_id, actor_user_id)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        structure = data.get("structure")
+        if not isinstance(structure, list):
+            raise ValueError("PageIndex structure JSON must contain a list field named 'structure'.")
+        doc_name = str(data.get("doc_name") or path.stem).strip()
+        description = str(data.get("doc_description") or "").strip()
+        page_count = _max_end_index(structure)
+        existing_doc_id = doc_id.strip() if doc_id else None
+        existing = self.get_document(existing_doc_id) if existing_doc_id else None
+        if existing and existing["workspace_id"] and existing["workspace_id"] != workspace_id:
+            raise ValueError("Document belongs to another workspace.")
+        with self._atomic():
+            if existing:
+                self._purge_document_index(existing["id"])
+            doc_id = self.register_document(
+                doc_id=doc_id,
+                name=doc_name,
+                source_path=str(path),
+                kind=_kind_for(Path(doc_name)),
+                description=description,
+                folder_id=folder_id,
+                workspace_id=workspace_id,
+                actor_user_id=actor_user_id,
+                page_count=page_count,
+            )
+            self.conn.execute("DELETE FROM virtual_nodes WHERE axis = 'section' AND doc_id = ?", (doc_id,))
+            root_id = self._ensure_virtual_node(
+                axis="section",
+                label=doc_name,
+                path=f"/virtual/doc/{doc_id}",
+                summary=description,
+                doc_id=doc_id,
+                source_node_id="root",
+                page_start=1 if page_count else None,
+                page_end=page_count,
+            )
+            self._attach_virtual_doc(root_id, doc_id, "document root", 1.0)
+            self._import_structure_nodes(doc_id, structure, root_id, f"/virtual/doc/{doc_id}", ())
+            self._commit()
+            if actor_user_id and workspace_id:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "document.import_structure",
+                    target_type="document",
+                    target_id=doc_id,
+                    details={"name": doc_name},
+                )
+        return doc_id
+
+    def rebuild_virtual_index(self) -> None:
+        self._delete_virtual_axis("kind")
+        self._delete_virtual_axis("folder")
+        docs = self.list_documents(limit=100000)
+        folders = {row["id"]: row["path"] for row in self.conn.execute("SELECT id, path FROM folders")}
+        kind_root = self._ensure_virtual_node(axis="kind", label="By kind", path="/virtual/by-kind")
+        folder_root = self._ensure_virtual_node(axis="folder", label="By folder", path="/virtual/by-folder")
+        for doc in docs:
+            kind = doc["kind"] or "unknown"
+            kind_node = self._ensure_virtual_node(
+                axis="kind",
+                label=kind,
+                path=f"/virtual/by-kind/{kind}",
+                parent_id=kind_root,
+                summary=f"Documents with kind {kind}",
+            )
+            self._attach_virtual_doc(kind_node, doc["id"], f"document kind is {kind}", 1.0)
+            folder_path = folders.get(doc["folder_id"], "/root")
+            doc_folder_root = folder_root
+            virtual_folder_prefix = "/virtual/by-folder"
+            if doc["workspace_id"]:
+                workspace_root = self._ensure_virtual_node(
+                    axis="folder",
+                    label=doc["workspace_id"],
+                    path=f"/virtual/by-workspace/{doc['workspace_id']}",
+                    parent_id=folder_root,
+                    summary=f"Workspace {doc['workspace_id']}",
+                )
+                doc_folder_root = self._ensure_virtual_node(
+                    axis="folder",
+                    label="By folder",
+                    path=f"/virtual/by-workspace/{doc['workspace_id']}/by-folder",
+                    parent_id=workspace_root,
+                    summary=f"Folders in workspace {doc['workspace_id']}",
+                )
+                virtual_folder_prefix = f"/virtual/by-workspace/{doc['workspace_id']}/by-folder"
+            folder_node = self._ensure_virtual_node(
+                axis="folder",
+                label=folder_path.rsplit("/", 1)[-1] or "root",
+                path=f"{virtual_folder_prefix}{folder_path}",
+                parent_id=doc_folder_root,
+                summary=f"Documents in folder {folder_path}",
+            )
+            self._attach_virtual_doc(folder_node, doc["id"], f"document folder is {folder_path}", 1.0)
+        self._commit()
+
+    def list_virtual_nodes(self, workspace_id: str | None = None) -> list[dict[str, Any]]:
+        if workspace_id:
+            workspace_root = f"/virtual/by-workspace/{workspace_id}"
+            rows = self.conn.execute(
+                """
+                SELECT n.*, COUNT(DISTINCT d.id) AS doc_count
+                FROM virtual_nodes n
+                LEFT JOIN virtual_node_docs v ON v.virtual_node_id = n.id
+                LEFT JOIN documents d ON d.id = v.doc_id AND d.workspace_id = ?
+                LEFT JOIN documents node_doc ON node_doc.id = n.doc_id
+                WHERE d.id IS NOT NULL
+                   OR node_doc.workspace_id = ?
+                   OR n.path = ?
+                   OR n.path LIKE ?
+                GROUP BY n.id
+                ORDER BY n.path
+                """,
+                (workspace_id, workspace_id, workspace_root, f"{workspace_root}/%"),
+            )
+            return [dict(row) for row in rows]
+        rows = self.conn.execute(
+            """
+            SELECT n.*, COUNT(v.doc_id) AS doc_count
+            FROM virtual_nodes n
+            LEFT JOIN virtual_node_docs v ON v.virtual_node_id = n.id
+            GROUP BY n.id
+            ORDER BY n.path
+            """
+        )
+        return [dict(row) for row in rows]
+
+    def retrieve_nodes(
+        self,
+        query: str,
+        *,
+        doc_ids: list[str] | None = None,
+        expert_hints: list[str] | None = None,
+        workspace_id: str | None = None,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        terms = _terms_for(query, expert_hints)
+        if not terms:
+            return []
+        haystack_sql = "lower(n.label || ' ' || n.summary || ' ' || n.path || ' ' || d.name || ' ' || d.description)"
+        term_where = " OR ".join([f"{haystack_sql} LIKE ? ESCAPE '\\'" for _ in terms])
+        args: list[Any] = [f"%{_escape_like(term)}%" for term in terms]
+        where_parts = [
+            "n.axis = 'section'",
+            "n.source_node_id IS NOT NULL",
+            "n.source_node_id != 'root'",
+            "n.page_start IS NOT NULL",
+            "n.page_end IS NOT NULL",
+            f"({term_where})",
+        ]
+        if doc_ids:
+            where_parts.append(f"n.doc_id IN ({','.join('?' for _ in doc_ids)})")
+            args.extend(doc_ids)
+        if workspace_id:
+            where_parts.append("d.workspace_id = ?")
+            args.append(workspace_id)
+        rows = self.conn.execute(
+            f"""
+            SELECT
+              n.id AS node_id,
+              n.doc_id,
+              d.name AS doc_name,
+              n.source_node_id,
+              n.label AS node_label,
+              n.summary,
+              n.page_start,
+              n.page_end,
+              n.path
+            FROM virtual_nodes n
+            JOIN documents d ON d.id = n.doc_id
+            WHERE {' AND '.join(where_parts)}
+            """,
+            args,
+        )
+        hits = []
+        for row in rows:
+            hit = dict(row)
+            haystack = (
+                f"{hit['doc_name']} {hit['node_label']} {hit['summary']} {hit['path']}"
+            ).casefold()
+            hit["score"] = sum(haystack.count(term) for term in terms)
+            if hit["score"]:
+                hit["content"] = hit["summary"] or hit["node_label"]
+                hit["reason"] = "section-summary retrieval"
+                hits.append(hit)
+        hits.sort(key=lambda h: (-h["score"], h["doc_name"], h["page_start"], h["node_id"]))
+        return hits[:limit]
+
+    def build_query_tree(
+        self,
+        query: str,
+        *,
+        doc_ids: list[str] | None = None,
+        expert_hints: list[str] | None = None,
+        workspace_id: str | None = None,
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        hint_safety = _prepare_hints(expert_hints)
+        hints = hint_safety["accepted"]
+        docs: dict[str, dict[str, Any]] = {}
+
+        def ensure_doc(doc_id: str, doc_name: str, score: float = 0.0) -> dict[str, Any]:
+            doc = docs.setdefault(
+                doc_id,
+                {
+                    "doc_id": doc_id,
+                    "doc_name": doc_name,
+                    "score": 0.0,
+                    "pages": [],
+                    "sections": [],
+                },
+            )
+            doc["score"] += score
+            return doc
+
+        for hit in self.retrieve_pages(
+            query,
+            doc_ids=doc_ids,
+            expert_hints=hints,
+            workspace_id=workspace_id,
+            limit=limit,
+        ):
+            doc = ensure_doc(hit["doc_id"], hit["doc_name"], hit["score"])
+            doc["pages"].append(
+                {
+                    "page_start": hit["page"],
+                    "page_end": hit["page"],
+                    "score": hit["score"],
+                    "reason": "page-level lexical retrieval",
+                }
+            )
+
+        for hit in self.retrieve_nodes(
+            query,
+            doc_ids=doc_ids,
+            expert_hints=hints,
+            workspace_id=workspace_id,
+            limit=limit,
+        ):
+            doc = ensure_doc(hit["doc_id"], hit["doc_name"], hit["score"])
+            doc["sections"].append(
+                {
+                    "node_id": hit["node_id"],
+                    "source_node_id": hit["source_node_id"],
+                    "label": hit["node_label"],
+                    "page_start": hit["page_start"],
+                    "page_end": hit["page_end"],
+                    "score": hit["score"],
+                    "reason": "section-summary retrieval",
+                }
+            )
+
+        documents = sorted(docs.values(), key=lambda doc: (-doc["score"], doc["doc_name"]))[:limit]
+        return {
+            "query": query,
+            "workspace_id": workspace_id,
+            "expert_hints": hints,
+            "hint_safety": hint_safety,
+            "documents": documents,
+            "document_count": len(documents),
+            "section_count": sum(len(doc["sections"]) for doc in documents),
+            "page_count": sum(len(doc["pages"]) for doc in documents),
+        }
+
+    def hybrid_search(
+        self,
+        query: str,
+        *,
+        doc_ids: list[str] | None = None,
+        expert_hints: list[str] | None = None,
+        workspace_id: str | None = None,
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        hint_safety = _prepare_hints(expert_hints)
+        hints = hint_safety["accepted"]
+        query_tree = self.build_query_tree(
+            query,
+            doc_ids=doc_ids,
+            expert_hints=hints,
+            workspace_id=workspace_id,
+            limit=limit,
+        )
+        hits = []
+
+        for hit in self.retrieve_nodes(
+            query,
+            doc_ids=doc_ids,
+            expert_hints=hints,
+            workspace_id=workspace_id,
+            limit=limit,
+        ):
+            hit = dict(hit)
+            hit["reason"] = "hybrid section-first retrieval"
+            hit["selection_stage"] = "section"
+            hits.append(hit)
+
+        section_spans = [
+            (hit["doc_id"], hit["page_start"], hit["page_end"])
+            for hit in hits
+            if hit["page_start"] is not None and hit["page_end"] is not None
+        ]
+        for hit in self.retrieve_pages(
+            query,
+            doc_ids=doc_ids,
+            expert_hints=hints,
+            workspace_id=workspace_id,
+            limit=limit,
+        ):
+            if len(hits) >= limit:
+                break
+            if _covered_by_section(hit["doc_id"], hit["page"], section_spans):
+                continue
+            page_hit = dict(hit)
+            page_hit["page_start"] = page_hit["page"]
+            page_hit["page_end"] = page_hit["page"]
+            page_hit["node_id"] = None
+            page_hit["reason"] = "hybrid page fallback retrieval"
+            page_hit["selection_stage"] = "page_fallback"
+            hits.append(page_hit)
+
+        hits.sort(
+            key=lambda h: (
+                0 if h["selection_stage"] == "section" else 1,
+                -h["score"],
+                h["doc_name"],
+                h["page_start"],
+                h.get("node_id") or "",
+            )
+        )
+        hits = hits[:limit]
+        policy = {
+            "name": "deterministic-section-first",
+            "limit": limit,
+            "expert_hints": hints,
+            "hint_safety": hint_safety,
+            "section_hits": sum(1 for hit in hits if hit["selection_stage"] == "section"),
+            "page_fallback_hits": sum(1 for hit in hits if hit["selection_stage"] == "page_fallback"),
+        }
+        return {
+            "query": query,
+            "workspace_id": workspace_id,
+            "expert_hints": hints,
+            "hint_safety": hint_safety,
+            "policy": policy,
+            "query_tree": query_tree,
+            "hits": hits,
+        }
+
+    def plan_query_tree(self, query: str, limit: int = 10, workspace_id: str | None = None) -> dict[str, Any]:
+        terms = [t.casefold() for t in query.split() if t.strip()]
+        nodes = self.list_virtual_nodes(workspace_id=workspace_id)
+        scored = []
+        for node in nodes:
+            haystack = f"{node['axis']} {node['label']} {node['path']} {node['summary']}".casefold()
+            score = sum(haystack.count(term) for term in terms)
+            if score:
+                node = dict(node)
+                node["score"] = score
+                scored.append(node)
+        if not scored:
+            scored = [dict(node, score=0) for node in nodes if node["doc_count"]][:limit]
+        scored.sort(key=lambda node: (-node["score"], node["path"]))
+        return {"query": query, "workspace_id": workspace_id, "nodes": scored[:limit]}
+
+    def start_query(
+        self,
+        query: str,
+        scope: dict[str, Any] | None = None,
+        workspace_id: str | None = None,
+    ) -> str:
+        run_id = f"run_{uuid.uuid4().hex}"
+        self.conn.execute(
+            "INSERT INTO query_runs (id, workspace_id, query, scope_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (run_id, workspace_id, query, json.dumps(scope or {}, sort_keys=True), _now()),
+        )
+        self._commit()
+        return run_id
+
+    def add_evidence(
+        self,
+        *,
+        run_id: str,
+        doc_id: str,
+        text: str,
+        reason: str,
+        node_id: str | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+        score: float = 0.0,
+    ) -> str:
+        if not self._one("SELECT id FROM query_runs WHERE id = ?", (run_id,)):
+            raise ValueError(f"Query run not found: {run_id}")
+        doc = self.get_document(doc_id)
+        if not doc:
+            raise ValueError(f"Document not found: {doc_id}")
+        if page_start is not None or page_end is not None:
+            if page_start is None or page_end is None or page_start < 1 or page_end < page_start:
+                raise ValueError("Evidence page range is invalid.")
+            if doc.get("page_count") and page_end > doc["page_count"]:
+                raise ValueError("Evidence page range exceeds document page count.")
+        evidence_id = f"ev_{uuid.uuid4().hex}"
+        self.conn.execute(
+            """
+            INSERT INTO evidence (
+              id, run_id, doc_id, node_id, page_start, page_end, text, reason, score, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (evidence_id, run_id, doc_id, node_id, page_start, page_end, text, reason, score, _now()),
+        )
+        self._commit()
+        return evidence_id
+
+    def add_citation(self, *, run_id: str, evidence_id: str) -> dict[str, Any]:
+        evidence = self._one("SELECT * FROM evidence WHERE id = ? AND run_id = ?", (evidence_id, run_id))
+        if not evidence:
+            raise ValueError(f"Evidence not found for run: {evidence_id}")
+        if evidence["page_start"] is None or evidence["page_end"] is None:
+            raise ValueError("Citation requires page-backed evidence.")
+        doc = self.get_document(evidence["doc_id"])
+        if not doc:
+            raise ValueError(f"Document not found: {evidence['doc_id']}")
+        citation_id = f"cit_{uuid.uuid4().hex}"
+        label = f"{doc['name']} p.{evidence['page_start']}"
+        if evidence["page_end"] != evidence["page_start"]:
+            label = f"{doc['name']} pp.{evidence['page_start']}-{evidence['page_end']}"
+        self.conn.execute(
+            """
+            INSERT INTO citations (id, run_id, evidence_id, doc_id, label, page_start, page_end, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                citation_id,
+                run_id,
+                evidence_id,
+                evidence["doc_id"],
+                label,
+                evidence["page_start"],
+                evidence["page_end"],
+                _now(),
+            ),
+        )
+        self._commit()
+        return {
+            "id": citation_id,
+            "evidence_id": evidence_id,
+            "doc_id": evidence["doc_id"],
+            "doc_name": doc["name"],
+            "label": label,
+            "page_start": evidence["page_start"],
+            "page_end": evidence["page_end"],
+        }
+
+    def finish_query(self, run_id: str) -> None:
+        self.conn.execute("UPDATE query_runs SET completed_at = ? WHERE id = ?", (_now(), run_id))
+        self._commit()
+
+    def get_trace(self, run_id: str) -> dict[str, Any]:
+        run = self._one("SELECT * FROM query_runs WHERE id = ?", (run_id,))
+        if not run:
+            raise ValueError(f"Query run not found: {run_id}")
+        evidence = [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM evidence WHERE run_id = ? ORDER BY score DESC, created_at",
+                (run_id,),
+            )
+        ]
+        citations = [
+            dict(row)
+            for row in self.conn.execute(
+                "SELECT * FROM citations WHERE run_id = ? ORDER BY created_at",
+                (run_id,),
+            )
+        ]
+        trace = dict(run)
+        trace["scope"] = json.loads(trace.pop("scope_json"))
+        trace["evidence"] = evidence
+        trace["citations"] = citations
+        return trace
+
+    def verify_trace(self, run_id: str, *, require_citations: bool = True) -> dict[str, Any]:
+        trace = self.get_trace(run_id)
+        errors = []
+        if trace["completed_at"] is None:
+            errors.append("query run is not completed")
+        evidence_ids = {ev["id"] for ev in trace["evidence"]}
+        cited_evidence_ids = {citation["evidence_id"] for citation in trace["citations"]}
+        if require_citations and evidence_ids != cited_evidence_ids:
+            missing = sorted(evidence_ids - cited_evidence_ids)
+            extra = sorted(cited_evidence_ids - evidence_ids)
+            if missing:
+                errors.append(f"evidence without citations: {', '.join(missing)}")
+            if extra:
+                errors.append(f"citations without evidence: {', '.join(extra)}")
+        for ev in trace["evidence"]:
+            doc = self.get_document(ev["doc_id"])
+            if not doc:
+                errors.append(f"evidence references missing document {ev['doc_id']}")
+                continue
+            if ev["page_start"] is None or ev["page_end"] is None:
+                errors.append(f"evidence {ev['id']} has no page range")
+                continue
+            for page in range(ev["page_start"], ev["page_end"] + 1):
+                if not self._evidence_page_exists(ev, page):
+                    errors.append(f"evidence {ev['id']} references missing page {page}")
+        for citation in trace["citations"]:
+            if citation["evidence_id"] not in evidence_ids:
+                errors.append(f"citation {citation['id']} references missing evidence")
+            ev = next((item for item in trace["evidence"] if item["id"] == citation["evidence_id"]), None)
+            if ev and (
+                citation["doc_id"] != ev["doc_id"]
+                or citation["page_start"] != ev["page_start"]
+                or citation["page_end"] != ev["page_end"]
+            ):
+                errors.append(f"citation {citation['id']} does not match evidence {ev['id']}")
+        return {"ok": not errors, "errors": errors}
+
+    def _delete_virtual_axis(self, axis: str) -> None:
+        self.conn.execute(
+            """
+            DELETE FROM virtual_node_docs
+            WHERE virtual_node_id IN (SELECT id FROM virtual_nodes WHERE axis = ?)
+            """,
+            (axis,),
+        )
+        self.conn.execute("DELETE FROM virtual_nodes WHERE axis = ?", (axis,))
+
+    def _evidence_page_exists(self, evidence: dict[str, Any], page: int) -> bool:
+        if self._one("SELECT 1 FROM document_pages WHERE doc_id = ? AND page = ?", (evidence["doc_id"], page)):
+            return True
+        if evidence["node_id"]:
+            return bool(
+                self._one(
+                    """
+                    SELECT 1
+                    FROM virtual_nodes
+                    WHERE id = ?
+                      AND doc_id = ?
+                      AND page_start <= ?
+                      AND page_end >= ?
+                    """,
+                    (evidence["node_id"], evidence["doc_id"], page, page),
+                )
+            )
+        return False
+
+    def _import_structure_nodes(
+        self,
+        doc_id: str,
+        nodes: list[dict[str, Any]],
+        parent_id: str,
+        parent_path: str,
+        trail: tuple[int, ...],
+    ) -> None:
+        for index, node in enumerate(nodes, 1):
+            if not isinstance(node, dict):
+                continue
+            source_node_id = str(node.get("node_id") or ".".join(map(str, (*trail, index))))
+            page_start = _as_int(node.get("start_index"))
+            page_end = _as_int(node.get("end_index"))
+            node_id = self._ensure_virtual_node(
+                axis="section",
+                label=str(node.get("title") or source_node_id),
+                path=f"{parent_path}/{_safe_path_part(source_node_id)}",
+                parent_id=parent_id,
+                summary=str(node.get("summary") or ""),
+                doc_id=doc_id,
+                source_node_id=source_node_id,
+                page_start=page_start,
+                page_end=page_end,
+            )
+            self._attach_virtual_doc(node_id, doc_id, "document section", 1.0)
+            children = node.get("nodes") or []
+            if isinstance(children, list):
+                self._import_structure_nodes(doc_id, children, node_id, f"{parent_path}/{_safe_path_part(source_node_id)}", (*trail, index))
+
+    def _one(self, sql: str, args: tuple[Any, ...]) -> sqlite3.Row | None:
+        return self.conn.execute(sql, args).fetchone()
+
+    def _ensure_virtual_node(
+        self,
+        *,
+        axis: str,
+        label: str,
+        path: str,
+        summary: str = "",
+        parent_id: str | None = None,
+        doc_id: str | None = None,
+        source_node_id: str | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+    ) -> str:
+        existing = self._one("SELECT id FROM virtual_nodes WHERE path = ?", (path,))
+        if existing:
+            self.conn.execute(
+                """
+                UPDATE virtual_nodes
+                SET parent_id = ?, doc_id = ?, axis = ?, label = ?, summary = ?,
+                    source_node_id = ?, page_start = ?, page_end = ?
+                WHERE id = ?
+                """,
+                (
+                    parent_id,
+                    doc_id,
+                    axis,
+                    label,
+                    summary,
+                    source_node_id,
+                    page_start,
+                    page_end,
+                    existing["id"],
+                ),
+            )
+            return existing["id"]
+        node_id = f"vn_{uuid.uuid4().hex}"
+        self.conn.execute(
+            """
+            INSERT INTO virtual_nodes (
+              id, parent_id, doc_id, axis, label, path, summary,
+              source_node_id, page_start, page_end, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (node_id, parent_id, doc_id, axis, label, path, summary, source_node_id, page_start, page_end, _now()),
+        )
+        return node_id
+
+    def _attach_virtual_doc(self, virtual_node_id: str, doc_id: str, reason: str, score: float) -> None:
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO virtual_node_docs (virtual_node_id, doc_id, reason, score)
+            VALUES (?, ?, ?, ?)
+            """,
+            (virtual_node_id, doc_id, reason, score),
+        )
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _clean_hints(expert_hints: list[str] | None) -> list[str]:
+    return [hint.strip() for hint in expert_hints or [] if hint.strip()]
+
+
+def _prepare_hints(expert_hints: list[str] | None) -> dict[str, Any]:
+    accepted = []
+    rejected = []
+    for hint in _clean_hints(expert_hints):
+        reason = _unsafe_hint_reason(hint)
+        if reason:
+            rejected.append({"hint": hint, "reason": reason})
+        else:
+            accepted.append(hint)
+    return {"accepted": accepted, "rejected": rejected}
+
+
+def _unsafe_hint_reason(hint: str) -> str | None:
+    lowered = " ".join(hint.casefold().split())
+    unsafe_phrases = [
+        "ignore previous",
+        "ignore all previous",
+        "system prompt",
+        "developer message",
+        "follow my instructions",
+        "do not follow",
+        "jailbreak",
+        "reveal hidden",
+    ]
+    if any(phrase in lowered for phrase in unsafe_phrases):
+        return "prompt-injection phrase"
+    return None
+
+
+def _terms_for(query: str, expert_hints: list[str] | None = None) -> list[str]:
+    text = " ".join([query, *_prepare_hints(expert_hints)["accepted"]])
+    return [term.casefold() for term in text.split() if term.strip()]
+
+
+def _kind_for(path: Path) -> str:
+    if path.suffix.lower() == ".pdf":
+        return "pdf"
+    if path.suffix.lower() in {".md", ".markdown"}:
+        return "md"
+    if path.suffix.lower() == ".txt":
+        return "txt"
+    return "unknown"
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _max_end_index(nodes: list[dict[str, Any]]) -> int | None:
+    maximum = 0
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        end_index = _as_int(node.get("end_index"))
+        if end_index:
+            maximum = max(maximum, end_index)
+        children = node.get("nodes") or []
+        if isinstance(children, list):
+            child_max = _max_end_index(children)
+            if child_max:
+                maximum = max(maximum, child_max)
+    return maximum or None
+
+
+def _safe_path_part(value: str) -> str:
+    return value.strip().replace("/", "_") or "node"
+
+
+def _covered_by_section(doc_id: str, page: int, section_spans: list[tuple[str, int, int]]) -> bool:
+    return any(span_doc == doc_id and start <= page <= end for span_doc, start, end in section_spans)
+
+
+def _extract_pages(path: Path) -> list[str]:
+    if path.suffix.lower() == ".pdf":
+        try:
+            import PyPDF2
+        except ImportError as exc:
+            raise RuntimeError("PDF ingestion requires PyPDF2. Run `python3 -m pip install -r requirements.txt`.") from exc
+        with path.open("rb") as f:
+            reader = PyPDF2.PdfReader(f)
+            return [page.extract_text() or "" for page in reader.pages]
+    text = path.read_text(encoding="utf-8")
+    if "\f" in text:
+        return [part.strip() for part in text.split("\f") if part.strip()]
+    lines = text.splitlines()
+    return ["\n".join(lines[i : i + 80]).strip() for i in range(0, len(lines), 80)] or [""]
+
+
+def _summarize_pages(pages: list[str]) -> str:
+    joined = " ".join(page.strip().replace("\n", " ") for page in pages if page.strip())
+    return joined[:500]
+
+
+def _synthesize_answer(hits: list[dict[str, Any]]) -> str:
+    if not hits:
+        return "No evidence found."
+    docs = []
+    seen = set()
+    for hit in hits:
+        if hit["doc_id"] not in seen:
+            page_start = hit.get("page") or hit["page_start"]
+            page_end = hit.get("page_end") or page_start
+            if page_end == page_start:
+                docs.append(f"{hit['doc_name']} p.{page_start}")
+            else:
+                docs.append(f"{hit['doc_name']} pp.{page_start}-{page_end}")
+            seen.add(hit["doc_id"])
+    return "Found relevant evidence in " + "; ".join(docs) + "."
+
+
+def _conversation_transcript_jsonl(conversation: dict[str, Any], messages: list[dict[str, Any]]) -> str:
+    lines = [
+        json.dumps(
+            {
+                "type": "conversation",
+                "conversation": conversation,
+            },
+            sort_keys=True,
+        )
+    ]
+    lines.extend(json.dumps({"type": "message", "message": message}, sort_keys=True) for message in messages)
+    return "\n".join(lines)
+
+
+def _conversation_transcript_markdown(conversation: dict[str, Any], messages: list[dict[str, Any]]) -> str:
+    lines = [
+        f"# {_markdown_inline_text(conversation['title'])}",
+        "",
+        f"- Conversation ID: `{conversation['id']}`",
+        f"- Workspace ID: `{conversation['workspace_id']}`",
+        f"- Created by: `{conversation['created_by']}`",
+        f"- Created at: `{conversation['created_at']}`",
+        f"- Updated at: `{conversation['updated_at']}`",
+        "",
+    ]
+    for message in messages:
+        role = str(message["role"]).capitalize()
+        lines.extend([f"## {role} - {message['created_at']}", "", _markdown_fence(message["content"]), ""])
+        if message.get("run_id"):
+            lines.extend([f"Run ID: `{message['run_id']}`", ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _markdown_inline_text(value: str) -> str:
+    normalized = " ".join(str(value).splitlines()).replace("`", "'").strip() or "Conversation"
+    escaped = html.escape(normalized, quote=False)
+    return re.sub(r"([\\\[\]\(\)*_{}#+\-.!|])", r"\\\1", escaped)
+
+
+def _markdown_fence(value: str) -> str:
+    content = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    fence = "```"
+    while fence in content:
+        fence += "`"
+    return f"{fence}text\n{content}\n{fence}"
+
+
+def _conversation_query_text(message: str, history: list[str]) -> str:
+    parts = [part.strip() for part in [*history[-3:], message] if part and part.strip()]
+    return " ".join(parts)[-2000:]

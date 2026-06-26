@@ -1067,11 +1067,15 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="muted">${escapeHtml(run.completed_at || run.created_at || "")}</div>
           <div class="doc-actions">
             <button class="secondary" type="button" data-query-run-id="${escapeHtml(run.id)}">Trace</button>
+            <button class="secondary" type="button" data-delete-query-run-id="${escapeHtml(run.id)}">Delete</button>
           </div>
         </article>
       `).join("");
       queryRunList.querySelectorAll("[data-query-run-id]").forEach((button) => {
         button.addEventListener("click", () => loadQueryRunTrace(button.dataset.queryRunId).catch((error) => setStatus(error.message, "error")));
+      });
+      queryRunList.querySelectorAll("[data-delete-query-run-id]").forEach((button) => {
+        button.addEventListener("click", () => deleteQueryRun(button.dataset.deleteQueryRunId).catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -2593,6 +2597,23 @@ DASHBOARD_HTML = """<!doctype html>
       const payload = await api(`/query-runs/${encodeURIComponent(runId)}`);
       traceText.textContent = JSON.stringify(payload.trace || {}, null, 2);
       setStatus("Query trace loaded.", "ok");
+    }
+
+    async function deleteQueryRun(runId) {
+      if (!runId) {
+        setStatus("Query run not found.", "warn");
+        return;
+      }
+      if (!window.confirm("Permanently delete this query run and its trace rows?")) {
+        setStatus("Query run delete cancelled.", "warn");
+        return;
+      }
+      setStatus("Deleting query run...");
+      const result = await api(`/query-runs/${encodeURIComponent(runId)}`, {
+        method: "DELETE"
+      });
+      await refreshQueryRuns();
+      setStatus(result.deleted ? "Query run deleted." : "Query run not found.", result.deleted ? "ok" : "warn");
     }
 
     function escapeHtml(value) {

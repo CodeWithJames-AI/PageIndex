@@ -4793,6 +4793,28 @@ class EnterpriseStore:
             runs.append(run)
         return runs
 
+    def delete_query_run(self, run_id: str, *, workspace_id: str, actor_user_id: str) -> bool:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        run_id = run_id.strip()
+        if not run_id:
+            raise ValueError("Query run id is required.")
+        with self._atomic():
+            cursor = self.conn.execute(
+                "DELETE FROM query_runs WHERE id = ? AND workspace_id = ?",
+                (run_id, workspace_id),
+            )
+            deleted = cursor.rowcount > 0
+            if deleted:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "query.run_delete",
+                    target_type="query_run",
+                    target_id=run_id,
+                    details={},
+                )
+        return deleted
+
     def get_query_trace(self, run_id: str, *, workspace_id: str, actor_user_id: str) -> dict[str, Any] | None:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         run_id = run_id.strip()

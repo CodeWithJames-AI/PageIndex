@@ -996,6 +996,55 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("query.retention_policy_update", audit_actions)
             self.assertIn("query.retention_purge", audit_actions)
 
+    def test_query_run_deletion_is_admin_scoped_and_cascades_trace_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "delete-query.txt"
+            source.write_text("Query deletion evidence for privacy review.", encoding="utf-8")
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            other_workspace = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(other_workspace, "mallory", "owner")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Delete memo")
+            kept = store.query_corpus("privacy review", workspace_id=workspace_id, actor_user_id="alice")
+            conversation = store.create_conversation(workspace_id, "alice", title="Delete chat")
+            chat = store.chat_message(conversation["id"], "alice", "query deletion evidence")
+            deleted = store.delete_query_run(chat["result"]["run_id"], workspace_id=workspace_id, actor_user_id="alice")
+            deleted_again = store.delete_query_run(chat["result"]["run_id"], workspace_id=workspace_id, actor_user_id="alice")
+            foreign_delete = store.delete_query_run(kept["run_id"], workspace_id=other_workspace, actor_user_id="mallory")
+            remaining_runs = store.list_query_runs(workspace_id, "alice")
+            chat_messages = store.list_conversation_messages(conversation["id"], "alice")
+            remaining_evidence = int(
+                store.conn.execute(
+                    "SELECT COUNT(*) AS count FROM evidence WHERE run_id = ?",
+                    (chat["result"]["run_id"],),
+                ).fetchone()["count"]
+            )
+            remaining_citations = int(
+                store.conn.execute(
+                    "SELECT COUNT(*) AS count FROM citations WHERE run_id = ?",
+                    (chat["result"]["run_id"],),
+                ).fetchone()["count"]
+            )
+            audit_actions = [event["action"] for event in store.list_audit_events(workspace_id, "alice", limit=20)]
+
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.delete_query_run(kept["run_id"], workspace_id=workspace_id, actor_user_id="bob")
+            with self.assertRaisesRegex(ValueError, "Query run id is required"):
+                store.delete_query_run(" ", workspace_id=workspace_id, actor_user_id="alice")
+
+            self.assertTrue(deleted)
+            self.assertFalse(deleted_again)
+            self.assertFalse(foreign_delete)
+            self.assertEqual([run["id"] for run in remaining_runs], [kept["run_id"]])
+            self.assertEqual(remaining_evidence, 0)
+            self.assertEqual(remaining_citations, 0)
+            self.assertIsNone(chat_messages[1]["run_id"])
+            self.assertIsNone(store.get_query_trace(chat["result"]["run_id"], workspace_id=workspace_id, actor_user_id="alice"))
+            self.assertIn("query.run_delete", audit_actions)
+
     def test_conversation_sessions_persist_messages_and_enforce_owner_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4170,6 +4219,90 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("choose --retention-days or --clear", invalid.stderr)
             self.assertNotIn("Traceback", invalid.stderr)
 
+    def test_delete_query_run_cli_removes_trace_without_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "delete-query-cli.txt"
+            source.write_text("CLI delete query evidence.", encoding="utf-8")
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run(
+                [*base, "workspace", "Team", "--workspace-id", "ws_cli"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_cli", "alice", "--role", "owner"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_cli", "mona", "--role", "member", "--actor-user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            store = EnterpriseStore(root)
+            try:
+                store.ingest_file(source, workspace_id="ws_cli", actor_user_id="alice", name="CLI delete memo")
+                removed = store.query_corpus("delete query", workspace_id="ws_cli", actor_user_id="alice")
+                kept = store.query_corpus("query evidence", workspace_id="ws_cli", actor_user_id="alice")
+            finally:
+                store.close()
+
+            deleted = json.loads(
+                subprocess.run(
+                    [*base, "delete-query-run", "ws_cli", "alice", removed["run_id"]],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            deleted_again = json.loads(
+                subprocess.run(
+                    [*base, "delete-query-run", "ws_cli", "alice", removed["run_id"]],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            member_denied = subprocess.run(
+                [*base, "delete-query-run", "ws_cli", "mona", kept["run_id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            store = EnterpriseStore(root)
+            try:
+                remaining_runs = store.list_query_runs("ws_cli", "alice")
+                removed_trace = store.get_query_trace(removed["run_id"], workspace_id="ws_cli", actor_user_id="alice")
+            finally:
+                store.close()
+
+            self.assertEqual(deleted, {"deleted": True})
+            self.assertEqual(deleted_again, {"deleted": False})
+            self.assertEqual([run["id"] for run in remaining_runs], [kept["run_id"]])
+            self.assertIsNone(removed_trace)
+            self.assertNotEqual(member_denied.returncode, 0)
+            self.assertIn("workspace role denied", member_denied.stderr)
+            self.assertNotIn("Traceback", member_denied.stderr)
+
     def test_cli_workspace_operations_record_audit_when_actor_is_supplied(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -4909,10 +5042,22 @@ class EnterpriseStoreTest(unittest.TestCase):
                 audit_list = _get_json(f"{base}/query-runs?limit=5", headers=audit_headers)
                 owner_trace = _get_json(f"{base}/query-runs/{result['run_id']}", headers=owner_headers)
                 foreign_trace = _get_error(f"{base}/query-runs/{result['run_id']}", headers=other_headers)
+                audit_delete = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=audit_headers, status=403)
+                write_delete = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=write_headers, status=403)
+                member_delete = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=member_headers, status=403)
+                foreign_delete = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=other_headers)
+                owner_delete = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=owner_headers)
+                owner_delete_again = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=owner_headers)
             finally:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+            store = EnterpriseStore(root)
+            try:
+                deleted_trace = store.get_query_trace(result["run_id"], workspace_id=workspace_id, actor_user_id="alice")
+                audit_actions = [event["action"] for event in store.list_audit_events(workspace_id, "alice", limit=20)]
+            finally:
+                store.close()
 
             self.assertEqual(missing_token["error"], "api token required")
             self.assertEqual(write_get["error"], "api token scope denied")
@@ -4922,6 +5067,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(owner_trace["trace"]["id"], result["run_id"])
             self.assertTrue(owner_trace["trace"]["evidence"])
             self.assertEqual(foreign_trace["error"], "query run not found")
+            self.assertEqual(audit_delete["error"], "api token scope denied")
+            self.assertEqual(write_delete["error"], "api token scope denied")
+            self.assertEqual(member_delete["error"], "workspace role denied")
+            self.assertEqual(foreign_delete, {"deleted": False})
+            self.assertEqual(owner_delete, {"deleted": True})
+            self.assertEqual(owner_delete_again, {"deleted": False})
+            self.assertIsNone(deleted_trace)
+            self.assertIn("query.run_delete", audit_actions)
 
     def test_http_strict_api_token_auth_rejects_expired_token(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8019,6 +8172,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("clearQueryRetention", body)
                     self.assertIn("previewQueryPurge", body)
                     self.assertIn("purgeQueryRuns", body)
+                    self.assertIn("data-delete-query-run-id", body)
+                    self.assertIn("deleteQueryRun", body)
                     self.assertIn("/deployment-check", body)
                     self.assertIn("readinessCheckProviderInput", body)
                     self.assertIn("readinessRequireProviderKeyInput", body)

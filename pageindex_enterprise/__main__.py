@@ -272,6 +272,11 @@ def main() -> None:
     query_purge.add_argument("user_id")
     query_purge.add_argument("--dry-run", action="store_true")
 
+    delete_query_run = sub.add_parser("delete-query-run")
+    delete_query_run.add_argument("workspace_id")
+    delete_query_run.add_argument("user_id")
+    delete_query_run.add_argument("run_id")
+
     create_conversation = sub.add_parser("create-conversation")
     create_conversation.add_argument("workspace_id")
     create_conversation.add_argument("user_id")
@@ -772,6 +777,20 @@ def main() -> None:
                         lambda: store.purge_query_runs_by_retention(args.workspace_id, args.user_id, dry_run=args.dry_run)
                     ),
                     indent=2,
+                )
+            )
+        elif args.command == "delete-query-run":
+            print(
+                json.dumps(
+                    {
+                        "deleted": _workspace_member_cli(
+                            lambda: store.delete_query_run(
+                                args.run_id,
+                                workspace_id=args.workspace_id,
+                                actor_user_id=args.user_id,
+                            )
+                        )
+                    }
                 )
             )
         elif args.command == "create-conversation":

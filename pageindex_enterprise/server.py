@@ -519,6 +519,20 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if folder_id:
                 self._delete_folder(folder_id)
                 return
+            query_run_id = _query_run_path(parsed.path)
+            if query_run_id:
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(
+                        store,
+                        required_scope=("audit", "write"),
+                        require_api_token=True,
+                    )
+                    deleted = store.delete_query_run(query_run_id, workspace_id=workspace_id, actor_user_id=user_id)
+                    self._json({"deleted": deleted})
+                finally:
+                    store.close()
+                return
             doc_id = _document_path(parsed.path)
             if doc_id:
                 store = EnterpriseStore(self.server.root)

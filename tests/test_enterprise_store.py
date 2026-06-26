@@ -903,6 +903,36 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(result["verification"]["ok"], result["verification"]["errors"])
             self.assertIn("Found relevant evidence", result["answer"])
 
+    def test_query_run_history_is_admin_scoped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "history.txt"
+            source.write_text("Query run history evidence for operators.", encoding="utf-8")
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            other_workspace = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(other_workspace, "mallory", "owner")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="History memo")
+            first = store.query_corpus("history evidence", workspace_id=workspace_id, actor_user_id="alice")
+            second = store.query_corpus("operators history", workspace_id=workspace_id, actor_user_id="alice")
+
+            runs = store.list_query_runs(workspace_id, "alice")
+            limited = store.list_query_runs(workspace_id, "alice", limit=1)
+            trace = store.get_query_trace(first["run_id"], workspace_id=workspace_id, actor_user_id="alice")
+            foreign = store.get_query_trace(first["run_id"], workspace_id=other_workspace, actor_user_id="mallory")
+
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.list_query_runs(workspace_id, "bob")
+
+            self.assertEqual([run["id"] for run in runs], [second["run_id"], first["run_id"]])
+            self.assertEqual([run["id"] for run in limited], [second["run_id"]])
+            self.assertEqual(runs[0]["citation_count"], 1)
+            self.assertEqual(trace["id"], first["run_id"])
+            self.assertEqual(trace["citations"][0]["doc_id"], doc_id)
+            self.assertIsNone(foreign)
+
     def test_conversation_sessions_persist_messages_and_enforce_owner_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4596,6 +4626,62 @@ class EnterpriseStoreTest(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
+    def test_http_query_run_history_requires_admin_audit_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "history-http.txt"
+            source.write_text("HTTP query history evidence.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            other_workspace = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(other_workspace, "mallory", "owner")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="History HTTP memo")
+            result = store.query_corpus("http query history", workspace_id=workspace_id, actor_user_id="alice")
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store.conn.commit()
+            member_token = member_token_record["token"]
+            other_token = store.create_api_token(other_workspace, "mallory", name="other")["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            audit_headers = {"Authorization": f"Bearer {audit_token}"}
+            write_headers = {"Authorization": f"Bearer {write_token}"}
+            member_headers = {"Authorization": f"Bearer {member_token}"}
+            other_headers = {"Authorization": f"Bearer {other_token}"}
+            try:
+                missing_token = _get_error(f"{base}/query-runs")
+                write_get = _get_error(f"{base}/query-runs", headers=write_headers)
+                member_get = _get_error(f"{base}/query-runs", headers=member_headers)
+                audit_list = _get_json(f"{base}/query-runs?limit=5", headers=audit_headers)
+                owner_trace = _get_json(f"{base}/query-runs/{result['run_id']}", headers=owner_headers)
+                foreign_trace = _get_error(f"{base}/query-runs/{result['run_id']}", headers=other_headers)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(missing_token["error"], "api token required")
+            self.assertEqual(write_get["error"], "api token scope denied")
+            self.assertEqual(member_get["error"], "workspace role denied")
+            self.assertEqual(audit_list["runs"][0]["id"], result["run_id"])
+            self.assertEqual(audit_list["runs"][0]["citation_count"], 1)
+            self.assertEqual(owner_trace["trace"]["id"], result["run_id"])
+            self.assertTrue(owner_trace["trace"]["evidence"])
+            self.assertEqual(foreign_trace["error"], "query run not found")
+
     def test_http_strict_api_token_auth_rejects_expired_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -7490,6 +7576,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("/upload-file", body)
                     self.assertIn("/import-structure", body)
                     self.assertIn("/query", body)
+                    self.assertIn("/query-runs", body)
+                    self.assertIn("queryRunList", body)
+                    self.assertIn("refreshQueryRuns", body)
+                    self.assertIn("loadQueryRunTrace", body)
                     self.assertIn("reindexDocument", body)
                     self.assertIn("loadDocumentPages", body)
                     self.assertIn("pagePreviewList", body)
@@ -7713,6 +7803,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["retentionExercised"], True)
             self.assertEqual(smoke["readinessExercised"], True)
             self.assertEqual(smoke["providerExercised"], True)
+            self.assertEqual(smoke["queryHistoryExercised"], True)
             self.assertTrue(screenshot_path.exists())
             self.assertGreater(screenshot_path.stat().st_size, 0)
 

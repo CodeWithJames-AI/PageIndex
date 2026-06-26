@@ -4519,6 +4519,47 @@ class EnterpriseStore:
         self.conn.execute("UPDATE query_runs SET completed_at = ? WHERE id = ?", (_now(), run_id))
         self._commit()
 
+    def list_query_runs(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        limit = max(1, min(int(limit), 200))
+        rows = self.conn.execute(
+            """
+            SELECT q.id, q.workspace_id, q.query, q.scope_json, q.created_at, q.completed_at,
+                   COUNT(DISTINCT e.id) AS evidence_count,
+                   COUNT(DISTINCT c.id) AS citation_count
+            FROM query_runs q
+            LEFT JOIN evidence e ON e.run_id = q.id
+            LEFT JOIN citations c ON c.run_id = q.id
+            WHERE q.workspace_id = ?
+            GROUP BY q.id
+            ORDER BY q.created_at DESC, q.id DESC
+            LIMIT ?
+            """,
+            (workspace_id, limit),
+        )
+        runs = []
+        for row in rows:
+            run = dict(row)
+            run["scope"] = json.loads(run.pop("scope_json"))
+            runs.append(run)
+        return runs
+
+    def get_query_trace(self, run_id: str, *, workspace_id: str, actor_user_id: str) -> dict[str, Any] | None:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        run_id = run_id.strip()
+        if not run_id:
+            raise ValueError("Query run id is required.")
+        run = self._one("SELECT workspace_id FROM query_runs WHERE id = ?", (run_id,))
+        if not run or run["workspace_id"] != workspace_id:
+            return None
+        return self.get_trace(run_id)
+
     def get_trace(self, run_id: str) -> dict[str, Any]:
         run = self._one("SELECT * FROM query_runs WHERE id = ?", (run_id,))
         if not run:

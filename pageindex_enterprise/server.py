@@ -144,6 +144,29 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            if parsed.path == "/query-runs":
+                params = parse_qs(parsed.query)
+                limit = _int_param(params, "limit", 50)
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+                    self._json({"runs": store.list_query_runs(workspace_id, user_id, limit=limit)})
+                finally:
+                    store.close()
+                return
+            query_run_id = _query_run_path(parsed.path)
+            if query_run_id:
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+                    trace = store.get_query_trace(query_run_id, workspace_id=workspace_id, actor_user_id=user_id)
+                    if trace is None:
+                        self._json({"error": "query run not found"}, HTTPStatus.NOT_FOUND)
+                        return
+                    self._json({"trace": trace})
+                finally:
+                    store.close()
+                return
             if parsed.path == "/audit-retention":
                 store = EnterpriseStore(self.server.root)
                 try:
@@ -1752,6 +1775,13 @@ def _document_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "documents":
         return parts[1]
+    return None
+
+
+def _query_run_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "query-runs":
+        return unquote(parts[1])
     return None
 
 

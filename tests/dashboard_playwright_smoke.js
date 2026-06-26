@@ -572,6 +572,23 @@ async function waitForAnyText(page, selector, expectedValues) {
     assert(trace.scope.hybrid_policy, "trace did not include hybrid policy scope");
     assert(Array.isArray(trace.evidence) && trace.evidence.length > 0, "trace did not include evidence");
 
+    const refreshQueryRunsResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/query-runs?limit=25") && response.request().method() === "GET"
+    );
+    await page.click("#refreshQueryRunsButton");
+    await refreshQueryRunsResponse;
+    await waitForText(page, "#status", "Query runs refreshed.");
+    await waitForText(page, "#queryRunList", trace.id);
+
+    const loadQueryTraceResponse = page.waitForResponse(
+      (response) => response.url().includes(`/query-runs/${trace.id}`) && response.request().method() === "GET"
+    );
+    await page.locator(`[data-query-run-id="${trace.id}"]`).click();
+    await loadQueryTraceResponse;
+    await waitForText(page, "#status", "Query trace loaded.");
+    const historicalTrace = JSON.parse((await page.textContent("#traceText")) || "{}");
+    assert(historicalTrace.id === trace.id, "loaded query run trace did not match the selected run");
+
     if (screenshotPath) {
       await page.screenshot({ path: screenshotPath, fullPage: true });
     }
@@ -603,6 +620,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       retentionExercised: true,
       readinessExercised: true,
       providerExercised: true,
+      queryHistoryExercised: true,
       screenshotPath: screenshotPath || null
     }));
   } finally {

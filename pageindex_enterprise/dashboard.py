@@ -187,6 +187,7 @@ DASHBOARD_HTML = """<!doctype html>
     .virtual-node-list,
     .citations,
     .conversation-list,
+    .query-run-list,
     .member-list,
     .group-list,
     .token-list,
@@ -202,6 +203,7 @@ DASHBOARD_HTML = """<!doctype html>
     .virtual-node,
     .citation,
     .conversation,
+    .query-run,
     .member,
     .token,
     .audit-event,
@@ -622,6 +624,10 @@ DASHBOARD_HTML = """<!doctype html>
           <section class="trace">
             <h2 class="section-title">Trace</h2>
             <pre id="traceText">{}</pre>
+            <div class="doc-actions">
+              <button id="refreshQueryRunsButton" class="secondary" type="button">Refresh runs</button>
+            </div>
+            <div id="queryRunList" class="query-run-list muted">No query runs loaded.</div>
           </section>
         </div>
       </main>
@@ -699,6 +705,7 @@ DASHBOARD_HTML = """<!doctype html>
     const answerText = document.getElementById("answerText");
     const citationList = document.getElementById("citationList");
     const traceText = document.getElementById("traceText");
+    const queryRunList = document.getElementById("queryRunList");
     let activeConversationId = "";
     let activeFolderId = "";
     let workspaceExportUrl = "";
@@ -1031,6 +1038,28 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="muted">${escapeHtml(citation.doc_id)}</div>
         </article>
       `).join("");
+    }
+
+    function renderQueryRuns(runs) {
+      if (!runs.length) {
+        queryRunList.className = "query-run-list muted";
+        queryRunList.textContent = "No query runs loaded.";
+        return;
+      }
+      queryRunList.className = "query-run-list";
+      queryRunList.innerHTML = runs.map((run) => `
+        <article class="query-run">
+          <strong>${escapeHtml(run.query || run.id)}</strong>
+          <div class="muted">${escapeHtml(run.id)} | evidence ${escapeHtml(run.evidence_count || 0)} | citations ${escapeHtml(run.citation_count || 0)}</div>
+          <div class="muted">${escapeHtml(run.completed_at || run.created_at || "")}</div>
+          <div class="doc-actions">
+            <button class="secondary" type="button" data-query-run-id="${escapeHtml(run.id)}">Trace</button>
+          </div>
+        </article>
+      `).join("");
+      queryRunList.querySelectorAll("[data-query-run-id]").forEach((button) => {
+        button.addEventListener("click", () => loadQueryRunTrace(button.dataset.queryRunId).catch((error) => setStatus(error.message, "error")));
+      });
     }
 
     function renderConversations(conversations) {
@@ -2437,6 +2466,24 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus(payload.verification && payload.verification.ok ? "Trace verified." : "Trace returned warnings.", payload.verification && payload.verification.ok ? "ok" : "warn");
     }
 
+    async function refreshQueryRuns() {
+      setStatus("Refreshing query runs...");
+      const payload = await api("/query-runs?limit=25");
+      renderQueryRuns(payload.runs || []);
+      setStatus("Query runs refreshed.", "ok");
+    }
+
+    async function loadQueryRunTrace(runId) {
+      if (!runId) {
+        setStatus("Query run not found.", "warn");
+        return;
+      }
+      setStatus("Loading query trace...");
+      const payload = await api(`/query-runs/${encodeURIComponent(runId)}`);
+      traceText.textContent = JSON.stringify(payload.trace || {}, null, 2);
+      setStatus("Query trace loaded.", "ok");
+    }
+
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, (char) => ({
         "&": "&amp;",
@@ -2466,6 +2513,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("ingestButton").addEventListener("click", () => ingestFile().catch((error) => setStatus(error.message, "error")));
     document.getElementById("importButton").addEventListener("click", () => importStructure().catch((error) => setStatus(error.message, "error")));
     document.getElementById("queryButton").addEventListener("click", () => queryCorpus().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("refreshQueryRunsButton").addEventListener("click", () => refreshQueryRuns().catch((error) => setStatus(error.message, "error")));
     document.getElementById("createConversationButton").addEventListener("click", () => createConversation().catch((error) => setStatus(error.message, "error")));
     document.getElementById("exportConversationButton").addEventListener("click", () => exportConversation().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshConversationsButton").addEventListener("click", () => refreshConversations().catch((error) => setStatus(error.message, "error")));

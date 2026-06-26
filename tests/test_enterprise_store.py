@@ -922,9 +922,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             limited = store.list_query_runs(workspace_id, "alice", limit=1)
             trace = store.get_query_trace(first["run_id"], workspace_id=workspace_id, actor_user_id="alice")
             foreign = store.get_query_trace(first["run_id"], workspace_id=other_workspace, actor_user_id="mallory")
+            jsonl_export = store.export_query_runs(workspace_id, "alice", format="jsonl")
+            csv_export = store.export_query_runs(workspace_id, "alice", format="csv")
+            jsonl_rows = [json.loads(line) for line in jsonl_export.splitlines() if line.strip()]
+            csv_rows = list(csv.DictReader(io.StringIO(csv_export)))
 
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.list_query_runs(workspace_id, "bob")
+            with self.assertRaisesRegex(ValueError, "format must be jsonl or csv"):
+                store.export_query_runs(workspace_id, "alice", format="xml")
 
             self.assertEqual([run["id"] for run in runs], [second["run_id"], first["run_id"]])
             self.assertEqual([run["id"] for run in limited], [second["run_id"]])
@@ -932,6 +938,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(trace["id"], first["run_id"])
             self.assertEqual(trace["citations"][0]["doc_id"], doc_id)
             self.assertIsNone(foreign)
+            self.assertEqual([row["id"] for row in jsonl_rows], [first["run_id"], second["run_id"]])
+            self.assertEqual([row["id"] for row in csv_rows], [first["run_id"], second["run_id"]])
+            self.assertEqual(csv_rows[0]["query"], "history evidence")
+            self.assertIn("scope_json", csv_rows[0])
 
     def test_query_retention_policy_purges_runs_and_trace_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4219,6 +4229,81 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("choose --retention-days or --clear", invalid.stderr)
             self.assertNotIn("Traceback", invalid.stderr)
 
+    def test_query_export_cli_returns_jsonl_and_csv_without_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "query-export-cli.txt"
+            source.write_text("CLI query export evidence.", encoding="utf-8")
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run(
+                [*base, "workspace", "Team", "--workspace-id", "ws_cli"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_cli", "alice", "--role", "owner"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_cli", "mona", "--role", "member", "--actor-user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            store = EnterpriseStore(root)
+            try:
+                store.ingest_file(source, workspace_id="ws_cli", actor_user_id="alice", name="CLI export memo")
+                first = store.query_corpus("query export", workspace_id="ws_cli", actor_user_id="alice")
+                second = store.query_corpus("export evidence", workspace_id="ws_cli", actor_user_id="alice")
+            finally:
+                store.close()
+
+            jsonl_export = subprocess.run(
+                [*base, "query-export", "ws_cli", "alice", "--format", "jsonl"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            csv_export = subprocess.run(
+                [*base, "query-export", "ws_cli", "alice", "--format", "csv"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            member_denied = subprocess.run(
+                [*base, "query-export", "ws_cli", "mona"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            jsonl_rows = [json.loads(line) for line in jsonl_export.splitlines() if line.strip()]
+            csv_rows = list(csv.DictReader(io.StringIO(csv_export)))
+
+            self.assertEqual([row["id"] for row in jsonl_rows], [first["run_id"], second["run_id"]])
+            self.assertEqual([row["id"] for row in csv_rows], [first["run_id"], second["run_id"]])
+            self.assertEqual(csv_rows[0]["query"], "query export")
+            self.assertNotEqual(member_denied.returncode, 0)
+            self.assertIn("workspace role denied", member_denied.stderr)
+            self.assertNotIn("Traceback", member_denied.stderr)
+
     def test_delete_query_run_cli_removes_trace_without_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -5042,6 +5127,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 audit_list = _get_json(f"{base}/query-runs?limit=5", headers=audit_headers)
                 owner_trace = _get_json(f"{base}/query-runs/{result['run_id']}", headers=owner_headers)
                 foreign_trace = _get_error(f"{base}/query-runs/{result['run_id']}", headers=other_headers)
+                write_export = _get_error(f"{base}/query-runs/export?format=jsonl", headers=write_headers)
+                exported, exported_type = _get_text(f"{base}/query-runs/export?format=jsonl", headers=audit_headers)
+                exported_csv, exported_csv_type = _get_text(f"{base}/query-runs/export?format=csv", headers=owner_headers)
                 audit_delete = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=audit_headers, status=403)
                 write_delete = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=write_headers, status=403)
                 member_delete = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=member_headers, status=403)
@@ -5067,6 +5155,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(owner_trace["trace"]["id"], result["run_id"])
             self.assertTrue(owner_trace["trace"]["evidence"])
             self.assertEqual(foreign_trace["error"], "query run not found")
+            self.assertEqual(write_export["error"], "api token scope denied")
+            self.assertIn("application/x-ndjson", exported_type)
+            self.assertIn("text/csv", exported_csv_type)
+            self.assertEqual(json.loads(exported)["id"], result["run_id"])
+            self.assertEqual(list(csv.DictReader(io.StringIO(exported_csv)))[0]["id"], result["run_id"])
             self.assertEqual(audit_delete["error"], "api token scope denied")
             self.assertEqual(write_delete["error"], "api token scope denied")
             self.assertEqual(member_delete["error"], "workspace role denied")
@@ -8172,6 +8265,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("clearQueryRetention", body)
                     self.assertIn("previewQueryPurge", body)
                     self.assertIn("purgeQueryRuns", body)
+                    self.assertIn("/query-runs/export", body)
+                    self.assertIn("queryRunExportFormatInput", body)
+                    self.assertIn("queryRunExportText", body)
+                    self.assertIn("exportQueryRuns", body)
                     self.assertIn("data-delete-query-run-id", body)
                     self.assertIn("deleteQueryRun", body)
                     self.assertIn("/deployment-check", body)

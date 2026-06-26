@@ -144,6 +144,25 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            if parsed.path == "/query-runs/export":
+                params = parse_qs(parsed.query)
+                limit = _int_param(params, "limit", 500)
+                export_format = _str_param(params, "format", "jsonl")
+                export_format_name = (export_format or "jsonl").strip().casefold()
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+                    exported = store.export_query_runs(
+                        workspace_id,
+                        user_id,
+                        limit=limit,
+                        format=export_format,
+                    )
+                    content_type = "text/csv; charset=utf-8" if export_format_name == "csv" else "application/x-ndjson; charset=utf-8"
+                    self._text(exported, content_type=content_type)
+                finally:
+                    store.close()
+                return
             if parsed.path == "/query-runs":
                 params = parse_qs(parsed.query)
                 limit = _int_param(params, "limit", 50)

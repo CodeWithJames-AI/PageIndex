@@ -628,6 +628,13 @@ DASHBOARD_HTML = """<!doctype html>
               <button id="refreshQueryRunsButton" class="secondary" type="button">Refresh runs</button>
             </div>
             <div class="import-row">
+              <select id="queryRunExportFormatInput" aria-label="Query run export format">
+                <option value="jsonl">jsonl</option>
+                <option value="csv">csv</option>
+              </select>
+              <button id="exportQueryRunsButton" class="secondary" type="button">Export</button>
+            </div>
+            <div class="import-row">
               <input id="queryRetentionDaysInput" value="" placeholder="retention days" aria-label="Query retention days">
               <button id="saveQueryRetentionButton" type="button">Save</button>
             </div>
@@ -639,6 +646,7 @@ DASHBOARD_HTML = """<!doctype html>
             <button id="clearQueryRetentionButton" class="secondary" type="button">Clear retention</button>
             <div id="queryRetentionSummary" class="muted">Retention not loaded.</div>
             <div id="queryRunList" class="query-run-list muted">No query runs loaded.</div>
+            <textarea id="queryRunExportText" readonly placeholder="query run export output" aria-label="Query run export output"></textarea>
           </section>
         </div>
       </main>
@@ -717,6 +725,8 @@ DASHBOARD_HTML = """<!doctype html>
     const citationList = document.getElementById("citationList");
     const traceText = document.getElementById("traceText");
     const queryRunList = document.getElementById("queryRunList");
+    const queryRunExportFormatInput = document.getElementById("queryRunExportFormatInput");
+    const queryRunExportText = document.getElementById("queryRunExportText");
     const queryRetentionDaysInput = document.getElementById("queryRetentionDaysInput");
     const queryRetentionSummary = document.getElementById("queryRetentionSummary");
     let activeConversationId = "";
@@ -2514,6 +2524,30 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Query runs refreshed.", "ok");
     }
 
+    async function exportQueryRuns() {
+      setStatus("Exporting query runs...");
+      const params = new URLSearchParams();
+      params.set("limit", "100");
+      params.set("format", queryRunExportFormatInput.value || "jsonl");
+      const response = await fetch(`/query-runs/export?${params.toString()}`, {
+        headers: authHeaders()
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        try {
+          const payload = JSON.parse(text);
+          throw new Error(payload.error || response.statusText);
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            throw new Error(response.statusText);
+          }
+          throw error;
+        }
+      }
+      queryRunExportText.value = text;
+      setStatus("Query runs exported.", "ok");
+    }
+
     async function refreshQueryRetention(options = {}) {
       if (!options.quiet) {
         setStatus("Refreshing query retention...");
@@ -2646,6 +2680,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("importButton").addEventListener("click", () => importStructure().catch((error) => setStatus(error.message, "error")));
     document.getElementById("queryButton").addEventListener("click", () => queryCorpus().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshQueryRunsButton").addEventListener("click", () => refreshQueryRuns().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("exportQueryRunsButton").addEventListener("click", () => exportQueryRuns().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshQueryRetentionButton").addEventListener("click", () => refreshQueryRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveQueryRetentionButton").addEventListener("click", () => saveQueryRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearQueryRetentionButton").addEventListener("click", () => clearQueryRetention().catch((error) => setStatus(error.message, "error")));

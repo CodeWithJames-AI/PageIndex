@@ -272,6 +272,12 @@ def main() -> None:
     query_purge.add_argument("user_id")
     query_purge.add_argument("--dry-run", action="store_true")
 
+    query_export = sub.add_parser("query-export")
+    query_export.add_argument("workspace_id")
+    query_export.add_argument("user_id")
+    query_export.add_argument("--limit", type=int, default=500)
+    query_export.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
+
     delete_query_run = sub.add_parser("delete-query-run")
     delete_query_run.add_argument("workspace_id")
     delete_query_run.add_argument("user_id")
@@ -778,6 +784,18 @@ def main() -> None:
                     ),
                     indent=2,
                 )
+            )
+        elif args.command == "query-export":
+            print(
+                _workspace_member_cli(
+                    lambda: store.export_query_runs(
+                        args.workspace_id,
+                        args.user_id,
+                        limit=args.limit,
+                        format=args.format,
+                    )
+                ),
+                end="",
             )
         elif args.command == "delete-query-run":
             print(

@@ -4793,6 +4793,61 @@ class EnterpriseStore:
             runs.append(run)
         return runs
 
+    def export_query_runs(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        limit: int = 500,
+        *,
+        format: str = "jsonl",
+    ) -> str:
+        runs = self.list_query_runs(workspace_id, actor_user_id, limit=limit)
+        ordered = list(reversed(runs))
+        export_format = format.strip().casefold()
+        if export_format == "jsonl":
+            exported = "\n".join(json.dumps(run, sort_keys=True) for run in ordered)
+        elif export_format == "csv":
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(
+                [
+                    "id",
+                    "workspace_id",
+                    "query",
+                    "created_at",
+                    "completed_at",
+                    "evidence_count",
+                    "citation_count",
+                    "scope_json",
+                ]
+            )
+            for run in ordered:
+                writer.writerow(
+                    [
+                        run["id"],
+                        run["workspace_id"],
+                        run["query"],
+                        run["created_at"],
+                        run["completed_at"] or "",
+                        run["evidence_count"],
+                        run["citation_count"],
+                        json.dumps(run["scope"], sort_keys=True),
+                    ]
+                )
+            exported = output.getvalue()
+        else:
+            raise ValueError("format must be jsonl or csv")
+        self._insert_audit_event(
+            workspace_id,
+            actor_user_id,
+            "query_runs.export",
+            target_type="query_runs",
+            target_id=workspace_id,
+            details={"format": export_format, "run_count": len(runs)},
+        )
+        self._commit()
+        return exported
+
     def delete_query_run(self, run_id: str, *, workspace_id: str, actor_user_id: str) -> bool:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         run_id = run_id.strip()

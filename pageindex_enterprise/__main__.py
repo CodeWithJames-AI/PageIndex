@@ -261,6 +261,17 @@ def main() -> None:
     audit_purge.add_argument("user_id")
     audit_purge.add_argument("--dry-run", action="store_true")
 
+    query_retention = sub.add_parser("query-retention")
+    query_retention.add_argument("workspace_id")
+    query_retention.add_argument("user_id")
+    query_retention.add_argument("--retention-days", type=_positive_int)
+    query_retention.add_argument("--clear", action="store_true")
+
+    query_purge = sub.add_parser("query-purge")
+    query_purge.add_argument("workspace_id")
+    query_purge.add_argument("user_id")
+    query_purge.add_argument("--dry-run", action="store_true")
+
     create_conversation = sub.add_parser("create-conversation")
     create_conversation.add_argument("workspace_id")
     create_conversation.add_argument("user_id")
@@ -736,6 +747,29 @@ def main() -> None:
                 json.dumps(
                     _workspace_member_cli(
                         lambda: store.purge_audit_events_by_retention(args.workspace_id, args.user_id, dry_run=args.dry_run)
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.command == "query-retention":
+            if args.retention_days is not None and args.clear:
+                raise SystemExit("choose --retention-days or --clear")
+            if args.retention_days is None and not args.clear:
+                policy = _workspace_member_cli(lambda: store.get_query_retention_policy(args.workspace_id, args.user_id))
+            else:
+                policy = _workspace_member_cli(
+                    lambda: store.set_query_retention_policy(
+                        args.workspace_id,
+                        args.user_id,
+                        retention_days=None if args.clear else args.retention_days,
+                    )
+                )
+            print(json.dumps(policy, indent=2))
+        elif args.command == "query-purge":
+            print(
+                json.dumps(
+                    _workspace_member_cli(
+                        lambda: store.purge_query_runs_by_retention(args.workspace_id, args.user_id, dry_run=args.dry_run)
                     ),
                     indent=2,
                 )

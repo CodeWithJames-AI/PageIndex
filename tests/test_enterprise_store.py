@@ -933,6 +933,69 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(trace["citations"][0]["doc_id"], doc_id)
             self.assertIsNone(foreign)
 
+    def test_query_retention_policy_purges_runs_and_trace_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "retention.txt"
+            source.write_text("Query retention evidence for compliance review.", encoding="utf-8")
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            other_workspace = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(other_workspace, "mallory", "owner")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Retention memo")
+            old = store.query_corpus("retention evidence", workspace_id=workspace_id, actor_user_id="alice")
+            conversation = store.create_conversation(workspace_id, "alice", title="Retention chat")
+            chat = store.chat_message(conversation["id"], "alice", "retention evidence")
+            fresh = store.query_corpus("compliance review", workspace_id=workspace_id, actor_user_id="alice")
+            other = store.query_corpus("retention evidence", workspace_id=other_workspace, actor_user_id="mallory")
+            old_timestamp = "2000-01-01T00:00:00+00:00"
+            store.conn.execute(
+                "UPDATE query_runs SET created_at = ? WHERE id IN (?, ?)",
+                (old_timestamp, old["run_id"], chat["result"]["run_id"]),
+            )
+            store._commit()
+
+            policy = store.set_query_retention_policy(workspace_id, "alice", retention_days=30)
+            preview = store.purge_query_runs_by_retention(workspace_id, "alice", dry_run=True)
+            purged = store.purge_query_runs_by_retention(workspace_id, "alice")
+            remaining_runs = store.list_query_runs(workspace_id, "alice")
+            chat_messages = store.list_conversation_messages(conversation["id"], "alice")
+            remaining_evidence = int(
+                store.conn.execute(
+                    "SELECT COUNT(*) AS count FROM evidence WHERE run_id IN (?, ?)",
+                    (old["run_id"], chat["result"]["run_id"]),
+                ).fetchone()["count"]
+            )
+            remaining_citations = int(
+                store.conn.execute(
+                    "SELECT COUNT(*) AS count FROM citations WHERE run_id IN (?, ?)",
+                    (old["run_id"], chat["result"]["run_id"]),
+                ).fetchone()["count"]
+            )
+            other_trace = store.get_query_trace(other["run_id"], workspace_id=other_workspace, actor_user_id="mallory")
+            audit_actions = [event["action"] for event in store.list_audit_events(workspace_id, "alice", limit=20)]
+
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.set_query_retention_policy(workspace_id, "bob", retention_days=7)
+            with self.assertRaisesRegex(ValueError, "query retention policy is not set"):
+                store.purge_query_runs_by_retention(other_workspace, "mallory")
+
+            self.assertEqual(policy["retention_days"], 30)
+            self.assertEqual(preview["matched"], 2)
+            self.assertEqual(preview["purged"], 0)
+            self.assertEqual(purged["matched"], 2)
+            self.assertEqual(purged["purged"], 2)
+            self.assertEqual([run["id"] for run in remaining_runs], [fresh["run_id"]])
+            self.assertEqual(remaining_evidence, 0)
+            self.assertEqual(remaining_citations, 0)
+            self.assertIsNone(store.get_query_trace(old["run_id"], workspace_id=workspace_id, actor_user_id="alice"))
+            self.assertIsNone(chat_messages[1]["run_id"])
+            self.assertEqual(other_trace["id"], other["run_id"])
+            self.assertIn("query.retention_policy_update", audit_actions)
+            self.assertIn("query.retention_purge", audit_actions)
+
     def test_conversation_sessions_persist_messages_and_enforce_owner_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2873,6 +2936,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.ingest_file(source, folder_id=folder_id, workspace_id=workspace_id, actor_user_id="alice", name="Import memo")
             store.create_api_token(workspace_id, "alice", name="secret-token")
             store.query_corpus("dry-run", workspace_id=workspace_id, actor_user_id="alice")
+            store.set_query_retention_policy(workspace_id, "alice", retention_days=45)
             store.set_workspace_provider_config(
                 workspace_id,
                 "alice",
@@ -2933,6 +2997,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     actor_user_id="alice",
                 )
                 restored_runs = restored_store.list_query_runs(workspace_id, "alice")
+                restored_query_retention = restored_store.get_query_retention_policy(workspace_id, "alice")
                 restored_provider = restored_store.get_workspace_provider_config(workspace_id, "alice")
                 restored_token_count = int(
                     restored_store.conn.execute("SELECT COUNT(*) AS count FROM api_tokens").fetchone()["count"]
@@ -2955,6 +3020,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(restored_documents[0]["name"], "Import memo")
             self.assertEqual(restored_pages["pages"][0]["content"], "Workspace import dry-run content.")
             self.assertEqual(restored_runs[0]["query"], "dry-run")
+            self.assertEqual(restored_query_retention["retention_days"], 45)
             self.assertEqual(restored_provider["model"], "restore-model")
             self.assertEqual(restored_provider["api_key_env_var"], "PAGEINDEX_RESTORE_PROVIDER_KEY")
             self.assertEqual(restored_token_count, 0)
@@ -3963,6 +4029,139 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(preview["purged"], 0)
             self.assertEqual(purged["purged"], 1)
             self.assertNotIn(old, remaining_ids)
+            self.assertIsNone(cleared["retention_days"])
+            self.assertNotEqual(member_denied.returncode, 0)
+            self.assertIn("workspace role denied", member_denied.stderr)
+            self.assertNotIn("Traceback", member_denied.stderr)
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("choose --retention-days or --clear", invalid.stderr)
+            self.assertNotIn("Traceback", invalid.stderr)
+
+    def test_query_retention_cli_sets_previews_and_purges_without_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "query-retention.txt"
+            source.write_text("CLI query retention evidence.", encoding="utf-8")
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run(
+                [*base, "workspace", "Team", "--workspace-id", "ws_cli"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_cli", "alice", "--role", "owner"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_cli", "mona", "--role", "member", "--actor-user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            store = EnterpriseStore(root)
+            try:
+                store.ingest_file(source, workspace_id="ws_cli", actor_user_id="alice", name="CLI retention memo")
+                old = store.query_corpus("query retention", workspace_id="ws_cli", actor_user_id="alice")
+                fresh = store.query_corpus("retention evidence", workspace_id="ws_cli", actor_user_id="alice")
+                store.conn.execute(
+                    "UPDATE query_runs SET created_at = ? WHERE id = ?",
+                    ("2000-01-01T00:00:00+00:00", old["run_id"]),
+                )
+                store._commit()
+            finally:
+                store.close()
+
+            policy = json.loads(
+                subprocess.run(
+                    [*base, "query-retention", "ws_cli", "alice", "--retention-days", "30"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            read_policy = json.loads(
+                subprocess.run(
+                    [*base, "query-retention", "ws_cli", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            preview = json.loads(
+                subprocess.run(
+                    [*base, "query-purge", "ws_cli", "alice", "--dry-run"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            purged = json.loads(
+                subprocess.run(
+                    [*base, "query-purge", "ws_cli", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            member_denied = subprocess.run(
+                [*base, "query-retention", "ws_cli", "mona"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            invalid = subprocess.run(
+                [*base, "query-retention", "ws_cli", "alice", "--retention-days", "30", "--clear"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            cleared = json.loads(
+                subprocess.run(
+                    [*base, "query-retention", "ws_cli", "alice", "--clear"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            store = EnterpriseStore(root)
+            try:
+                remaining_runs = store.list_query_runs("ws_cli", "alice")
+                old_trace = store.get_query_trace(old["run_id"], workspace_id="ws_cli", actor_user_id="alice")
+            finally:
+                store.close()
+
+            self.assertEqual(policy["retention_days"], 30)
+            self.assertEqual(read_policy["retention_days"], 30)
+            self.assertEqual(preview["matched"], 1)
+            self.assertEqual(preview["purged"], 0)
+            self.assertEqual(purged["purged"], 1)
+            self.assertEqual([run["id"] for run in remaining_runs], [fresh["run_id"]])
+            self.assertIsNone(old_trace)
             self.assertIsNone(cleared["retention_days"])
             self.assertNotEqual(member_denied.returncode, 0)
             self.assertIn("workspace role denied", member_denied.stderr)
@@ -7520,6 +7719,93 @@ class EnterpriseStoreTest(unittest.TestCase):
                 store.close()
             self.assertNotIn(old, remaining_ids)
 
+    def test_http_query_retention_requires_admin_role_and_audit_write_scopes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "query-retention-http.txt"
+            source.write_text("HTTP query retention evidence.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "mona", "member", actor_user_id="alice")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="HTTP retention memo")
+            old = store.query_corpus("query retention", workspace_id=workspace_id, actor_user_id="alice")
+            fresh = store.query_corpus("retention evidence", workspace_id=workspace_id, actor_user_id="alice")
+            store.conn.execute("UPDATE query_runs SET created_at = ? WHERE id = ?", ("2000-01-01T00:00:00+00:00", old["run_id"]))
+            full_token = store.create_api_token(workspace_id, "alice", name="full")["token"]
+            audit_only_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            write_only_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "mona", name="member")
+            member_token = member_token_record["token"]
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store._commit()
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            full_headers = {"Authorization": f"Bearer {full_token}"}
+            audit_headers = {"Authorization": f"Bearer {audit_only_token}"}
+            write_headers = {"Authorization": f"Bearer {write_only_token}"}
+            member_headers = {"Authorization": f"Bearer {member_token}"}
+            try:
+                audit_write_blocked = _post_json(
+                    f"{base}/query-retention",
+                    {"retention_days": 30},
+                    headers=audit_headers,
+                    status=403,
+                )
+                write_audit_blocked = _post_json(
+                    f"{base}/query-retention",
+                    {"retention_days": 30},
+                    headers=write_headers,
+                    status=403,
+                )
+                member_blocked = _get_error(f"{base}/query-retention", headers=member_headers)
+                policy = _post_json(f"{base}/query-retention", {"retention_days": 30}, headers=full_headers)
+                read_policy = _get_json(f"{base}/query-retention", headers=audit_headers)
+                preview = _post_json(
+                    f"{base}/query-retention/purge",
+                    {"dry_run": True},
+                    headers=full_headers,
+                )
+                audit_purge_blocked = _post_json(
+                    f"{base}/query-retention/purge",
+                    {"dry_run": True},
+                    headers=audit_headers,
+                    status=403,
+                )
+                purged = _post_json(f"{base}/query-retention/purge", {}, headers=full_headers)
+                cleared = _post_json(f"{base}/query-retention", {"clear": True}, headers=full_headers)
+
+                self.assertEqual(audit_write_blocked["error"], "api token scope denied")
+                self.assertEqual(write_audit_blocked["error"], "api token scope denied")
+                self.assertEqual(member_blocked["status"], 403)
+                self.assertEqual(member_blocked["error"], "workspace role denied")
+                self.assertEqual(policy["retention_days"], 30)
+                self.assertEqual(read_policy["retention_days"], 30)
+                self.assertEqual(preview["matched"], 1)
+                self.assertEqual(preview["purged"], 0)
+                self.assertEqual(audit_purge_blocked["error"], "api token scope denied")
+                self.assertEqual(purged["purged"], 1)
+                self.assertIsNone(cleared["retention_days"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+            store = EnterpriseStore(root)
+            try:
+                remaining_runs = store.list_query_runs(workspace_id, "alice")
+                old_trace = store.get_query_trace(old["run_id"], workspace_id=workspace_id, actor_user_id="alice")
+            finally:
+                store.close()
+            self.assertEqual([run["id"] for run in remaining_runs], [fresh["run_id"]])
+            self.assertIsNone(old_trace)
+
     def test_http_viewer_role_is_read_only_including_strict_token_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -7724,6 +8010,15 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("clearAuditRetention", body)
                     self.assertIn("previewAuditPurge", body)
                     self.assertIn("purgeAuditEvents", body)
+                    self.assertIn("/query-retention", body)
+                    self.assertIn("/query-retention/purge", body)
+                    self.assertIn("queryRetentionDaysInput", body)
+                    self.assertIn("queryRetentionSummary", body)
+                    self.assertIn("refreshQueryRetention", body)
+                    self.assertIn("saveQueryRetention", body)
+                    self.assertIn("clearQueryRetention", body)
+                    self.assertIn("previewQueryPurge", body)
+                    self.assertIn("purgeQueryRuns", body)
                     self.assertIn("/deployment-check", body)
                     self.assertIn("readinessCheckProviderInput", body)
                     self.assertIn("readinessRequireProviderKeyInput", body)

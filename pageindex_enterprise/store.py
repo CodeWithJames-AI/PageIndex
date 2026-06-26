@@ -51,6 +51,7 @@ WORKSPACE_EXPORT_TABLES = (
     "citations",
     "virtual_nodes",
     "api_token_policy",
+    "query_retention_policy",
     "audit_retention_policy",
     "provider_config",
     "audit_events",
@@ -76,6 +77,7 @@ WORKSPACE_IMPORT_INSERT_ORDER = (
     "conversation_messages",
     "virtual_nodes",
     "api_token_policy",
+    "query_retention_policy",
     "audit_retention_policy",
     "provider_config",
     "audit_events",
@@ -83,6 +85,7 @@ WORKSPACE_IMPORT_INSERT_ORDER = (
 WORKSPACE_IMPORT_DB_TABLES = {
     "workspace": "workspaces",
     "api_token_policy": "api_token_policies",
+    "query_retention_policy": "query_retention_policies",
     "audit_retention_policy": "audit_retention_policies",
     "provider_config": "workspace_provider_configs",
 }
@@ -471,6 +474,8 @@ def _workspace_import_rows_for_insert(table: str, rows: list[dict[str, Any]]) ->
         ]
     if table == "api_token_policy":
         return [row for row in rows if row.get("updated_at")]
+    if table == "query_retention_policy":
+        return [row for row in rows if row.get("updated_at")]
     if table == "audit_retention_policy":
         return [row for row in rows if row.get("updated_at")]
     if table == "provider_config":
@@ -627,6 +632,13 @@ class EnterpriseStore:
             );
 
             CREATE TABLE IF NOT EXISTS audit_retention_policies (
+              workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+              retention_days INTEGER,
+              updated_at TEXT NOT NULL,
+              updated_by TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS query_retention_policies (
               workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
               retention_days INTEGER,
               updated_at TEXT NOT NULL,
@@ -2493,6 +2505,7 @@ class EnterpriseStore:
             ),
             "virtual_nodes.jsonl": self.list_virtual_nodes(workspace_id=workspace_id),
             "api_token_policy.jsonl": [self._api_token_policy(workspace_id)],
+            "query_retention_policy.jsonl": [self._query_retention_policy(workspace_id)],
             "audit_retention_policy.jsonl": [self._audit_retention_policy(workspace_id)],
             "provider_config.jsonl": [self._workspace_provider_config_metadata(workspace_id)],
             "audit_events.jsonl": _workspace_audit_export_rows(self.conn, workspace_id),
@@ -2588,6 +2601,119 @@ class EnterpriseStore:
             )
             inserted += 1
         return inserted
+
+    def _query_retention_policy(self, workspace_id: str) -> dict[str, Any]:
+        self._require_workspace(workspace_id)
+        row = self._one(
+            """
+            SELECT workspace_id, retention_days, updated_at, updated_by
+            FROM query_retention_policies
+            WHERE workspace_id = ?
+            """,
+            (workspace_id,),
+        )
+        if not row:
+            return {
+                "workspace_id": workspace_id,
+                "retention_days": None,
+                "updated_at": None,
+                "updated_by": None,
+            }
+        return dict(row)
+
+    def get_query_retention_policy(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        return self._query_retention_policy(workspace_id)
+
+    def set_query_retention_policy(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        *,
+        retention_days: int | None,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        retention_days = _normalize_policy_days(retention_days, "retention_days")
+        updated_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO query_retention_policies (
+                  workspace_id, retention_days, updated_at, updated_by
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET
+                  retention_days = excluded.retention_days,
+                  updated_at = excluded.updated_at,
+                  updated_by = excluded.updated_by
+                """,
+                (workspace_id, retention_days, updated_at, actor_user_id.strip()),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "query.retention_policy_update",
+                target_type="query_retention_policy",
+                target_id=workspace_id,
+                details={"retention_days": retention_days},
+            )
+        return self._query_retention_policy(workspace_id)
+
+    def purge_query_runs_by_retention(self, workspace_id: str, actor_user_id: str, *, dry_run: bool = False) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        policy = self._query_retention_policy(workspace_id)
+        retention_days = policy["retention_days"]
+        if retention_days is None:
+            raise ValueError("query retention policy is not set")
+        cutoff = (_now_dt() - timedelta(days=retention_days)).isoformat()
+        if dry_run:
+            matched = int(
+                self.conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM query_runs
+                    WHERE workspace_id = ? AND created_at < ?
+                    """,
+                    (workspace_id, cutoff),
+                ).fetchone()["count"]
+            )
+            return {
+                "workspace_id": workspace_id,
+                "retention_days": retention_days,
+                "cutoff": cutoff,
+                "matched": matched,
+                "purged": 0,
+                "dry_run": True,
+            }
+        with self._atomic():
+            deleted = self.conn.execute(
+                """
+                DELETE FROM query_runs
+                WHERE workspace_id = ? AND created_at < ?
+                """,
+                (workspace_id, cutoff),
+            )
+            purged = max(0, deleted.rowcount)
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "query.retention_purge",
+                target_type="query_retention_policy",
+                target_id=workspace_id,
+                details={
+                    "retention_days": retention_days,
+                    "cutoff": cutoff,
+                    "purged": purged,
+                },
+            )
+        return {
+            "workspace_id": workspace_id,
+            "retention_days": retention_days,
+            "cutoff": cutoff,
+            "matched": purged,
+            "purged": purged,
+            "dry_run": False,
+        }
 
     def _audit_retention_policy(self, workspace_id: str) -> dict[str, Any]:
         self._require_workspace(workspace_id)

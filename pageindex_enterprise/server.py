@@ -175,6 +175,14 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            if parsed.path == "/query-retention":
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(store, required_scope="audit")
+                    self._json(store.get_query_retention_policy(workspace_id, user_id))
+                finally:
+                    store.close()
+                return
             if parsed.path == "/deployment-check":
                 self._deployment_check(parsed.query)
                 return
@@ -395,6 +403,12 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/audit-retention/purge":
                 self._purge_audit_retention(payload)
+                return
+            if parsed.path == "/query-retention":
+                self._set_query_retention(payload)
+                return
+            if parsed.path == "/query-retention/purge":
+                self._purge_query_retention(payload)
                 return
             if parsed.path == "/provider-config":
                 self._set_provider_config(payload)
@@ -1167,6 +1181,27 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         finally:
             store.close()
 
+    def _set_query_retention(self, payload: dict[str, Any]) -> None:
+        clear = payload.get("clear", False)
+        if not isinstance(clear, bool):
+            raise ValueError("clear must be a boolean")
+        has_retention_days = "retention_days" in payload and payload.get("retention_days") is not None
+        if clear and has_retention_days:
+            raise ValueError("choose retention_days or clear")
+        if not clear and not has_retention_days:
+            raise ValueError("retention_days is required")
+        retention_days = None
+        if not clear:
+            retention_days = payload["retention_days"]
+            if isinstance(retention_days, bool) or not isinstance(retention_days, int):
+                raise ValueError("retention_days must be a positive integer")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope=("audit", "write"))
+            self._json(store.set_query_retention_policy(workspace_id, user_id, retention_days=retention_days))
+        finally:
+            store.close()
+
     def _get_provider_config(self) -> None:
         store = EnterpriseStore(self.server.root)
         try:
@@ -1237,6 +1272,17 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope=("audit", "write"))
             self._json(store.purge_audit_events_by_retention(workspace_id, user_id, dry_run=dry_run))
+        finally:
+            store.close()
+
+    def _purge_query_retention(self, payload: dict[str, Any]) -> None:
+        dry_run = payload.get("dry_run", False)
+        if not isinstance(dry_run, bool):
+            raise ValueError("dry_run must be a boolean")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope=("audit", "write"))
+            self._json(store.purge_query_runs_by_retention(workspace_id, user_id, dry_run=dry_run))
         finally:
             store.close()
 

@@ -627,6 +627,17 @@ DASHBOARD_HTML = """<!doctype html>
             <div class="doc-actions">
               <button id="refreshQueryRunsButton" class="secondary" type="button">Refresh runs</button>
             </div>
+            <div class="import-row">
+              <input id="queryRetentionDaysInput" value="" placeholder="retention days" aria-label="Query retention days">
+              <button id="saveQueryRetentionButton" type="button">Save</button>
+            </div>
+            <div class="provider-actions">
+              <button id="refreshQueryRetentionButton" class="secondary" type="button">Policy</button>
+              <button id="previewQueryPurgeButton" class="secondary" type="button">Preview</button>
+              <button id="purgeQueryRunsButton" class="secondary" type="button">Purge</button>
+            </div>
+            <button id="clearQueryRetentionButton" class="secondary" type="button">Clear retention</button>
+            <div id="queryRetentionSummary" class="muted">Retention not loaded.</div>
             <div id="queryRunList" class="query-run-list muted">No query runs loaded.</div>
           </section>
         </div>
@@ -706,6 +717,8 @@ DASHBOARD_HTML = """<!doctype html>
     const citationList = document.getElementById("citationList");
     const traceText = document.getElementById("traceText");
     const queryRunList = document.getElementById("queryRunList");
+    const queryRetentionDaysInput = document.getElementById("queryRetentionDaysInput");
+    const queryRetentionSummary = document.getElementById("queryRetentionSummary");
     let activeConversationId = "";
     let activeFolderId = "";
     let workspaceExportUrl = "";
@@ -1060,6 +1073,24 @@ DASHBOARD_HTML = """<!doctype html>
       queryRunList.querySelectorAll("[data-query-run-id]").forEach((button) => {
         button.addEventListener("click", () => loadQueryRunTrace(button.dataset.queryRunId).catch((error) => setStatus(error.message, "error")));
       });
+    }
+
+    function renderQueryRetention(policy) {
+      if (!policy || policy.retention_days == null) {
+        queryRetentionDaysInput.value = "";
+        queryRetentionSummary.className = "muted";
+        queryRetentionSummary.textContent = "Retention not set.";
+        return;
+      }
+      queryRetentionDaysInput.value = String(policy.retention_days);
+      queryRetentionSummary.className = "muted";
+      queryRetentionSummary.textContent = `${policy.retention_days} days | updated ${policy.updated_at || "unknown"}`;
+    }
+
+    function renderQueryPurgeResult(result) {
+      const action = result.dry_run ? "Preview" : "Purge";
+      queryRetentionSummary.className = result.purged > 0 ? "status warn" : "muted";
+      queryRetentionSummary.textContent = `${action}: matched ${result.matched}, purged ${result.purged}`;
     }
 
     function renderConversations(conversations) {
@@ -1735,6 +1766,12 @@ DASHBOARD_HTML = """<!doctype html>
       } catch (error) {
         auditRetentionSummary.className = "muted";
         auditRetentionSummary.textContent = "Retention unavailable.";
+      }
+      try {
+        await refreshQueryRetention({ quiet: true });
+      } catch (error) {
+        queryRetentionSummary.className = "muted";
+        queryRetentionSummary.textContent = "Retention unavailable.";
       }
       try {
         await refreshDeploymentReadiness({ quiet: true });
@@ -2473,6 +2510,80 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Query runs refreshed.", "ok");
     }
 
+    async function refreshQueryRetention(options = {}) {
+      if (!options.quiet) {
+        setStatus("Refreshing query retention...");
+      }
+      const policy = await api("/query-retention");
+      renderQueryRetention(policy);
+      if (!options.quiet) {
+        setStatus("Query retention refreshed.", "ok");
+      }
+    }
+
+    function parsedQueryRetentionDays() {
+      const value = queryRetentionDaysInput.value.trim();
+      if (!value) {
+        setStatus("Enter query retention days.", "warn");
+        return null;
+      }
+      const days = Number(value);
+      if (!Number.isInteger(days) || days <= 0) {
+        setStatus("Query retention days must be a positive integer.", "warn");
+        return null;
+      }
+      return days;
+    }
+
+    async function saveQueryRetention() {
+      const days = parsedQueryRetentionDays();
+      if (days == null) {
+        return;
+      }
+      setStatus("Saving query retention...");
+      const policy = await api("/query-retention", {
+        method: "POST",
+        body: JSON.stringify({ retention_days: days })
+      });
+      renderQueryRetention(policy);
+      setStatus("Query retention saved.", "ok");
+    }
+
+    async function clearQueryRetention() {
+      setStatus("Clearing query retention...");
+      const policy = await api("/query-retention", {
+        method: "POST",
+        body: JSON.stringify({ clear: true })
+      });
+      renderQueryRetention(policy);
+      setStatus("Query retention cleared.", "ok");
+    }
+
+    async function previewQueryPurge() {
+      setStatus("Previewing query purge...");
+      const result = await api("/query-retention/purge", {
+        method: "POST",
+        body: JSON.stringify({ dry_run: true })
+      });
+      renderQueryPurgeResult(result);
+      setStatus("Query purge previewed.", "ok");
+    }
+
+    async function purgeQueryRuns() {
+      if (!window.confirm("Permanently purge query runs older than the retention policy?")) {
+        setStatus("Query purge cancelled.", "warn");
+        return;
+      }
+      setStatus("Purging query runs...");
+      const result = await api("/query-retention/purge", {
+        method: "POST",
+        body: JSON.stringify({})
+      });
+      renderQueryPurgeResult(result);
+      await refreshQueryRuns();
+      setStatus("Query runs purged.", "ok");
+    }
+
     async function loadQueryRunTrace(runId) {
       if (!runId) {
         setStatus("Query run not found.", "warn");
@@ -2514,6 +2625,11 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("importButton").addEventListener("click", () => importStructure().catch((error) => setStatus(error.message, "error")));
     document.getElementById("queryButton").addEventListener("click", () => queryCorpus().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshQueryRunsButton").addEventListener("click", () => refreshQueryRuns().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("refreshQueryRetentionButton").addEventListener("click", () => refreshQueryRetention().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("saveQueryRetentionButton").addEventListener("click", () => saveQueryRetention().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("clearQueryRetentionButton").addEventListener("click", () => clearQueryRetention().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("previewQueryPurgeButton").addEventListener("click", () => previewQueryPurge().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("purgeQueryRunsButton").addEventListener("click", () => purgeQueryRuns().catch((error) => setStatus(error.message, "error")));
     document.getElementById("createConversationButton").addEventListener("click", () => createConversation().catch((error) => setStatus(error.message, "error")));
     document.getElementById("exportConversationButton").addEventListener("click", () => exportConversation().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshConversationsButton").addEventListener("click", () => refreshConversations().catch((error) => setStatus(error.message, "error")));

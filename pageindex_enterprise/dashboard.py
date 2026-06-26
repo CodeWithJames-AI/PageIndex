@@ -441,6 +441,23 @@ DASHBOARD_HTML = """<!doctype html>
             </div>
           </section>
           <section>
+            <h2 class="section-title">Invitations</h2>
+            <div class="stack">
+              <input id="invitationEmailInput" value="" placeholder="email" aria-label="Invitation email">
+              <input id="invitationExpiresInDaysInput" value="" placeholder="expires in days" aria-label="Invitation expiration days">
+              <div class="import-row">
+                <select id="invitationRoleInput" aria-label="Invitation role">
+                  <option value="viewer">viewer</option>
+                  <option value="member" selected>member</option>
+                  <option value="admin">admin</option>
+                </select>
+                <button id="createInvitationButton" type="button">Invite</button>
+              </div>
+              <button id="refreshInvitationsButton" class="secondary" type="button">Refresh invites</button>
+              <div id="invitationList" class="member-list muted">No invitations loaded.</div>
+            </div>
+          </section>
+          <section>
             <h2 class="section-title">Tokens</h2>
             <div class="stack">
               <input id="tokenNameInput" value="" placeholder="token name" aria-label="API token name">
@@ -589,6 +606,9 @@ DASHBOARD_HTML = """<!doctype html>
     const conversationExportText = document.getElementById("conversationExportText");
     const memberUserInput = document.getElementById("memberUserInput");
     const memberRoleInput = document.getElementById("memberRoleInput");
+    const invitationEmailInput = document.getElementById("invitationEmailInput");
+    const invitationExpiresInDaysInput = document.getElementById("invitationExpiresInDaysInput");
+    const invitationRoleInput = document.getElementById("invitationRoleInput");
     const tokenNameInput = document.getElementById("tokenNameInput");
     const tokenExpiresInDaysInput = document.getElementById("tokenExpiresInDaysInput");
     const tokenScopeReadInput = document.getElementById("tokenScopeReadInput");
@@ -625,6 +645,7 @@ DASHBOARD_HTML = """<!doctype html>
     const virtualNodeList = document.getElementById("virtualNodeList");
     const conversationList = document.getElementById("conversationList");
     const memberList = document.getElementById("memberList");
+    const invitationList = document.getElementById("invitationList");
     const tokenList = document.getElementById("tokenList");
     const auditList = document.getElementById("auditList");
     const providerConfigSummary = document.getElementById("providerConfigSummary");
@@ -903,6 +924,29 @@ DASHBOARD_HTML = """<!doctype html>
       });
     }
 
+    function renderInvitations(invitations) {
+      if (!invitations.length) {
+        invitationList.className = "member-list muted";
+        invitationList.textContent = "No invitations loaded.";
+        return;
+      }
+      invitationList.className = "member-list";
+      invitationList.innerHTML = invitations.map((invitation) => `
+        <article class="member">
+          <div class="member-row">
+            <div>
+              <strong>${escapeHtml(invitation.email)}</strong>
+              <div class="muted">${escapeHtml(invitation.role)} | ${escapeHtml(invitation.status)}${invitation.expires_at ? ` | expires ${escapeHtml(invitation.expires_at)}` : ""}</div>
+            </div>
+            ${invitation.status === "pending" ? `<button class="secondary" type="button" data-revoke-invitation-id="${escapeHtml(invitation.id)}">Revoke</button>` : ""}
+          </div>
+        </article>
+      `).join("");
+      invitationList.querySelectorAll("[data-revoke-invitation-id]").forEach((button) => {
+        button.addEventListener("click", () => revokeInvitation(button.dataset.revokeInvitationId).catch((error) => setStatus(error.message, "error")));
+      });
+    }
+
     function renderApiTokens(tokens) {
       if (!tokens.length) {
         tokenList.className = "token-list muted";
@@ -1153,6 +1197,17 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Team refreshed.", "ok");
     }
 
+    async function refreshInvitations(options = {}) {
+      if (!options.quiet) {
+        setStatus("Refreshing invites...");
+      }
+      const payload = await api("/workspace-invitations");
+      renderInvitations(payload.invitations || []);
+      if (!options.quiet) {
+        setStatus("Invitations refreshed.", "ok");
+      }
+    }
+
     async function refreshApiTokens(options = {}) {
       if (!options.quiet) {
         setStatus("Refreshing tokens...");
@@ -1251,6 +1306,12 @@ DASHBOARD_HTML = """<!doctype html>
         memberList.className = "member-list muted";
         memberList.textContent = "Team unavailable.";
         setStatus("Documents and chats refreshed.", "ok");
+      }
+      try {
+        await refreshInvitations({ quiet: true });
+      } catch (error) {
+        invitationList.className = "member-list muted";
+        invitationList.textContent = "Invitations unavailable.";
       }
       try {
         await refreshApiTokens({ quiet: true });
@@ -1390,6 +1451,60 @@ DASHBOARD_HTML = """<!doctype html>
       });
       await refreshMembers();
       setStatus(payload.removed ? "Member removed." : "Member not found.", payload.removed ? "ok" : "warn");
+    }
+
+    function invitationExpiresInDays() {
+      const value = invitationExpiresInDaysInput.value.trim();
+      if (!value) {
+        return null;
+      }
+      const days = Number(value);
+      if (!Number.isInteger(days) || days <= 0) {
+        setStatus("Invitation expiration days must be a positive integer.", "warn");
+        return undefined;
+      }
+      return days;
+    }
+
+    async function createInvitation() {
+      const email = invitationEmailInput.value.trim();
+      if (!email) {
+        setStatus("Enter an invitation email.", "warn");
+        return;
+      }
+      const expiresInDays = invitationExpiresInDays();
+      if (expiresInDays === undefined) {
+        return;
+      }
+      const payload = {
+        email,
+        role: invitationRoleInput.value
+      };
+      if (expiresInDays !== null) {
+        payload.expires_in_days = expiresInDays;
+      }
+      setStatus("Creating invitation...");
+      await api("/workspace-invitations", {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      invitationEmailInput.value = "";
+      invitationExpiresInDaysInput.value = "";
+      await refreshInvitations({ quiet: true });
+      setStatus("Invitation created.", "ok");
+    }
+
+    async function revokeInvitation(invitationId) {
+      if (!invitationId) {
+        setStatus("Invitation not found.", "warn");
+        return;
+      }
+      setStatus("Revoking invitation...");
+      const payload = await api(`/workspace-invitations/${encodeURIComponent(invitationId)}`, {
+        method: "DELETE"
+      });
+      await refreshInvitations({ quiet: true });
+      setStatus(payload.revoked ? "Invitation revoked." : "Invitation not found.", payload.revoked ? "ok" : "warn");
     }
 
     function selectedTokenScopes() {
@@ -1826,6 +1941,8 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("refreshConversationsButton").addEventListener("click", () => refreshConversations().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveMemberButton").addEventListener("click", () => saveMember().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshMembersButton").addEventListener("click", () => refreshMembers().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("createInvitationButton").addEventListener("click", () => createInvitation().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("refreshInvitationsButton").addEventListener("click", () => refreshInvitations().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshTokensButton").addEventListener("click", () => refreshApiTokens().catch((error) => setStatus(error.message, "error")));
     document.getElementById("createTokenButton").addEventListener("click", () => createApiToken().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshTokenPolicyButton").addEventListener("click", () => refreshApiTokenPolicy().catch((error) => setStatus(error.message, "error")));

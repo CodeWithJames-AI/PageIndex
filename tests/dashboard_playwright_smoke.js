@@ -178,6 +178,27 @@ async function waitForAnyText(page, selector, expectedValues) {
     assert(conversationExport.includes("browser evidence"), "conversation export did not include user message");
     assert(conversationExport.includes("## Assistant"), "conversation export did not include assistant message");
 
+    await waitForText(page, "#invitationList", "No invitations loaded.");
+    await page.fill("#invitationEmailInput", "browser-invite@example.com");
+    await page.fill("#invitationExpiresInDaysInput", "7");
+    await page.selectOption("#invitationRoleInput", "viewer");
+    const createInvitationResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/workspace-invitations") && response.request().method() === "POST"
+    );
+    await page.click("#createInvitationButton");
+    await createInvitationResponse;
+    await waitForText(page, "#status", "Invitation created.");
+    await waitForText(page, "#invitationList", "browser-invite@example.com");
+    await waitForText(page, "#invitationList", "pending");
+
+    const revokeInvitationResponse = page.waitForResponse(
+      (response) => response.url().includes("/workspace-invitations/") && response.request().method() === "DELETE"
+    );
+    await page.locator("[data-revoke-invitation-id]").first().click();
+    await revokeInvitationResponse;
+    await waitForText(page, "#status", "Invitation revoked.");
+    await waitForText(page, "#invitationList", "revoked");
+
     await waitForText(page, "#tokenList", "browser");
     await page.fill("#tokenNameInput", "browser-child");
     await page.fill("#tokenExpiresInDaysInput", "7");
@@ -397,6 +418,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       accessExercised: true,
       folderExercised: true,
       virtualNodeExercised: true,
+      invitationExercised: true,
       conversationExportExercised: true,
       tokenExercised: true,
       tokenPolicyExercised: true,

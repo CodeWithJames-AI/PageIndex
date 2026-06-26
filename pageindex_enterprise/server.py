@@ -245,6 +245,23 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/workspace-export":
                 self._workspace_export()
                 return
+            if parsed.path == "/workspace-invitations":
+                params = parse_qs(parsed.query)
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+                    self._json(
+                        {
+                            "invitations": store.list_workspace_invitations(
+                                workspace_id,
+                                user_id,
+                                status=_str_param(params, "status"),
+                            )
+                        }
+                    )
+                finally:
+                    store.close()
+                return
             if parsed.path == "/workspace-members":
                 store = EnterpriseStore(self.server.root)
                 try:
@@ -291,6 +308,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/workspace-members":
                 self._upsert_workspace_member(payload)
+                return
+            if parsed.path == "/workspace-invitations":
+                self._create_workspace_invitation(payload)
                 return
             if parsed.path == "/audit-retention":
                 self._set_audit_retention(payload)
@@ -349,6 +369,20 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     workspace_id, user_id = self._workspace_context(store, required_scope="write")
                     removed = store.remove_workspace_member(workspace_id, member_user_id, user_id)
                     self._json({"removed": removed})
+                finally:
+                    store.close()
+                return
+            invitation_id = _workspace_invitation_path(parsed.path)
+            if invitation_id:
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(
+                        store,
+                        required_scope=("audit", "write"),
+                        require_api_token=True,
+                    )
+                    revoked = store.revoke_workspace_invitation(workspace_id, user_id, invitation_id)
+                    self._json({"revoked": revoked})
                 finally:
                     store.close()
                 return
@@ -601,6 +635,33 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 self._json({"updated": False})
                 return
             self._json({"updated": True, "document": document})
+        finally:
+            store.close()
+
+    def _create_workspace_invitation(self, payload: dict[str, Any]) -> None:
+        email = payload.get("email")
+        if not isinstance(email, str) or not email.strip():
+            raise ValueError("email is required")
+        if payload.get("expires_at") is not None and payload.get("expires_in_days") is not None:
+            raise ValueError("choose expires_at or expires_in_days")
+        expires_at = _optional_str(payload.get("expires_at"), "expires_at")
+        if payload.get("expires_in_days") is not None:
+            expires_at = expires_at_from_days(_optional_positive_int(payload.get("expires_in_days"), "expires_in_days"))
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope=("audit", "write"),
+                require_api_token=True,
+            )
+            invitation = store.create_workspace_invitation(
+                workspace_id,
+                user_id,
+                email,
+                role=_optional_str(payload.get("role"), "role") or "member",
+                expires_at=expires_at,
+            )
+            self._json({"invitation": invitation}, HTTPStatus.CREATED)
         finally:
             store.close()
 
@@ -1387,6 +1448,13 @@ def _document_pages_path(path: str) -> str | None:
 def _workspace_member_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "workspace-members":
+        return unquote(parts[1])
+    return None
+
+
+def _workspace_invitation_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "workspace-invitations":
         return unquote(parts[1])
     return None
 

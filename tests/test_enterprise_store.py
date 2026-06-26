@@ -370,6 +370,89 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("invitation is not pending", wrong_invitee.stderr)
             self.assertNotIn("Traceback", wrong_invitee.stderr)
 
+    def test_http_workspace_invitations_are_admin_scoped_and_audited(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store.conn.commit()
+            member_token = member_token_record["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            url = f"{base}/workspace-invitations"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            audit_headers = {"Authorization": f"Bearer {audit_token}"}
+            write_headers = {"Authorization": f"Bearer {write_token}"}
+            member_headers = {"Authorization": f"Bearer {member_token}"}
+            try:
+                missing = _get_error(url)
+                write_get = _get_error(url, headers=write_headers)
+                initial = _get_json(url, headers=audit_headers)
+                audit_post = _post_json(
+                    url,
+                    {"email": "carol@example.com", "role": "viewer"},
+                    status=403,
+                    headers=audit_headers,
+                )
+                member_post = _post_json(
+                    url,
+                    {"email": "carol@example.com", "role": "viewer"},
+                    status=403,
+                    headers=member_headers,
+                )
+                created = _post_json(
+                    url,
+                    {"email": "CAROL@Example.COM", "role": "viewer", "expires_in_days": 7},
+                    status=201,
+                    headers=owner_headers,
+                )
+                duplicate = _post_json(
+                    url,
+                    {"email": "carol@example.com", "role": "viewer"},
+                    status=400,
+                    headers=owner_headers,
+                )
+                pending = _get_json(f"{url}?status=pending", headers=owner_headers)
+                revoked = _delete_json(
+                    f"{url}/{created['invitation']['id']}",
+                    headers=owner_headers,
+                )
+                revoked_again = _delete_json(
+                    f"{url}/{created['invitation']['id']}",
+                    headers=owner_headers,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(missing["error"], "api token required")
+            self.assertEqual(write_get["error"], "api token scope denied")
+            self.assertEqual(initial["invitations"], [])
+            self.assertEqual(audit_post["error"], "api token scope denied")
+            self.assertEqual(member_post["error"], "workspace role denied")
+            self.assertEqual(created["invitation"]["email"], "carol@example.com")
+            self.assertEqual(created["invitation"]["role"], "viewer")
+            self.assertEqual(created["invitation"]["status"], "pending")
+            self.assertIsNotNone(created["invitation"]["expires_at"])
+            self.assertEqual(duplicate["error"], "pending invitation already exists")
+            self.assertEqual([invitation["id"] for invitation in pending["invitations"]], [created["invitation"]["id"]])
+            self.assertTrue(revoked["revoked"])
+            self.assertFalse(revoked_again["revoked"])
+
     def test_legacy_global_folder_path_unique_schema_is_migrated(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -6171,6 +6254,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("memberList", body)
                     self.assertIn("saveMember", body)
                     self.assertIn("removeMember", body)
+                    self.assertIn("/workspace-invitations", body)
+                    self.assertIn("invitationEmailInput", body)
+                    self.assertIn("invitationList", body)
+                    self.assertIn("refreshInvitations", body)
+                    self.assertIn("createInvitation", body)
+                    self.assertIn("revokeInvitation", body)
                     self.assertIn("/api-tokens", body)
                     self.assertIn("tokenNameInput", body)
                     self.assertIn("tokenExpiresInDaysInput", body)
@@ -6314,6 +6403,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["accessExercised"], True)
             self.assertEqual(smoke["folderExercised"], True)
             self.assertEqual(smoke["virtualNodeExercised"], True)
+            self.assertEqual(smoke["invitationExercised"], True)
             self.assertEqual(smoke["conversationExportExercised"], True)
             self.assertEqual(smoke["tokenExercised"], True)
             self.assertEqual(smoke["tokenPolicyExercised"], True)

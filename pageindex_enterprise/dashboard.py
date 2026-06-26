@@ -903,6 +903,7 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="doc-actions">
             <button class="secondary" type="button" data-select-folder-id="${escapeHtml(folder.id)}">Select</button>
             <button class="secondary" type="button" data-rename-folder-id="${escapeHtml(folder.id)}">Rename</button>
+            <button class="secondary" type="button" data-move-folder-id="${escapeHtml(folder.id)}">Move</button>
             <button class="secondary" type="button" data-delete-folder-id="${escapeHtml(folder.id)}">Delete</button>
           </div>
         </article>
@@ -918,6 +919,9 @@ DASHBOARD_HTML = """<!doctype html>
       });
       folderList.querySelectorAll("[data-rename-folder-id]").forEach((button) => {
         button.addEventListener("click", () => renameFolder(button.dataset.renameFolderId).catch((error) => setStatus(error.message, "error")));
+      });
+      folderList.querySelectorAll("[data-move-folder-id]").forEach((button) => {
+        button.addEventListener("click", () => moveFolder(button.dataset.moveFolderId).catch((error) => setStatus(error.message, "error")));
       });
       folderList.querySelectorAll("[data-delete-folder-id]").forEach((button) => {
         button.addEventListener("click", () => deleteFolder(button.dataset.deleteFolderId).catch((error) => setStatus(error.message, "error")));
@@ -1606,6 +1610,26 @@ DASHBOARD_HTML = """<!doctype html>
       folderNameInput.value = "";
       await refreshFolders({ quiet: true, selectedFolderId: payload.folder ? payload.folder.id : folderId });
       setStatus("Folder renamed.", "ok");
+    }
+
+    async function moveFolder(folderId) {
+      if (!folderId) {
+        setStatus("Folder not found.", "warn");
+        return;
+      }
+      const parentId = selectedFolderId();
+      if (parentId === folderId) {
+        setStatus("Choose a different parent folder.", "warn");
+        return;
+      }
+      const payload = parentId ? { parent_id: parentId } : {};
+      setStatus("Moving folder...");
+      const moved = await api(`/folders/${encodeURIComponent(folderId)}/move`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      await refreshFolders({ quiet: true, selectedFolderId: moved.folder ? moved.folder.id : folderId });
+      setStatus("Folder moved.", "ok");
     }
 
     async function deleteFolder(folderId) {

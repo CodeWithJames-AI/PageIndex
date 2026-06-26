@@ -99,6 +99,12 @@ def main() -> None:
     delete_folder.add_argument("--workspace-id")
     delete_folder.add_argument("--user-id")
 
+    move_folder = sub.add_parser("move-folder")
+    move_folder.add_argument("folder_id")
+    move_folder.add_argument("--parent-id")
+    move_folder.add_argument("--workspace-id")
+    move_folder.add_argument("--user-id")
+
     workspace = sub.add_parser("workspace")
     workspace.add_argument("name")
     workspace.add_argument("--workspace-id")
@@ -449,6 +455,18 @@ def main() -> None:
                 )
             )
             print(json.dumps({"deleted": deleted}))
+        elif args.command == "move-folder":
+            moved_folder = _folder_cli(
+                lambda: store.move_folder(
+                    args.folder_id,
+                    parent_id=args.parent_id,
+                    workspace_id=args.workspace_id,
+                    actor_user_id=args.user_id,
+                )
+            )
+            if moved_folder is None:
+                raise SystemExit("folder not found")
+            print(json.dumps(moved_folder, indent=2))
         elif args.command == "workspace":
             print(store.create_workspace(args.name, workspace_id=args.workspace_id))
         elif args.command == "add-member":

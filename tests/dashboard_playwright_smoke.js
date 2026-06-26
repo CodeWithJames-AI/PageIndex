@@ -214,6 +214,28 @@ async function waitForAnyText(page, selector, expectedValues) {
     const folderId = await folderCard.getAttribute("data-folder-id");
     assert(folderId, "created folder id was not rendered");
 
+    await page.fill("#folderNameInput", "Browser Child");
+    const createChildFolderResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/folders") && response.request().method() === "POST"
+    );
+    await page.click("#createFolderButton");
+    await createChildFolderResponse;
+    await waitForText(page, "#status", "Folder created.");
+    await waitForText(page, "#folderList", "/Browser/Browser Child");
+    const childFolderCard = page.locator("[data-folder-id]").filter({ hasText: "/Browser/Browser Child" }).first();
+    const childFolderId = await childFolderCard.getAttribute("data-folder-id");
+    assert(childFolderId, "created child folder id was not rendered");
+
+    await page.selectOption("#folderSelect", "");
+    await waitForText(page, "#status", "No folder selected.");
+    const moveFolderResponse = page.waitForResponse(
+      (response) => response.url().includes(`/folders/${childFolderId}/move`) && response.request().method() === "POST"
+    );
+    await page.locator(`[data-folder-id="${childFolderId}"] [data-move-folder-id]`).click();
+    await moveFolderResponse;
+    await waitForText(page, "#status", "Folder moved.");
+    await waitForText(page, "#folderList", "/Browser Child");
+
     await page.fill("#folderNameInput", "Browser Archive");
     const renameFolderResponse = page.waitForResponse(
       (response) => response.url().includes(`/folders/${folderId}`) && response.request().method() === "PUT"
@@ -228,6 +250,14 @@ async function waitForAnyText(page, selector, expectedValues) {
     );
     await page.locator(`[data-folder-id="${folderId}"] [data-delete-folder-id]`).click();
     await deleteFolderResponse;
+    await waitForText(page, "#status", "Folder deleted.");
+    await waitForText(page, "#folderList", "/Browser Child");
+
+    const deleteMovedFolderResponse = page.waitForResponse(
+      (response) => response.url().includes(`/folders/${childFolderId}`) && response.request().method() === "DELETE"
+    );
+    await page.locator(`[data-folder-id="${childFolderId}"] [data-delete-folder-id]`).click();
+    await deleteMovedFolderResponse;
     await waitForText(page, "#status", "Folder deleted.");
     await waitForText(page, "#folderList", "No folders loaded.");
 
@@ -531,6 +561,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       groupLifecycleExercised: true,
       folderExercised: true,
       folderLifecycleExercised: true,
+      folderMoveExercised: true,
       virtualNodeExercised: true,
       invitationExercised: true,
       conversationExportExercised: true,

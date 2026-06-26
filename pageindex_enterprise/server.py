@@ -336,6 +336,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/folders":
                 self._create_folder(payload)
                 return
+            folder_move_id = _folder_move_path(parsed.path)
+            if folder_move_id:
+                self._move_folder(folder_move_id, payload)
+                return
             if parsed.path == "/import-structure":
                 self._import_structure(payload)
                 return
@@ -659,6 +663,23 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             workspace_id, user_id = self._workspace_context(store, required_scope="write")
             deleted = store.delete_folder(folder_id, workspace_id=workspace_id, actor_user_id=user_id)
             self._json({"deleted": deleted})
+        finally:
+            store.close()
+
+    def _move_folder(self, folder_id: str, payload: dict[str, Any]) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            folder = store.move_folder(
+                folder_id,
+                parent_id=_optional_str(payload.get("parent_id"), "parent_id"),
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+            )
+            if folder is None:
+                self._json({"error": "folder not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._json({"folder": folder})
         finally:
             store.close()
 
@@ -1636,6 +1657,13 @@ def _document_path(path: str) -> str | None:
 def _folder_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "folders":
+        return unquote(parts[1])
+    return None
+
+
+def _folder_move_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "folders" and parts[2] == "move":
         return unquote(parts[1])
     return None
 

@@ -130,6 +130,44 @@ class EnterpriseStoreTest(unittest.TestCase):
                 ["folder.delete"],
             )
 
+    def test_workspace_folders_can_be_moved_without_cycles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EnterpriseStore(Path(tmp) / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "vera", "viewer", actor_user_id="alice")
+
+            reports = store.create_folder("Reports", workspace_id=workspace_id, actor_user_id="alice")
+            archive = store.create_folder("Archive", parent_id=reports, actor_user_id="alice")
+            q1 = store.create_folder("Q1", parent_id=archive, actor_user_id="alice")
+            legal = store.create_folder("Legal", workspace_id=workspace_id, actor_user_id="alice")
+            store.create_folder("Archive", workspace_id=workspace_id, actor_user_id="alice")
+
+            with self.assertRaisesRegex(ValueError, "Folder path already exists"):
+                store.move_folder(archive, workspace_id=workspace_id, actor_user_id="alice")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.move_folder(archive, parent_id=legal, workspace_id=workspace_id, actor_user_id="vera")
+
+            moved = store.move_folder(archive, parent_id=legal, workspace_id=workspace_id, actor_user_id="alice")
+            folders = store.list_folders(workspace_id)
+
+            self.assertIsNotNone(moved)
+            self.assertEqual(moved["parent_id"], legal)
+            self.assertEqual(moved["path"], "/Legal/Archive")
+            self.assertIn("/Legal/Archive/Q1", [folder["path"] for folder in folders])
+
+            with self.assertRaisesRegex(ValueError, "Folder cannot be moved under itself"):
+                store.move_folder(legal, parent_id=q1, workspace_id=workspace_id, actor_user_id="alice")
+
+            moved_q1 = store.move_folder(q1, workspace_id=workspace_id, actor_user_id="alice")
+            self.assertIsNotNone(moved_q1)
+            self.assertIsNone(moved_q1["parent_id"])
+            self.assertEqual(moved_q1["path"], "/Q1")
+            self.assertEqual(
+                [event["action"] for event in store.list_audit_events(workspace_id, "alice", action="folder.move")],
+                ["folder.move", "folder.move"],
+            )
+
     def test_workspace_folder_lifecycle_cli_renames_and_deletes_without_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -169,12 +207,40 @@ class EnterpriseStoreTest(unittest.TestCase):
                 text=True,
                 check=True,
             ).stdout.strip()
+            target_folder_id = subprocess.run(
+                [*base, "folder", "Target", "--workspace-id", "ws_folder_cli", "--user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
             denied = subprocess.run(
                 [*base, "rename-folder", folder_id, "Blocked", "--workspace-id", "ws_folder_cli", "--user-id", "vera"],
                 cwd=repo_root,
                 env=env,
                 capture_output=True,
                 text=True,
+            )
+            moved = json.loads(
+                subprocess.run(
+                    [
+                        *base,
+                        "move-folder",
+                        folder_id,
+                        "--parent-id",
+                        target_folder_id,
+                        "--workspace-id",
+                        "ws_folder_cli",
+                        "--user-id",
+                        "alice",
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
             )
             renamed = json.loads(
                 subprocess.run(
@@ -196,6 +262,16 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            target_deleted = json.loads(
+                subprocess.run(
+                    [*base, "delete-folder", target_folder_id, "--workspace-id", "ws_folder_cli", "--user-id", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
             store = EnterpriseStore(root)
             try:
                 folders = store.list_folders("ws_folder_cli")
@@ -205,8 +281,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotEqual(denied.returncode, 0)
             self.assertIn("workspace role denied", denied.stderr)
             self.assertNotIn("Traceback", denied.stderr)
-            self.assertEqual(renamed["path"], "/Reports 2026")
+            self.assertEqual(moved["path"], "/Target/Reports")
+            self.assertEqual(renamed["path"], "/Target/Reports 2026")
             self.assertEqual(deleted, {"deleted": True})
+            self.assertEqual(target_deleted, {"deleted": True})
             self.assertEqual(folders, [])
 
     def test_workspace_member_lifecycle_is_owner_admin_audited_and_invalidates_tokens(self):
@@ -4973,6 +5051,30 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )
                 bad_name = _post_json(f"{base}/folders", {"name": " "}, headers=owner_a_headers, status=400)
                 duplicate = _post_json(f"{base}/folders", {"name": "Reports"}, headers=owner_a_headers, status=400)
+                read_move_blocked = _post_json(
+                    f"{base}/folders/{archive_a['folder_id']}/move",
+                    {},
+                    headers=read_a_headers,
+                    status=403,
+                )
+                viewer_move_blocked = _post_json(
+                    f"{base}/folders/{archive_a['folder_id']}/move",
+                    {},
+                    headers=viewer_headers,
+                    status=403,
+                )
+                self_move_blocked = _post_json(
+                    f"{base}/folders/{reports_a['folder_id']}/move",
+                    {"parent_id": archive_a["folder_id"]},
+                    headers=owner_a_headers,
+                    status=400,
+                )
+                moved_archive = _post_json(
+                    f"{base}/folders/{archive_a['folder_id']}/move",
+                    {},
+                    headers=owner_a_headers,
+                )
+                folders_a_moved = _get_json(f"{base}/folders", headers=read_a_headers)
                 read_rename_blocked = _put_json(
                     f"{base}/folders/{reports_a['folder_id']}",
                     {"name": "Blocked"},
@@ -5010,6 +5112,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=owner_b_headers,
                     status=404,
                 )
+                foreign_move_blocked = _post_json(
+                    f"{base}/folders/{archive_a['folder_id']}/move",
+                    {},
+                    headers=owner_b_headers,
+                    status=404,
+                )
                 read_delete_blocked = _delete_json(
                     f"{base}/folders/{reports_a['folder_id']}",
                     headers=read_a_headers,
@@ -5026,6 +5134,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )
                 deleted = _delete_json(f"{base}/folders/{reports_a['folder_id']}", headers=owner_a_headers)
                 deleted_again = _delete_json(f"{base}/folders/{reports_a['folder_id']}", headers=owner_a_headers)
+                archive_deleted = _delete_json(f"{base}/folders/{archive_a['folder_id']}", headers=owner_a_headers)
                 folders_a_after_delete = _get_json(f"{base}/folders", headers=read_a_headers)
                 documents_after_delete = _get_json(f"{base}/documents", headers=read_a_headers)
                 folders_b = _get_json(f"{base}/folders", headers=owner_b_headers)
@@ -5042,10 +5151,15 @@ class EnterpriseStoreTest(unittest.TestCase):
                 [(folder["name"], folder["path"]) for folder in folders_a["folders"]],
                 [("Reports", "/Reports"), ("Archive", "/Reports/Archive")],
             )
+            self.assertEqual(moved_archive["folder"]["path"], "/Archive")
+            self.assertEqual(
+                [(folder["name"], folder["path"]) for folder in folders_a_moved["folders"]],
+                [("Archive", "/Archive"), ("Reports", "/Reports")],
+            )
             self.assertEqual(renamed["folder"]["path"], "/Reports 2026")
             self.assertEqual(
                 [(folder["name"], folder["path"]) for folder in folders_a_renamed["folders"]],
-                [("Reports 2026", "/Reports 2026"), ("Archive", "/Reports 2026/Archive")],
+                [("Archive", "/Archive"), ("Reports 2026", "/Reports 2026")],
             )
             self.assertEqual([(folder["name"], folder["path"]) for folder in folders_b["folders"]], [("Reports", "/Reports")])
             self.assertEqual(documents_a["documents"][0]["id"], foldered_doc["doc_id"])
@@ -5056,16 +5170,21 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(viewer_write_blocked["error"], "workspace role denied")
             self.assertEqual(bad_name["error"], "name is required")
             self.assertEqual(duplicate["error"], "Folder path already exists in this workspace.")
+            self.assertEqual(read_move_blocked["error"], "api token scope denied")
+            self.assertEqual(viewer_move_blocked["error"], "workspace role denied")
+            self.assertEqual(self_move_blocked["error"], "Folder cannot be moved under itself.")
             self.assertEqual(read_rename_blocked["error"], "api token scope denied")
             self.assertEqual(viewer_rename_blocked["error"], "workspace role denied")
             self.assertEqual(foreign_parent_blocked["error"], "folder access denied")
             self.assertEqual(foreign_folder_ingest_blocked["error"], "folder access denied")
             self.assertEqual(foreign_rename_blocked["error"], "folder not found")
+            self.assertEqual(foreign_move_blocked["error"], "folder not found")
             self.assertEqual(read_delete_blocked["error"], "api token scope denied")
             self.assertEqual(viewer_delete_blocked["error"], "workspace role denied")
             self.assertEqual(foreign_delete_blocked["deleted"], False)
             self.assertEqual(deleted["deleted"], True)
             self.assertEqual(deleted_again["deleted"], False)
+            self.assertEqual(archive_deleted["deleted"], True)
 
     def test_http_virtual_nodes_are_workspace_scoped_and_read_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7192,8 +7311,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("refreshFolders", body)
                     self.assertIn("createFolder", body)
                     self.assertIn("renameFolder", body)
+                    self.assertIn("moveFolder", body)
                     self.assertIn("deleteFolder", body)
                     self.assertIn("data-rename-folder-id", body)
+                    self.assertIn("data-move-folder-id", body)
                     self.assertIn("data-delete-folder-id", body)
                     self.assertIn("/virtual-nodes", body)
                     self.assertIn("virtualNodeQueryInput", body)
@@ -7416,6 +7537,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["groupLifecycleExercised"], True)
             self.assertEqual(smoke["folderExercised"], True)
             self.assertEqual(smoke["folderLifecycleExercised"], True)
+            self.assertEqual(smoke["folderMoveExercised"], True)
             self.assertEqual(smoke["virtualNodeExercised"], True)
             self.assertEqual(smoke["invitationExercised"], True)
             self.assertEqual(smoke["conversationExportExercised"], True)

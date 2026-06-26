@@ -836,7 +836,9 @@ class EnterpriseStore:
 
     def _rebuild_folders_without_global_path_unique(self) -> None:
         self.conn.commit()
+        legacy_alter_table = self.conn.execute("PRAGMA legacy_alter_table").fetchone()[0]
         self.conn.execute("PRAGMA foreign_keys = OFF")
+        self.conn.execute("PRAGMA legacy_alter_table = ON")
         try:
             self.conn.execute("ALTER TABLE folders RENAME TO folders_old")
             self.conn.execute(
@@ -860,6 +862,7 @@ class EnterpriseStore:
             self.conn.execute("DROP TABLE folders_old")
             self.conn.commit()
         finally:
+            self.conn.execute(f"PRAGMA legacy_alter_table = {int(legacy_alter_table)}")
             self.conn.execute("PRAGMA foreign_keys = ON")
 
     def create_workspace(self, name: str, workspace_id: str | None = None) -> str:

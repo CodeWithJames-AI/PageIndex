@@ -454,6 +454,14 @@ DASHBOARD_HTML = """<!doctype html>
             </div>
           </section>
           <section>
+            <h2 class="section-title">Usage</h2>
+            <div class="stack">
+              <button id="refreshUsageButton" class="secondary" type="button">Refresh usage</button>
+              <div id="usageSummary" class="muted">Usage not loaded.</div>
+              <pre id="usageReportText">{}</pre>
+            </div>
+          </section>
+          <section>
             <h2 class="section-title">Invitations</h2>
             <div class="stack">
               <input id="invitationEmailInput" value="" placeholder="email" aria-label="Invitation email">
@@ -668,6 +676,8 @@ DASHBOARD_HTML = """<!doctype html>
     const conversationList = document.getElementById("conversationList");
     const memberList = document.getElementById("memberList");
     const groupList = document.getElementById("groupList");
+    const usageSummary = document.getElementById("usageSummary");
+    const usageReportText = document.getElementById("usageReportText");
     const invitationList = document.getElementById("invitationList");
     const tokenList = document.getElementById("tokenList");
     const auditList = document.getElementById("auditList");
@@ -1029,6 +1039,24 @@ DASHBOARD_HTML = """<!doctype html>
       });
     }
 
+    function renderWorkspaceUsage(usage) {
+      if (!usage) {
+        usageSummary.className = "muted";
+        usageSummary.textContent = "Usage not loaded.";
+        usageReportText.textContent = "{}";
+        return;
+      }
+      const documents = usage.documents || {};
+      const team = usage.team || {};
+      const tokens = usage.api_tokens || {};
+      const conversations = usage.conversations || {};
+      const retrieval = usage.retrieval || {};
+      const audit = usage.audit || {};
+      usageSummary.className = "muted";
+      usageSummary.textContent = `${documents.count || 0} docs | ${documents.pages || 0} pages | ${team.members || 0} members | ${team.groups || 0} groups | ${tokens.active || 0} tokens | ${conversations.count || 0} chats | ${retrieval.query_runs || 0} queries | ${audit.events || 0} audit events`;
+      usageReportText.textContent = JSON.stringify(usage, null, 2);
+    }
+
     function renderInvitations(invitations) {
       if (!invitations.length) {
         invitationList.className = "member-list muted";
@@ -1349,6 +1377,17 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function refreshUsage(options = {}) {
+      if (!options.quiet) {
+        setStatus("Refreshing usage...");
+      }
+      const payload = await api("/workspace-usage");
+      renderWorkspaceUsage(payload.usage);
+      if (!options.quiet) {
+        setStatus("Usage refreshed.", "ok");
+      }
+    }
+
     async function refreshInvitations(options = {}) {
       if (!options.quiet) {
         setStatus("Refreshing invites...");
@@ -1464,6 +1503,13 @@ DASHBOARD_HTML = """<!doctype html>
       } catch (error) {
         groupList.className = "group-list muted";
         groupList.textContent = "Groups unavailable.";
+      }
+      try {
+        await refreshUsage({ quiet: true });
+      } catch (error) {
+        usageSummary.className = "muted";
+        usageSummary.textContent = "Usage unavailable.";
+        usageReportText.textContent = "{}";
       }
       try {
         await refreshInvitations({ quiet: true });
@@ -2198,6 +2244,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("refreshMembersButton").addEventListener("click", () => refreshMembers().catch((error) => setStatus(error.message, "error")));
     document.getElementById("createGroupButton").addEventListener("click", () => createGroup().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshGroupsButton").addEventListener("click", () => refreshGroups().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("refreshUsageButton").addEventListener("click", () => refreshUsage().catch((error) => setStatus(error.message, "error")));
     document.getElementById("createInvitationButton").addEventListener("click", () => createInvitation().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshInvitationsButton").addEventListener("click", () => refreshInvitations().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshTokensButton").addEventListener("click", () => refreshApiTokens().catch((error) => setStatus(error.message, "error")));

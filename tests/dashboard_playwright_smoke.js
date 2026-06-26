@@ -62,6 +62,12 @@ async function waitForAnyText(page, selector, expectedValues) {
     await page.click("#refreshButton");
     await waitForText(page, "#documentList", expectedDocument);
     await waitForAnyText(page, "#status", ["Team refreshed.", "Documents and chats refreshed."]);
+    await waitForText(page, "#usageSummary", "1 docs");
+    await waitForText(page, "#usageSummary", "1 tokens");
+    const initialUsage = JSON.parse((await page.textContent("#usageReportText")) || "{}");
+    assert(initialUsage.documents?.count === 1, "usage report did not count seeded document");
+    assert(initialUsage.documents?.pages === 1, "usage report did not count seeded page");
+    assert(initialUsage.api_tokens?.active === 1, "usage report did not count active token");
 
     const versionsResponse = page.waitForResponse(
       (response) => response.url().includes("/documents/") && response.url().endsWith("/versions") && response.request().method() === "GET"
@@ -500,6 +506,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       versionExercised: true,
       pagePreviewExercised: true,
       accessExercised: true,
+      usageExercised: true,
       groupExercised: true,
       groupLifecycleExercised: true,
       folderExercised: true,

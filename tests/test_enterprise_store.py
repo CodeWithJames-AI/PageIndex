@@ -453,6 +453,92 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(revoked["revoked"])
             self.assertFalse(revoked_again["revoked"])
 
+    def test_workspace_usage_summary_counts_admin_surface(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "usage.txt"
+            source.write_text("Usage analytics evidence.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Usage memo")
+            store.rebuild_virtual_index()
+            group = store.create_workspace_group(workspace_id, "alice", "Analysts")
+            store.add_workspace_group_member(workspace_id, "alice", group["id"], "bob")
+            store.create_workspace_invitation(workspace_id, "alice", "carol@example.com", role="viewer")
+            store.create_api_token(
+                workspace_id,
+                "alice",
+                name="usage",
+                expires_at=(datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+            )
+            conversation = store.create_conversation(workspace_id, "alice", title="Usage chat")
+            store.chat_message(conversation["id"], "alice", "usage analytics", limit=4)
+
+            summary = store.get_workspace_usage_summary(workspace_id, "alice")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.get_workspace_usage_summary(workspace_id, "bob")
+
+            self.assertEqual(summary["workspace_id"], workspace_id)
+            self.assertEqual(summary["documents"]["count"], 1)
+            self.assertEqual(summary["documents"]["pages"], 1)
+            self.assertEqual(summary["documents"]["versions"], 1)
+            self.assertEqual(summary["documents"]["by_kind"], {"txt": 1})
+            self.assertEqual(summary["team"]["members"], 2)
+            self.assertEqual(summary["team"]["members_by_role"], {"member": 1, "owner": 1})
+            self.assertEqual(summary["team"]["groups"], 1)
+            self.assertEqual(summary["team"]["group_members"], 1)
+            self.assertEqual(summary["team"]["invitations_by_status"], {"pending": 1})
+            self.assertEqual(summary["api_tokens"]["active"], 1)
+            self.assertEqual(summary["api_tokens"]["with_expiration"], 1)
+            self.assertEqual(summary["conversations"]["count"], 1)
+            self.assertEqual(summary["conversations"]["messages"], 2)
+            self.assertEqual(summary["retrieval"]["query_runs"], 1)
+            self.assertGreaterEqual(summary["retrieval"]["evidence"], 1)
+            self.assertGreaterEqual(summary["retrieval"]["citations"], 1)
+            self.assertGreaterEqual(summary["retrieval"]["virtual_nodes"], 1)
+            self.assertGreater(summary["audit"]["events"], 0)
+            self.assertIsNotNone(summary["audit"]["latest_event_at"])
+            self.assertEqual(store.list_documents(workspace_id=workspace_id, actor_user_id="alice")[0]["id"], doc_id)
+
+    def test_workspace_usage_cli_outputs_counts_without_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run([*base, "workspace", "Team", "--workspace-id", "ws_usage"], cwd=repo_root, env=env, capture_output=True, text=True, check=True)
+            subprocess.run([*base, "add-member", "ws_usage", "alice", "--role", "owner"], cwd=repo_root, env=env, capture_output=True, text=True, check=True)
+            subprocess.run([*base, "add-member", "ws_usage", "bob", "--role", "member", "--actor-user-id", "alice"], cwd=repo_root, env=env, capture_output=True, text=True, check=True)
+
+            usage = json.loads(
+                subprocess.run(
+                    [*base, "workspace-usage", "ws_usage", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            denied = subprocess.run(
+                [*base, "workspace-usage", "ws_usage", "bob"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(usage["workspace_id"], "ws_usage")
+            self.assertEqual(usage["team"]["members"], 2)
+            self.assertEqual(usage["team"]["members_by_role"], {"member": 1, "owner": 1})
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertIn("workspace role denied", denied.stderr)
+            self.assertNotIn("Traceback", denied.stderr)
+
     def test_legacy_global_folder_path_unique_schema_is_migrated(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -2833,6 +2919,56 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(preview["workspace_id"], workspace_id)
             self.assertEqual(preview["table_counts"]["documents"], 1)
             self.assertEqual(after_events, before_events)
+
+    def test_http_workspace_usage_requires_admin_audit_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "http-usage-source.txt"
+            source.write_text("HTTP usage evidence.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="HTTP usage memo")
+            store.create_workspace_group(workspace_id, "alice", "Analysts")
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store.conn.commit()
+            member_token = member_token_record["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            url = f"{base}/workspace-usage"
+            try:
+                missing = _get_error(url)
+                write_denied = _get_error(url, headers={"Authorization": f"Bearer {write_token}"})
+                member_denied = _get_error(url, headers={"Authorization": f"Bearer {member_token}"})
+                usage = _get_json(url, headers={"Authorization": f"Bearer {owner_token}"})["usage"]
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            serialized = json.dumps(usage, sort_keys=True)
+            self.assertEqual(missing["error"], "api token required")
+            self.assertEqual(write_denied["error"], "api token scope denied")
+            self.assertEqual(member_denied["error"], "workspace role denied")
+            self.assertEqual(usage["workspace_id"], workspace_id)
+            self.assertEqual(usage["documents"]["count"], 1)
+            self.assertEqual(usage["documents"]["pages"], 1)
+            self.assertEqual(usage["team"]["members"], 2)
+            self.assertEqual(usage["team"]["groups"], 1)
+            self.assertEqual(usage["api_tokens"]["active"], 3)
+            self.assertNotIn("pit_", serialized)
+            self.assertNotIn("token_hash", serialized)
 
     def test_token_lifecycle_cli_lists_and_revokes_without_leaking_hashes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6925,6 +7061,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("documentAccessGroupInput", body)
                     self.assertIn("grantDocumentGroupAccess", body)
                     self.assertIn("revokeDocumentGroupAccess", body)
+                    self.assertIn("/workspace-usage", body)
+                    self.assertIn("usageSummary", body)
+                    self.assertIn("usageReportText", body)
+                    self.assertIn("refreshUsage", body)
+                    self.assertIn("renderWorkspaceUsage", body)
                     self.assertIn("/workspace-invitations", body)
                     self.assertIn("invitationEmailInput", body)
                     self.assertIn("invitationList", body)
@@ -7081,6 +7222,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["versionExercised"], True)
             self.assertEqual(smoke["pagePreviewExercised"], True)
             self.assertEqual(smoke["accessExercised"], True)
+            self.assertEqual(smoke["usageExercised"], True)
             self.assertEqual(smoke["groupExercised"], True)
             self.assertEqual(smoke["groupLifecycleExercised"], True)
             self.assertEqual(smoke["folderExercised"], True)

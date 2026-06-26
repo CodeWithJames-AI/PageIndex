@@ -262,6 +262,14 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            if parsed.path == "/workspace-usage":
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+                    self._json({"usage": store.get_workspace_usage_summary(workspace_id, user_id)})
+                finally:
+                    store.close()
+                return
             group_members_id = _workspace_group_members_path(parsed.path)
             if group_members_id:
                 store = EnterpriseStore(self.server.root)

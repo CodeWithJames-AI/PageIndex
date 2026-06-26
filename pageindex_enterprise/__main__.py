@@ -95,6 +95,10 @@ def main() -> None:
     list_members.add_argument("workspace_id")
     list_members.add_argument("actor_user_id")
 
+    workspace_usage = sub.add_parser("workspace-usage")
+    workspace_usage.add_argument("workspace_id")
+    workspace_usage.add_argument("actor_user_id")
+
     remove_member = sub.add_parser("remove-member")
     remove_member.add_argument("workspace_id")
     remove_member.add_argument("user_id")
@@ -414,6 +418,15 @@ def main() -> None:
                 json.dumps(
                     _workspace_member_cli(
                         lambda: store.list_workspace_members(args.workspace_id, args.actor_user_id)
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.command == "workspace-usage":
+            print(
+                json.dumps(
+                    _workspace_member_cli(
+                        lambda: store.get_workspace_usage_summary(args.workspace_id, args.actor_user_id)
                     ),
                     indent=2,
                 )

@@ -1182,6 +1182,116 @@ class EnterpriseStore:
         )
         return [dict(row) for row in rows]
 
+    def get_workspace_usage_summary(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+
+        def count(sql: str, args: tuple[Any, ...] = (workspace_id,)) -> int:
+            row = self.conn.execute(sql, args).fetchone()
+            return int(row["count"]) if row else 0
+
+        def grouped(sql: str, args: tuple[Any, ...] = (workspace_id,)) -> dict[str, int]:
+            return {str(row["name"]): int(row["count"]) for row in self.conn.execute(sql, args)}
+
+        latest_audit = self.conn.execute(
+            "SELECT MAX(created_at) AS created_at FROM audit_events WHERE workspace_id = ?",
+            (workspace_id,),
+        ).fetchone()
+        virtual_nodes = self.conn.execute(
+            """
+            SELECT COUNT(DISTINCT n.id) AS count
+            FROM virtual_nodes n
+            LEFT JOIN virtual_node_docs vnd ON vnd.virtual_node_id = n.id
+            LEFT JOIN documents vd ON vd.id = vnd.doc_id
+            LEFT JOIN documents nd ON nd.id = n.doc_id
+            WHERE vd.workspace_id = ? OR nd.workspace_id = ?
+            """,
+            (workspace_id, workspace_id),
+        ).fetchone()
+        return {
+            "workspace_id": workspace_id,
+            "documents": {
+                "count": count("SELECT COUNT(*) AS count FROM documents WHERE workspace_id = ?"),
+                "pages": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM document_pages p
+                    JOIN documents d ON d.id = p.doc_id
+                    WHERE d.workspace_id = ?
+                    """
+                ),
+                "versions": count("SELECT COUNT(*) AS count FROM document_versions WHERE workspace_id = ?"),
+                "restricted": count(
+                    "SELECT COUNT(*) AS count FROM documents WHERE workspace_id = ? AND access_mode = 'restricted'"
+                ),
+                "by_kind": grouped(
+                    """
+                    SELECT kind AS name, COUNT(*) AS count
+                    FROM documents
+                    WHERE workspace_id = ?
+                    GROUP BY kind
+                    ORDER BY kind
+                    """
+                ),
+            },
+            "team": {
+                "members": count("SELECT COUNT(*) AS count FROM workspace_members WHERE workspace_id = ?"),
+                "members_by_role": grouped(
+                    """
+                    SELECT role AS name, COUNT(*) AS count
+                    FROM workspace_members
+                    WHERE workspace_id = ?
+                    GROUP BY role
+                    ORDER BY role
+                    """
+                ),
+                "groups": count("SELECT COUNT(*) AS count FROM workspace_groups WHERE workspace_id = ?"),
+                "group_members": count("SELECT COUNT(*) AS count FROM workspace_group_members WHERE workspace_id = ?"),
+                "invitations_by_status": grouped(
+                    """
+                    SELECT status AS name, COUNT(*) AS count
+                    FROM workspace_invitations
+                    WHERE workspace_id = ?
+                    GROUP BY status
+                    ORDER BY status
+                    """
+                ),
+            },
+            "api_tokens": {
+                "active": count("SELECT COUNT(*) AS count FROM api_tokens WHERE workspace_id = ?"),
+                "with_expiration": count(
+                    "SELECT COUNT(*) AS count FROM api_tokens WHERE workspace_id = ? AND expires_at IS NOT NULL"
+                ),
+            },
+            "conversations": {
+                "count": count("SELECT COUNT(*) AS count FROM conversations WHERE workspace_id = ?"),
+                "messages": count("SELECT COUNT(*) AS count FROM conversation_messages WHERE workspace_id = ?"),
+            },
+            "retrieval": {
+                "query_runs": count("SELECT COUNT(*) AS count FROM query_runs WHERE workspace_id = ?"),
+                "evidence": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM evidence e
+                    JOIN query_runs q ON q.id = e.run_id
+                    WHERE q.workspace_id = ?
+                    """
+                ),
+                "citations": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM citations c
+                    JOIN query_runs q ON q.id = c.run_id
+                    WHERE q.workspace_id = ?
+                    """
+                ),
+                "virtual_nodes": int(virtual_nodes["count"]) if virtual_nodes else 0,
+            },
+            "audit": {
+                "events": count("SELECT COUNT(*) AS count FROM audit_events WHERE workspace_id = ?"),
+                "latest_event_at": latest_audit["created_at"] if latest_audit else None,
+            },
+        }
+
     def rename_workspace_group(
         self,
         workspace_id: str,

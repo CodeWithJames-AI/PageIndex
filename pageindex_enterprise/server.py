@@ -380,6 +380,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         try:
             parsed = urlparse(self.path)
+            group_id = _workspace_group_path(parsed.path)
+            if group_id:
+                self._rename_workspace_group(group_id, self._read_json())
+                return
             doc_id = _document_path(parsed.path)
             if doc_id:
                 self._reindex_document(doc_id, self._read_json())
@@ -433,6 +437,20 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     )
                     removed = store.remove_workspace_group_member(workspace_id, user_id, group_id, group_user_id)
                     self._json({"removed": removed})
+                finally:
+                    store.close()
+                return
+            group_id = _workspace_group_path(parsed.path)
+            if group_id:
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(
+                        store,
+                        required_scope=("audit", "write"),
+                        require_api_token=True,
+                    )
+                    deleted = store.delete_workspace_group(workspace_id, user_id, group_id)
+                    self._json({"deleted": deleted})
                 finally:
                     store.close()
                 return
@@ -743,6 +761,22 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 require_api_token=True,
             )
             group = store.add_workspace_group_member(workspace_id, user_id, group_id, target_user_id)
+            self._json({"group": group})
+        finally:
+            store.close()
+
+    def _rename_workspace_group(self, group_id: str, payload: dict[str, Any]) -> None:
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name is required")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope=("audit", "write"),
+                require_api_token=True,
+            )
+            group = store.rename_workspace_group(workspace_id, user_id, group_id, name)
             self._json({"group": group})
         finally:
             store.close()
@@ -1585,6 +1619,13 @@ def _workspace_member_path(path: str) -> str | None:
 def _workspace_invitation_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "workspace-invitations":
+        return unquote(parts[1])
+    return None
+
+
+def _workspace_group_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "workspace-groups":
         return unquote(parts[1])
     return None
 

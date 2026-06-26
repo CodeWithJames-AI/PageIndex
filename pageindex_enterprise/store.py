@@ -1182,6 +1182,62 @@ class EnterpriseStore:
         )
         return [dict(row) for row in rows]
 
+    def rename_workspace_group(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        group_id: str,
+        name: str,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        group = self._require_workspace_group(workspace_id, group_id)
+        name = name.strip()
+        if not name:
+            raise ValueError("Group name is required.")
+        if name == group["name"]:
+            return group
+        try:
+            with self._atomic():
+                self.conn.execute(
+                    "UPDATE workspace_groups SET name = ? WHERE workspace_id = ? AND id = ?",
+                    (name, workspace_id, group["id"]),
+                )
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "workspace_group.rename",
+                    target_type="workspace_group",
+                    target_id=group["id"],
+                    details={"previous_name": group["name"], "name": name},
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Group name already exists in this workspace.") from exc
+        updated = self._workspace_group(workspace_id, group["id"])
+        assert updated is not None
+        return updated
+
+    def delete_workspace_group(self, workspace_id: str, actor_user_id: str, group_id: str) -> bool:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        group = self._workspace_group(workspace_id, group_id)
+        if group is None:
+            return False
+        with self._atomic():
+            cursor = self.conn.execute(
+                "DELETE FROM workspace_groups WHERE workspace_id = ? AND id = ?",
+                (workspace_id, group["id"]),
+            )
+            deleted = cursor.rowcount > 0
+            if deleted:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "workspace_group.delete",
+                    target_type="workspace_group",
+                    target_id=group["id"],
+                    details={"name": group["name"]},
+                )
+        return deleted
+
     def list_workspace_group_members(
         self,
         workspace_id: str,

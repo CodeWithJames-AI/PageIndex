@@ -1002,10 +1002,11 @@ DASHBOARD_HTML = """<!doctype html>
           <article class="member" data-group-id="${escapeHtml(group.id)}">
             <strong>${escapeHtml(group.name)}</strong>
             <div class="muted">${escapeHtml(group.id)} | ${escapeHtml(group.member_count || 0)} members</div>
-            <div class="provider-actions" style="margin-top:8px">
+            <div class="doc-actions">
               <button class="secondary" type="button" data-add-group-member-id="${escapeHtml(group.id)}">Add</button>
+              <button class="secondary" type="button" data-rename-group-id="${escapeHtml(group.id)}">Rename</button>
               <button class="secondary" type="button" data-refresh-group-members-id="${escapeHtml(group.id)}">Members</button>
-              <span></span>
+              <button class="secondary" type="button" data-delete-group-id="${escapeHtml(group.id)}">Delete</button>
             </div>
             <div class="stack" style="margin-top:8px">${memberRows}</div>
           </article>
@@ -1014,8 +1015,14 @@ DASHBOARD_HTML = """<!doctype html>
       groupList.querySelectorAll("[data-add-group-member-id]").forEach((button) => {
         button.addEventListener("click", () => addGroupMember(button.dataset.addGroupMemberId).catch((error) => setStatus(error.message, "error")));
       });
+      groupList.querySelectorAll("[data-rename-group-id]").forEach((button) => {
+        button.addEventListener("click", () => renameGroup(button.dataset.renameGroupId).catch((error) => setStatus(error.message, "error")));
+      });
       groupList.querySelectorAll("[data-refresh-group-members-id]").forEach((button) => {
         button.addEventListener("click", () => refreshGroups().catch((error) => setStatus(error.message, "error")));
+      });
+      groupList.querySelectorAll("[data-delete-group-id]").forEach((button) => {
+        button.addEventListener("click", () => deleteGroup(button.dataset.deleteGroupId).catch((error) => setStatus(error.message, "error")));
       });
       groupList.querySelectorAll("[data-remove-group-member-id]").forEach((button) => {
         button.addEventListener("click", () => removeGroupMember(button.dataset.removeGroupMemberId, button.dataset.removeGroupMemberUserId).catch((error) => setStatus(error.message, "error")));
@@ -1638,6 +1645,39 @@ DASHBOARD_HTML = """<!doctype html>
       groupMemberUserInput.value = "";
       await refreshGroups({ quiet: true });
       setStatus("Group member added.", "ok");
+    }
+
+    async function renameGroup(groupId) {
+      const name = groupNameInput.value.trim();
+      if (!groupId) {
+        setStatus("Group not found.", "warn");
+        return;
+      }
+      if (!name) {
+        setStatus("Enter a group name.", "warn");
+        return;
+      }
+      setStatus("Renaming group...");
+      await api(`/workspace-groups/${encodeURIComponent(groupId)}`, {
+        method: "PUT",
+        body: JSON.stringify({ name })
+      });
+      groupNameInput.value = "";
+      await refreshGroups({ quiet: true });
+      setStatus("Group renamed.", "ok");
+    }
+
+    async function deleteGroup(groupId) {
+      if (!groupId) {
+        setStatus("Group not found.", "warn");
+        return;
+      }
+      setStatus("Deleting group...");
+      const payload = await api(`/workspace-groups/${encodeURIComponent(groupId)}`, {
+        method: "DELETE"
+      });
+      await refreshGroups({ quiet: true });
+      setStatus(payload.deleted ? "Group deleted." : "Group not found.", payload.deleted ? "ok" : "warn");
     }
 
     async function removeGroupMember(groupId, userId) {

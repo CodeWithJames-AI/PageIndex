@@ -109,6 +109,17 @@ def main() -> None:
     list_groups.add_argument("workspace_id")
     list_groups.add_argument("actor_user_id")
 
+    rename_group = sub.add_parser("rename-group")
+    rename_group.add_argument("workspace_id")
+    rename_group.add_argument("actor_user_id")
+    rename_group.add_argument("group_id")
+    rename_group.add_argument("name")
+
+    delete_group = sub.add_parser("delete-group")
+    delete_group.add_argument("workspace_id")
+    delete_group.add_argument("actor_user_id")
+    delete_group.add_argument("group_id")
+
     add_group_member = sub.add_parser("add-group-member")
     add_group_member.add_argument("workspace_id")
     add_group_member.add_argument("actor_user_id")
@@ -431,6 +442,25 @@ def main() -> None:
                 lambda: store.list_workspace_groups(args.workspace_id, args.actor_user_id)
             )
             print(json.dumps(groups, indent=2))
+        elif args.command == "rename-group":
+            group = _workspace_member_cli(
+                lambda: store.rename_workspace_group(
+                    args.workspace_id,
+                    args.actor_user_id,
+                    args.group_id,
+                    args.name,
+                )
+            )
+            print(json.dumps(group, indent=2))
+        elif args.command == "delete-group":
+            deleted = _workspace_member_cli(
+                lambda: store.delete_workspace_group(
+                    args.workspace_id,
+                    args.actor_user_id,
+                    args.group_id,
+                )
+            )
+            print(json.dumps({"deleted": deleted}))
         elif args.command == "add-group-member":
             group = _workspace_member_cli(
                 lambda: store.add_workspace_group_member(

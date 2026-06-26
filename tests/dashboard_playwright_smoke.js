@@ -135,6 +135,15 @@ async function waitForAnyText(page, selector, expectedValues) {
     const groupId = await groupCard.getAttribute("data-group-id");
     assert(groupId, "created group id was not rendered");
 
+    await page.fill("#groupNameInput", "Browser legal");
+    const renameGroupResponse = page.waitForResponse(
+      (response) => response.url().includes(`/workspace-groups/${groupId}`) && response.request().method() === "PUT"
+    );
+    await page.locator(`[data-group-id="${groupId}"] [data-rename-group-id]`).click();
+    await renameGroupResponse;
+    await waitForText(page, "#status", "Group renamed.");
+    await waitForText(page, "#groupList", "Browser legal");
+
     await page.fill("#groupMemberUserInput", "alice");
     const addGroupMemberResponse = page.waitForResponse(
       (response) => response.url().includes(`/workspace-groups/${groupId}/members`) && response.request().method() === "POST"
@@ -154,7 +163,7 @@ async function waitForAnyText(page, selector, expectedValues) {
     await page.click("#grantDocumentGroupAccessButton");
     await grantGroupAccessResponse;
     await waitForText(page, "#status", "Document group access granted.");
-    await waitForText(page, "#documentAccessPanel", "Browser reviewers");
+    await waitForText(page, "#documentAccessPanel", "Browser legal");
 
     const revokeGroupAccessResponse = page.waitForResponse(
       (response) => response.url().includes("/documents/")
@@ -174,6 +183,14 @@ async function waitForAnyText(page, selector, expectedValues) {
     await removeGroupMemberResponse;
     await waitForText(page, "#status", "Group member removed.");
     await waitForText(page, "#groupList", "No group members.");
+
+    const deleteGroupResponse = page.waitForResponse(
+      (response) => response.url().includes(`/workspace-groups/${groupId}`) && response.request().method() === "DELETE"
+    );
+    await page.locator(`[data-group-id="${groupId}"] [data-delete-group-id]`).click();
+    await deleteGroupResponse;
+    await waitForText(page, "#status", "Group deleted.");
+    await waitForText(page, "#groupList", "No groups loaded.");
 
     await waitForText(page, "#folderList", "No folders loaded.");
 
@@ -484,6 +501,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       pagePreviewExercised: true,
       accessExercised: true,
       groupExercised: true,
+      groupLifecycleExercised: true,
       folderExercised: true,
       virtualNodeExercised: true,
       invitationExercised: true,

@@ -3944,6 +3944,59 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("document.group_access_grant", actions)
             self.assertIn("document.group_access_revoke", actions)
 
+    def test_workspace_groups_can_be_renamed_and_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            restricted = tmp_path / "delete-group-secret.txt"
+            restricted.write_text("Group delete visibility evidence.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            doc_id = store.ingest_file(restricted, workspace_id=workspace_id, actor_user_id="alice", name="Delete group secret")
+            store.set_document_access_mode(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+            group = store.create_workspace_group(workspace_id, "alice", "Legal")
+            store.create_workspace_group(workspace_id, "alice", "Archive")
+            store.add_workspace_group_member(workspace_id, "alice", group["id"], "bob")
+
+            renamed = store.rename_workspace_group(workspace_id, "alice", group["id"], "Compliance")
+            with self.assertRaisesRegex(ValueError, "Group name already exists"):
+                store.rename_workspace_group(workspace_id, "alice", group["id"], "Archive")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.rename_workspace_group(workspace_id, "bob", group["id"], "Member Rename")
+            granted = store.grant_document_group_access(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                group_id=group["id"],
+            )
+            bob_visible = store.query_corpus("visibility evidence", workspace_id=workspace_id, actor_user_id="bob")
+            deleted = store.delete_workspace_group(workspace_id, "alice", group["id"])
+            deleted_again = store.delete_workspace_group(workspace_id, "alice", group["id"])
+            bob_hidden = store.query_corpus("visibility evidence", workspace_id=workspace_id, actor_user_id="bob")
+            access_after_delete = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            groups_after_delete = store.list_workspace_groups(workspace_id, "alice")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.delete_workspace_group(workspace_id, "bob", "missing")
+            events = store.list_audit_events(workspace_id, "alice", limit=50)
+            actions = [event["action"] for event in events]
+
+            self.assertEqual(renamed["name"], "Compliance")
+            self.assertEqual(granted["group_grants"][0]["group_name"], "Compliance")
+            self.assertEqual(bob_visible["citations"][0]["doc_id"], doc_id)
+            self.assertTrue(deleted)
+            self.assertFalse(deleted_again)
+            self.assertEqual(bob_hidden["citations"], [])
+            self.assertEqual(access_after_delete["group_grants"], [])
+            self.assertEqual([group["name"] for group in groups_after_delete], ["Archive"])
+            self.assertIn("workspace_group.rename", actions)
+            self.assertIn("workspace_group.delete", actions)
+
     def test_workspace_group_cli_grants_document_access_without_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -4001,6 +4054,16 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            renamed = json.loads(
+                subprocess.run(
+                    [*base, "rename-group", "ws_group_acl", "alice", group["id"], "Compliance"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
             bob_visible = json.loads(
                 subprocess.run(
                     [*base, "search", "acquisition", "--workspace-id", "ws_group_acl", "--user-id", "bob"],
@@ -4031,8 +4094,46 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            subprocess.run(
+                [*base, "add-group-member", "ws_group_acl", "alice", group["id"], "bob"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            bob_visible_again = json.loads(
+                subprocess.run(
+                    [*base, "search", "acquisition", "--workspace-id", "ws_group_acl", "--user-id", "bob"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            deleted = json.loads(
+                subprocess.run(
+                    [*base, "delete-group", "ws_group_acl", "alice", group["id"]],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            bob_hidden_after_delete = json.loads(
+                subprocess.run(
+                    [*base, "search", "acquisition", "--workspace-id", "ws_group_acl", "--user-id", "bob"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
             member_denied = subprocess.run(
-                [*base, "add-group-member", "ws_group_acl", "bob", group["id"], "bob"],
+                [*base, "delete-group", "ws_group_acl", "bob", group["id"]],
                 cwd=repo_root,
                 env=env,
                 capture_output=True,
@@ -4040,10 +4141,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
 
             self.assertEqual(group["name"], "Legal")
+            self.assertEqual(renamed["name"], "Compliance")
             self.assertEqual(granted["group_grants"][0]["group_id"], group["id"])
             self.assertEqual(bob_visible[0]["id"], doc_id)
             self.assertTrue(removed["removed"])
             self.assertEqual(bob_hidden, [])
+            self.assertEqual(bob_visible_again[0]["id"], doc_id)
+            self.assertTrue(deleted["deleted"])
+            self.assertEqual(bob_hidden_after_delete, [])
             self.assertNotEqual(member_denied.returncode, 0)
             self.assertIn("workspace role denied", member_denied.stderr)
             self.assertNotIn("Traceback", member_denied.stderr)
@@ -6151,6 +6256,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                 write_create = _post_json(group_url, {"name": "Legal"}, status=403, headers=write_headers)
                 created = _post_json(group_url, {"name": "Legal"}, status=201, headers=owner_headers)
                 group_id = created["group"]["id"]
+                audit_rename = _put_json(
+                    f"{group_url}/{group_id}",
+                    {"name": "Compliance"},
+                    status=403,
+                    headers=audit_headers,
+                )
+                write_delete = _delete_json(f"{group_url}/{group_id}", status=403, headers=write_headers)
+                renamed = _put_json(f"{group_url}/{group_id}", {"name": "Compliance"}, headers=owner_headers)
                 listed = _get_json(group_url, headers=owner_headers)
                 empty_members = _get_json(f"{group_url}/{group_id}/members", headers=owner_headers)
                 member_add_denied = _post_json(
@@ -6188,6 +6301,22 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )
                 revoke_group = _post_json(access_url, {"revoke_group_id": group_id}, headers=owner_headers)
                 remove_again = _delete_json(f"{group_url}/{group_id}/members/bob", headers=owner_headers)
+                added_again = _post_json(
+                    f"{group_url}/{group_id}/members",
+                    {"user_id": "bob"},
+                    headers=owner_headers,
+                )
+                group_granted_again = _post_json(access_url, {"grant_group_id": group_id}, headers=owner_headers)
+                bob_docs_before_delete = _get_json(f"{base}/documents", headers=member_headers)["documents"]
+                deleted = _delete_json(f"{group_url}/{group_id}", headers=owner_headers)
+                access_after_delete = _get_json(access_url, headers=owner_headers)
+                bob_docs_after_delete = _get_json(f"{base}/documents", headers=member_headers)["documents"]
+                bob_query_after_delete = _post_json(
+                    f"{base}/query",
+                    {"query": "diligence evidence"},
+                    headers=member_headers,
+                )
+                delete_again = _delete_json(f"{group_url}/{group_id}", headers=owner_headers)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -6205,8 +6334,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(initial["groups"], [])
             self.assertEqual(audit_create["error"], "api token scope denied")
             self.assertEqual(write_create["error"], "api token scope denied")
+            self.assertEqual(audit_rename["error"], "api token scope denied")
+            self.assertEqual(write_delete["error"], "api token scope denied")
             self.assertEqual(created["group"]["name"], "Legal")
+            self.assertEqual(renamed["group"]["name"], "Compliance")
             self.assertEqual(listed["groups"][0]["id"], group_id)
+            self.assertEqual(listed["groups"][0]["name"], "Compliance")
             self.assertEqual(empty_members["members"], [])
             self.assertEqual(member_add_denied["error"], "workspace role denied")
             self.assertEqual(added["group"]["member_count"], 1)
@@ -6214,7 +6347,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(bob_docs_before, [])
             self.assertEqual(bob_query_before["citations"], [])
             self.assertEqual(group_granted["access"]["group_grants"][0]["group_id"], group_id)
-            self.assertEqual(group_granted["access"]["group_grants"][0]["group_name"], "Legal")
+            self.assertEqual(group_granted["access"]["group_grants"][0]["group_name"], "Compliance")
             self.assertEqual([doc["id"] for doc in bob_docs_after_grant], [doc_id])
             self.assertEqual(bob_query_after_grant["citations"][0]["doc_id"], doc_id)
             self.assertEqual(bob_pages_after_grant["pages"][0]["content"], "HTTP group diligence evidence.")
@@ -6224,9 +6357,19 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(revoke_group["revoked"])
             self.assertEqual(revoke_group["access"]["group_grants"], [])
             self.assertFalse(remove_again["removed"])
+            self.assertEqual(added_again["group"]["member_count"], 1)
+            self.assertEqual(group_granted_again["access"]["group_grants"][0]["group_name"], "Compliance")
+            self.assertEqual([doc["id"] for doc in bob_docs_before_delete], [doc_id])
+            self.assertTrue(deleted["deleted"])
+            self.assertEqual(access_after_delete["access"]["group_grants"], [])
+            self.assertEqual(bob_docs_after_delete, [])
+            self.assertEqual(bob_query_after_delete["citations"], [])
+            self.assertFalse(delete_again["deleted"])
             self.assertIn("workspace_group.create", actions)
+            self.assertIn("workspace_group.rename", actions)
             self.assertIn("workspace_group_member.add", actions)
             self.assertIn("workspace_group_member.remove", actions)
+            self.assertIn("workspace_group.delete", actions)
             self.assertIn("document.group_access_grant", actions)
             self.assertIn("document.group_access_revoke", actions)
 
@@ -6775,6 +6918,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("groupList", body)
                     self.assertIn("refreshGroups", body)
                     self.assertIn("createGroup", body)
+                    self.assertIn("renameGroup", body)
+                    self.assertIn("deleteGroup", body)
                     self.assertIn("addGroupMember", body)
                     self.assertIn("removeGroupMember", body)
                     self.assertIn("documentAccessGroupInput", body)
@@ -6937,6 +7082,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["pagePreviewExercised"], True)
             self.assertEqual(smoke["accessExercised"], True)
             self.assertEqual(smoke["groupExercised"], True)
+            self.assertEqual(smoke["groupLifecycleExercised"], True)
             self.assertEqual(smoke["folderExercised"], True)
             self.assertEqual(smoke["virtualNodeExercised"], True)
             self.assertEqual(smoke["invitationExercised"], True)
@@ -7493,6 +7639,24 @@ def _post_json(url: str, payload: dict, status: int = 200, headers=None):
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", **(headers or {})},
         method="POST",
+    )
+    try:
+        with urlopen(request) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            assert response.status == status
+            return body
+    except HTTPError as exc:
+        body = json.loads(exc.read().decode("utf-8"))
+        assert exc.code == status
+        return body
+
+
+def _put_json(url: str, payload: dict, status: int = 200, headers=None):
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="PUT",
     )
     try:
         with urlopen(request) as response:

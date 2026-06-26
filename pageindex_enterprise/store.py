@@ -29,9 +29,35 @@ DOCUMENT_ACCESS_MODES = {"workspace", "restricted"}
 API_TOKEN_SCOPES = ("read", "write", "audit")
 MAX_CONVERSATION_MESSAGE_CHARS = 4000
 CHAT_TRACE_QUERY = "[conversation message redacted]"
+WORKSPACE_EXPORT_FORMAT = "pageindex.workspace-export.v1"
+WORKSPACE_EXPORT_TABLES = (
+    "workspace",
+    "workspace_members",
+    "workspace_invitations",
+    "folders",
+    "documents",
+    "document_access_grants",
+    "document_pages",
+    "document_versions",
+    "conversations",
+    "conversation_messages",
+    "query_runs",
+    "evidence",
+    "citations",
+    "virtual_nodes",
+    "api_token_policy",
+    "audit_retention_policy",
+    "provider_config",
+    "audit_events",
+)
+WORKSPACE_EXPORT_OMITTED_TABLES = ("api_tokens",)
+WORKSPACE_EXPORT_OMITTED_POLICIES = ("api_tokens", "document filesystem paths")
 _UNSET = object()
 _AUDIT_SINK_SECRET_VALUE = re.compile(r"(pit_[A-Za-z0-9_-]+|Bearer\s+\S+|sk-[A-Za-z0-9_-]+)", re.IGNORECASE)
 _ENV_VAR_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_ABSOLUTE_SOURCE_PATH = re.compile(
+    r"(^|[\s:\"'])(/(?:Users|home|tmp|private|var|Volumes|opt|etc)/[^\s\"']+|[A-Za-z]:\\[^\s\"']+)"
+)
 
 
 def _now() -> str:
@@ -250,6 +276,165 @@ def _workspace_audit_export_rows(conn: sqlite3.Connection, workspace_id: str) ->
         event["details"] = json.loads(event.pop("details_json"))
         events.append(_redact_audit_sink_event(event))
     return events
+
+
+def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
+    """Validate a workspace export bundle without mutating any store state."""
+    path = Path(bundle_path).expanduser()
+    errors: list[str] = []
+    warnings: list[str] = []
+    table_counts: dict[str, int] = {}
+    manifest_tables: dict[str, int] = {}
+    manifest: dict[str, Any] = {}
+
+    def report() -> dict[str, Any]:
+        return {
+            "ok": not errors,
+            "errors": errors,
+            "warnings": warnings,
+            "format": manifest.get("format"),
+            "workspace_id": manifest.get("workspace_id"),
+            "table_counts": table_counts,
+            "manifest_tables": manifest_tables,
+            "artifact": path.name,
+        }
+
+    if not path.exists():
+        errors.append(f"bundle not found: {path}")
+        return report()
+    if not path.is_file():
+        errors.append(f"bundle is not a file: {path}")
+        return report()
+
+    try:
+        archive = zipfile.ZipFile(path)
+    except zipfile.BadZipFile:
+        errors.append("bundle must be a valid zip file")
+        return report()
+
+    with archive:
+        names = set(archive.namelist())
+        for name in names:
+            if name.startswith("/") or ".." in Path(name).parts:
+                errors.append(f"archive entry has unsafe path: {name}")
+
+        if "manifest.json" not in names:
+            errors.append("manifest.json is required")
+            return report()
+
+        manifest = _read_workspace_import_manifest(archive, errors)
+        if not isinstance(manifest, dict):
+            return report()
+
+        if manifest.get("format") != WORKSPACE_EXPORT_FORMAT:
+            errors.append(f"unsupported workspace export format: {manifest.get('format')!r}")
+        if not isinstance(manifest.get("workspace_id"), str) or not manifest.get("workspace_id", "").strip():
+            errors.append("manifest workspace_id must be a non-empty string")
+
+        tables = manifest.get("tables")
+        if not isinstance(tables, dict):
+            errors.append("manifest tables must be an object")
+            tables = {}
+        for table, count in tables.items():
+            if isinstance(table, str) and isinstance(count, int) and count >= 0:
+                manifest_tables[table] = count
+            else:
+                errors.append(f"manifest table count must be a non-negative integer: {table}")
+
+        omitted = manifest.get("omitted")
+        if not isinstance(omitted, list) or not all(isinstance(item, str) for item in omitted):
+            errors.append("manifest omitted must be a list of strings")
+            omitted_values: set[str] = set()
+        else:
+            omitted_values = set(omitted)
+        for policy in WORKSPACE_EXPORT_OMITTED_POLICIES:
+            if policy not in omitted_values:
+                errors.append(f"manifest omitted must include {policy!r}")
+
+        for table in WORKSPACE_EXPORT_TABLES:
+            filename = f"{table}.jsonl"
+            if filename not in names:
+                errors.append(f"required export table is missing: {filename}")
+                continue
+            rows = _read_workspace_import_jsonl(archive, filename, errors)
+            table_counts[table] = len(rows)
+            expected = manifest_tables.get(table)
+            if expected is None:
+                errors.append(f"manifest is missing row count for table: {table}")
+            elif expected != len(rows):
+                errors.append(f"manifest row count mismatch for {table}: expected {expected}, found {len(rows)}")
+
+        for table in sorted(set(manifest_tables) - set(WORKSPACE_EXPORT_TABLES)):
+            if table in WORKSPACE_EXPORT_OMITTED_TABLES:
+                errors.append(f"omitted table must not be listed in manifest tables: {table}")
+            else:
+                warnings.append(f"manifest contains unknown table: {table}")
+
+        for name in sorted(names):
+            if name == "manifest.json" or name.endswith(".jsonl"):
+                _scan_workspace_import_entry(archive, name, errors)
+            if name.endswith(".jsonl"):
+                table = name.removesuffix(".jsonl")
+                if table in WORKSPACE_EXPORT_OMITTED_TABLES:
+                    errors.append(f"omitted table must not be present in bundle: {name}")
+                elif table not in WORKSPACE_EXPORT_TABLES:
+                    warnings.append(f"bundle contains unknown JSONL file: {name}")
+
+    return report()
+
+
+def _read_workspace_import_manifest(archive: zipfile.ZipFile, errors: list[str]) -> dict[str, Any]:
+    try:
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+    except UnicodeDecodeError:
+        errors.append("manifest.json must be UTF-8")
+        return {}
+    except json.JSONDecodeError as exc:
+        errors.append(f"manifest.json is invalid JSON: line {exc.lineno} column {exc.colno}")
+        return {}
+    if not isinstance(manifest, dict):
+        errors.append("manifest.json must contain a JSON object")
+        return {}
+    return manifest
+
+
+def _read_workspace_import_jsonl(
+    archive: zipfile.ZipFile,
+    name: str,
+    errors: list[str],
+) -> list[dict[str, Any]]:
+    try:
+        text = archive.read(name).decode("utf-8")
+    except UnicodeDecodeError:
+        errors.append(f"{name} must be UTF-8")
+        return []
+    rows: list[dict[str, Any]] = []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"{name}:{line_number} is invalid JSON: column {exc.colno}")
+            continue
+        if not isinstance(row, dict):
+            errors.append(f"{name}:{line_number} must contain a JSON object")
+            continue
+        rows.append(row)
+    return rows
+
+
+def _scan_workspace_import_entry(archive: zipfile.ZipFile, name: str, errors: list[str]) -> None:
+    try:
+        text = archive.read(name).decode("utf-8")
+    except UnicodeDecodeError:
+        return
+    forbidden_markers = ("pit_", "token_hash", "source_path")
+    for marker in forbidden_markers:
+        if marker in text:
+            errors.append(f"{name} contains forbidden export marker: {marker}")
+    if _ABSOLUTE_SOURCE_PATH.search(text):
+        errors.append(f"{name} appears to contain an absolute source filesystem path")
 
 
 def _redact_audit_sink_value(key: str, value: Any) -> Any:
@@ -1745,7 +1930,7 @@ class EnterpriseStore:
             "audit_events.jsonl": _workspace_audit_export_rows(self.conn, workspace_id),
         }
         manifest = {
-            "format": "pageindex.workspace-export.v1",
+            "format": WORKSPACE_EXPORT_FORMAT,
             "workspace_id": workspace_id,
             "exported_at": _now(),
             "artifact": output.name,
@@ -1770,6 +1955,9 @@ class EnterpriseStore:
                 },
             )
         return manifest
+
+    def validate_workspace_import_bundle(self, bundle_path: str | Path) -> dict[str, Any]:
+        return validate_workspace_import_bundle(bundle_path)
 
     def _audit_retention_policy(self, workspace_id: str) -> dict[str, Any]:
         self._require_workspace(workspace_id)

@@ -6,7 +6,7 @@ import json
 from .deployment import run_deployment_check
 from .eval import run_enterprise_eval
 from .server import serve
-from .store import API_TOKEN_SCOPES, EnterpriseStore, expires_at_from_days
+from .store import API_TOKEN_SCOPES, EnterpriseStore, expires_at_from_days, validate_workspace_import_bundle
 
 
 def _positive_int(value: str) -> int:
@@ -163,6 +163,10 @@ def main() -> None:
     workspace_export.add_argument("workspace_id")
     workspace_export.add_argument("user_id")
     workspace_export.add_argument("output_path")
+
+    workspace_import = sub.add_parser("workspace-import")
+    workspace_import.add_argument("bundle_path")
+    workspace_import.add_argument("--dry-run", action="store_true")
 
     audit_log = sub.add_parser("audit-log")
     audit_log.add_argument("workspace_id")
@@ -343,6 +347,11 @@ def main() -> None:
                 indent=2,
             )
         )
+        return
+    if args.command == "workspace-import":
+        if not args.dry_run:
+            raise SystemExit("workspace-import currently supports only --dry-run")
+        print(json.dumps(validate_workspace_import_bundle(args.bundle_path), indent=2))
         return
 
     store = EnterpriseStore(args.root)

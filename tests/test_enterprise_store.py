@@ -2535,6 +2535,142 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("source_path", serialized_bundle)
             self.assertNotIn(str(source), serialized_bundle)
 
+    def test_workspace_import_dry_run_validates_export_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "import-source.txt"
+            source.write_text("Workspace import dry-run content.", encoding="utf-8")
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team", workspace_id="ws_import")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            folder_id = store.create_folder("Backups", workspace_id=workspace_id, actor_user_id="alice")
+            store.ingest_file(source, folder_id=folder_id, workspace_id=workspace_id, actor_user_id="alice", name="Import memo")
+            store.create_api_token(workspace_id, "alice", name="secret-token")
+            store.query_corpus("dry-run", workspace_id=workspace_id, actor_user_id="alice")
+            export_path = tmp_path / "workspace-export.zip"
+            store.export_workspace_bundle(workspace_id, "alice", export_path)
+
+            def counts() -> dict[str, int]:
+                tables = ("workspaces", "documents", "document_pages", "api_tokens", "audit_events")
+                return {
+                    table: int(store.conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"])
+                    for table in tables
+                }
+
+            before_counts = counts()
+            report = store.validate_workspace_import_bundle(export_path)
+            after_counts = counts()
+            store.close()
+
+            cli_root = tmp_path / "unused-cli-root"
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(cli_root)]
+            cli = subprocess.run(
+                [*base, "workspace-import", "--dry-run", str(export_path)],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            refused = subprocess.run(
+                [*base, "workspace-import", str(export_path)],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            cli_report = json.loads(cli.stdout)
+
+            self.assertTrue(report["ok"], report["errors"])
+            self.assertEqual(report["format"], "pageindex.workspace-export.v1")
+            self.assertEqual(report["workspace_id"], workspace_id)
+            self.assertEqual(report["table_counts"]["documents"], 1)
+            self.assertEqual(report["manifest_tables"], report["table_counts"])
+            self.assertEqual(after_counts, before_counts)
+            self.assertTrue(cli_report["ok"], cli_report["errors"])
+            self.assertEqual(cli_report["workspace_id"], workspace_id)
+            self.assertFalse(cli_root.exists())
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("--dry-run", refused.stderr)
+            self.assertNotIn("Traceback", refused.stderr)
+
+    def test_workspace_import_dry_run_reports_invalid_bundles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "invalid-import-source.txt"
+            source.write_text("Invalid import dry-run content.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team", workspace_id="ws_import_invalid")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Invalid memo")
+            export_path = tmp_path / "workspace-export.zip"
+            store.export_workspace_bundle(workspace_id, "alice", export_path)
+
+            def rewrite_zip(
+                name: str,
+                *,
+                omit=None,
+                replace=None,
+                extra=None,
+            ) -> Path:
+                target = tmp_path / name
+                omit = omit or set()
+                replace = replace or {}
+                extra = extra or {}
+                with zipfile.ZipFile(export_path) as source_zip, zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as target_zip:
+                    for entry in source_zip.namelist():
+                        if entry in omit:
+                            continue
+                        target_zip.writestr(entry, replace.get(entry, source_zip.read(entry)))
+                    for entry, content in extra.items():
+                        target_zip.writestr(entry, content)
+                return target
+
+            with zipfile.ZipFile(export_path) as archive:
+                manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+            manifest["tables"]["documents"] += 1
+
+            missing_manifest = store.validate_workspace_import_bundle(rewrite_zip("missing-manifest.zip", omit={"manifest.json"}))
+            missing_table = store.validate_workspace_import_bundle(rewrite_zip("missing-table.zip", omit={"document_pages.jsonl"}))
+            invalid_jsonl = store.validate_workspace_import_bundle(
+                rewrite_zip("invalid-jsonl.zip", replace={"documents.jsonl": b'{"id": "broken"\n'})
+            )
+            bad_count = store.validate_workspace_import_bundle(
+                rewrite_zip("bad-count.zip", replace={"manifest.json": json.dumps(manifest).encode("utf-8")})
+            )
+            leaked = store.validate_workspace_import_bundle(
+                rewrite_zip(
+                    "leaked.zip",
+                    extra={
+                        "api_tokens.jsonl": (
+                            b'{"token":"pit_secret","token_hash":"abc",'
+                            b'"source_path":"/Users/alice/private.pdf"}\n'
+                        )
+                    },
+                )
+            )
+            store.close()
+
+            self.assertFalse(missing_manifest["ok"])
+            self.assertTrue(any("manifest.json" in error for error in missing_manifest["errors"]))
+            self.assertFalse(missing_table["ok"])
+            self.assertTrue(any("document_pages.jsonl" in error for error in missing_table["errors"]))
+            self.assertFalse(invalid_jsonl["ok"])
+            self.assertTrue(any("invalid JSON" in error for error in invalid_jsonl["errors"]))
+            self.assertFalse(bad_count["ok"])
+            self.assertTrue(any("row count mismatch for documents" in error for error in bad_count["errors"]))
+            self.assertFalse(leaked["ok"])
+            self.assertTrue(any("api_tokens.jsonl" in error for error in leaked["errors"]))
+            self.assertTrue(any("pit_" in error for error in leaked["errors"]))
+            self.assertTrue(any("token_hash" in error for error in leaked["errors"]))
+            self.assertTrue(any("source_path" in error for error in leaked["errors"]))
+            self.assertTrue(any("absolute source filesystem path" in error for error in leaked["errors"]))
+
     def test_http_workspace_export_requires_admin_bearer_and_returns_redacted_zip(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

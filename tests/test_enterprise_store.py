@@ -3884,6 +3884,170 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(public_id.startswith("doc_"), True)
             self.assertEqual(bob_visible[0]["id"], restricted_id)
 
+    def test_workspace_groups_grant_restricted_document_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            restricted = tmp_path / "group-secret.txt"
+            restricted.write_text("Group-only diligence evidence.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(workspace_id, "carol", "member", actor_user_id="alice")
+            doc_id = store.ingest_file(restricted, workspace_id=workspace_id, actor_user_id="alice", name="Group secret")
+            store.set_document_access_mode(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+            group = store.create_workspace_group(workspace_id, "alice", "Legal")
+            store.add_workspace_group_member(workspace_id, "alice", group["id"], "bob")
+
+            carol_hidden = store.query_corpus("group-only", workspace_id=workspace_id, actor_user_id="carol")
+            granted = store.grant_document_group_access(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                group_id=group["id"],
+            )
+            bob_documents = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
+            bob_query = store.query_corpus("group-only", workspace_id=workspace_id, actor_user_id="bob")
+            bob_pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="bob")
+            carol_pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="carol")
+            removed = store.remove_workspace_group_member(workspace_id, "alice", group["id"], "bob")
+            bob_query_after_remove = store.query_corpus("group-only", workspace_id=workspace_id, actor_user_id="bob")
+            revoked = store.revoke_document_group_access(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                group_id=group["id"],
+            )
+            access_after_revoke = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            events = store.list_audit_events(workspace_id, "alice", limit=50)
+            actions = [event["action"] for event in events]
+
+            self.assertEqual(carol_hidden["citations"], [])
+            self.assertEqual(granted["group_grants"][0]["group_id"], group["id"])
+            self.assertEqual(granted["group_grants"][0]["group_name"], "Legal")
+            self.assertEqual([doc["id"] for doc in bob_documents], [doc_id])
+            self.assertEqual(bob_query["citations"][0]["doc_id"], doc_id)
+            self.assertEqual(bob_pages["pages"][0]["content"], "Group-only diligence evidence.")
+            self.assertEqual(carol_pages["pages"], [])
+            self.assertTrue(removed)
+            self.assertEqual(bob_query_after_remove["citations"], [])
+            self.assertTrue(revoked)
+            self.assertEqual(access_after_revoke["group_grants"], [])
+            self.assertIn("workspace_group.create", actions)
+            self.assertIn("workspace_group_member.add", actions)
+            self.assertIn("workspace_group_member.remove", actions)
+            self.assertIn("document.group_access_grant", actions)
+            self.assertIn("document.group_access_revoke", actions)
+
+    def test_workspace_group_cli_grants_document_access_without_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            restricted = tmp_path / "cli-group-secret.txt"
+            restricted.write_text("Group CLI acquisition evidence.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run([*base, "workspace", "Team", "--workspace-id", "ws_group_acl"], cwd=repo_root, env=env, capture_output=True, text=True, check=True)
+            subprocess.run([*base, "add-member", "ws_group_acl", "alice", "--role", "owner"], cwd=repo_root, env=env, capture_output=True, text=True, check=True)
+            subprocess.run([*base, "add-member", "ws_group_acl", "bob", "--role", "member", "--actor-user-id", "alice"], cwd=repo_root, env=env, capture_output=True, text=True, check=True)
+            doc_id = subprocess.run(
+                [*base, "ingest-file", str(restricted), "--workspace-id", "ws_group_acl", "--user-id", "alice", "--name", "Group secret"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            subprocess.run(
+                [*base, "document-access", doc_id, "ws_group_acl", "alice", "--mode", "restricted"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            group = json.loads(
+                subprocess.run(
+                    [*base, "create-group", "ws_group_acl", "alice", "Legal"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            subprocess.run(
+                [*base, "add-group-member", "ws_group_acl", "alice", group["id"], "bob"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            granted = json.loads(
+                subprocess.run(
+                    [*base, "document-access", doc_id, "ws_group_acl", "alice", "--grant-group", group["id"]],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            bob_visible = json.loads(
+                subprocess.run(
+                    [*base, "search", "acquisition", "--workspace-id", "ws_group_acl", "--user-id", "bob"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            removed = json.loads(
+                subprocess.run(
+                    [*base, "remove-group-member", "ws_group_acl", "alice", group["id"], "bob"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            bob_hidden = json.loads(
+                subprocess.run(
+                    [*base, "search", "acquisition", "--workspace-id", "ws_group_acl", "--user-id", "bob"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            member_denied = subprocess.run(
+                [*base, "add-group-member", "ws_group_acl", "bob", group["id"], "bob"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(group["name"], "Legal")
+            self.assertEqual(granted["group_grants"][0]["group_id"], group["id"])
+            self.assertEqual(bob_visible[0]["id"], doc_id)
+            self.assertTrue(removed["removed"])
+            self.assertEqual(bob_hidden, [])
+            self.assertNotEqual(member_denied.returncode, 0)
+            self.assertIn("workspace role denied", member_denied.stderr)
+            self.assertNotIn("Traceback", member_denied.stderr)
+
     def test_http_adapter_imports_and_queries_structure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -5469,7 +5633,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 chunks = stream.chunks()
                 first = next(chunks)
                 self.assertEqual(first, "first ")
-                self.assertTrue(provider.first_chunk_sent.is_set())
+                self.assertTrue(provider.first_chunk_sent.wait(timeout=1))
                 self.assertFalse(provider.allow_finish.is_set())
                 self.assertEqual(provider.requests[0]["payload"]["stream"], True)
                 provider.allow_finish.set()

@@ -100,6 +100,32 @@ def main() -> None:
     remove_member.add_argument("user_id")
     remove_member.add_argument("actor_user_id")
 
+    create_group = sub.add_parser("create-group")
+    create_group.add_argument("workspace_id")
+    create_group.add_argument("actor_user_id")
+    create_group.add_argument("name")
+
+    list_groups = sub.add_parser("list-groups")
+    list_groups.add_argument("workspace_id")
+    list_groups.add_argument("actor_user_id")
+
+    add_group_member = sub.add_parser("add-group-member")
+    add_group_member.add_argument("workspace_id")
+    add_group_member.add_argument("actor_user_id")
+    add_group_member.add_argument("group_id")
+    add_group_member.add_argument("user_id")
+
+    remove_group_member = sub.add_parser("remove-group-member")
+    remove_group_member.add_argument("workspace_id")
+    remove_group_member.add_argument("actor_user_id")
+    remove_group_member.add_argument("group_id")
+    remove_group_member.add_argument("user_id")
+
+    list_group_members = sub.add_parser("list-group-members")
+    list_group_members.add_argument("workspace_id")
+    list_group_members.add_argument("actor_user_id")
+    list_group_members.add_argument("group_id")
+
     invite_member = sub.add_parser("invite-member")
     invite_member.add_argument("workspace_id")
     invite_member.add_argument("actor_user_id")
@@ -261,6 +287,8 @@ def main() -> None:
     document_access.add_argument("--mode", choices=["workspace", "restricted"])
     document_access.add_argument("--grant-user")
     document_access.add_argument("--revoke-user")
+    document_access.add_argument("--grant-group")
+    document_access.add_argument("--revoke-group")
 
     ingest = sub.add_parser("ingest-file")
     ingest.add_argument("path")
@@ -393,6 +421,45 @@ def main() -> None:
                     }
                 )
             )
+        elif args.command == "create-group":
+            group = _workspace_member_cli(
+                lambda: store.create_workspace_group(args.workspace_id, args.actor_user_id, args.name)
+            )
+            print(json.dumps(group, indent=2))
+        elif args.command == "list-groups":
+            groups = _workspace_member_cli(
+                lambda: store.list_workspace_groups(args.workspace_id, args.actor_user_id)
+            )
+            print(json.dumps(groups, indent=2))
+        elif args.command == "add-group-member":
+            group = _workspace_member_cli(
+                lambda: store.add_workspace_group_member(
+                    args.workspace_id,
+                    args.actor_user_id,
+                    args.group_id,
+                    args.user_id,
+                )
+            )
+            print(json.dumps(group, indent=2))
+        elif args.command == "remove-group-member":
+            removed = _workspace_member_cli(
+                lambda: store.remove_workspace_group_member(
+                    args.workspace_id,
+                    args.actor_user_id,
+                    args.group_id,
+                    args.user_id,
+                )
+            )
+            print(json.dumps({"removed": removed}))
+        elif args.command == "list-group-members":
+            members = _workspace_member_cli(
+                lambda: store.list_workspace_group_members(
+                    args.workspace_id,
+                    args.actor_user_id,
+                    args.group_id,
+                )
+            )
+            print(json.dumps(members, indent=2))
         elif args.command == "invite-member":
             invitation = _workspace_member_cli(
                 lambda: store.create_workspace_invitation(
@@ -667,7 +734,13 @@ def main() -> None:
                 )
             )
         elif args.command == "document-access":
-            actions = [args.mode is not None, args.grant_user is not None, args.revoke_user is not None]
+            actions = [
+                args.mode is not None,
+                args.grant_user is not None,
+                args.revoke_user is not None,
+                args.grant_group is not None,
+                args.revoke_group is not None,
+            ]
             if sum(actions) > 1:
                 raise SystemExit("choose only one document access action")
             if args.mode is not None:
@@ -688,6 +761,15 @@ def main() -> None:
                         user_id=args.grant_user,
                     )
                 )
+            elif args.grant_group is not None:
+                access = _workspace_member_cli(
+                    lambda: store.grant_document_group_access(
+                        args.doc_id,
+                        workspace_id=args.workspace_id,
+                        actor_user_id=args.actor_user_id,
+                        group_id=args.grant_group,
+                    )
+                )
             elif args.revoke_user is not None:
                 access = {
                     "revoked": _workspace_member_cli(
@@ -696,6 +778,17 @@ def main() -> None:
                             workspace_id=args.workspace_id,
                             actor_user_id=args.actor_user_id,
                             user_id=args.revoke_user,
+                        )
+                    )
+                }
+            elif args.revoke_group is not None:
+                access = {
+                    "revoked": _workspace_member_cli(
+                        lambda: store.revoke_document_group_access(
+                            args.doc_id,
+                            workspace_id=args.workspace_id,
+                            actor_user_id=args.actor_user_id,
+                            group_id=args.revoke_group,
                         )
                     )
                 }

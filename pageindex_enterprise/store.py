@@ -34,9 +34,12 @@ WORKSPACE_EXPORT_TABLES = (
     "workspace",
     "workspace_members",
     "workspace_invitations",
+    "workspace_groups",
+    "workspace_group_members",
     "folders",
     "documents",
     "document_access_grants",
+    "document_group_access_grants",
     "document_pages",
     "document_versions",
     "conversations",
@@ -520,6 +523,22 @@ class EnterpriseStore:
               revoked_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS workspace_groups (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(workspace_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_group_members (
+              group_id TEXT NOT NULL REFERENCES workspace_groups(id) ON DELETE CASCADE,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              user_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (group_id, user_id)
+            );
+
             CREATE TABLE IF NOT EXISTS api_tokens (
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -600,6 +619,16 @@ class EnterpriseStore:
               granted_by TEXT NOT NULL,
               created_at TEXT NOT NULL,
               PRIMARY KEY (doc_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS document_group_access_grants (
+              doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              group_id TEXT NOT NULL REFERENCES workspace_groups(id) ON DELETE CASCADE,
+              role TEXT NOT NULL DEFAULT 'read',
+              granted_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (doc_id, group_id)
             );
 
             CREATE TABLE IF NOT EXISTS document_pages (
@@ -1081,6 +1110,10 @@ class EnterpriseStore:
             )
             removed = cursor.rowcount > 0
             if removed:
+                self.conn.execute(
+                    "DELETE FROM workspace_group_members WHERE workspace_id = ? AND user_id = ?",
+                    (workspace_id, user_id),
+                )
                 self._insert_audit_event(
                     workspace_id,
                     actor_user_id,
@@ -1090,6 +1123,163 @@ class EnterpriseStore:
                     details={"previous_role": previous_role},
                 )
         return removed
+
+    def create_workspace_group(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        name: str,
+        *,
+        group_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        name = name.strip()
+        if not name:
+            raise ValueError("Group name is required.")
+        group_id = group_id or f"grp_{uuid.uuid4().hex}"
+        if "/" in group_id or "%" in group_id:
+            raise ValueError("group_id must be URL-safe")
+        created_at = _now()
+        try:
+            with self._atomic():
+                self.conn.execute(
+                    """
+                    INSERT INTO workspace_groups (id, workspace_id, name, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (group_id, workspace_id, name, created_at),
+                )
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "workspace_group.create",
+                    target_type="workspace_group",
+                    target_id=group_id,
+                    details={"name": name},
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Group name already exists in this workspace.") from exc
+        group = self._workspace_group(workspace_id, group_id)
+        assert group is not None
+        return group
+
+    def list_workspace_groups(self, workspace_id: str, actor_user_id: str) -> list[dict[str, Any]]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        rows = self.conn.execute(
+            """
+            SELECT g.id, g.workspace_id, g.name, g.created_at,
+                   COUNT(gm.user_id) AS member_count
+            FROM workspace_groups g
+            LEFT JOIN workspace_group_members gm ON gm.group_id = g.id
+            WHERE g.workspace_id = ?
+            GROUP BY g.id
+            ORDER BY g.name, g.id
+            """,
+            (workspace_id,),
+        )
+        return [dict(row) for row in rows]
+
+    def list_workspace_group_members(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        group_id: str,
+    ) -> list[dict[str, Any]]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        group = self._require_workspace_group(workspace_id, group_id)
+        rows = self.conn.execute(
+            """
+            SELECT group_id, workspace_id, user_id, created_at
+            FROM workspace_group_members
+            WHERE workspace_id = ? AND group_id = ?
+            ORDER BY user_id
+            """,
+            (workspace_id, group["id"]),
+        )
+        return [dict(row) for row in rows]
+
+    def add_workspace_group_member(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        group_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        group = self._require_workspace_group(workspace_id, group_id)
+        user_id = user_id.strip()
+        if not user_id:
+            raise ValueError("User id is required.")
+        self.require_workspace_access(workspace_id, user_id)
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO workspace_group_members (group_id, workspace_id, user_id, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(group_id, user_id) DO UPDATE SET created_at = excluded.created_at
+                """,
+                (group["id"], workspace_id, user_id, _now()),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "workspace_group_member.add",
+                target_type="workspace_group",
+                target_id=group["id"],
+                details={"user_id": user_id, "group_name": group["name"]},
+            )
+        updated = self._workspace_group(workspace_id, group["id"])
+        assert updated is not None
+        return updated
+
+    def remove_workspace_group_member(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        group_id: str,
+        user_id: str,
+    ) -> bool:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        group = self._require_workspace_group(workspace_id, group_id)
+        user_id = user_id.strip()
+        if not user_id:
+            raise ValueError("User id is required.")
+        with self._atomic():
+            cursor = self.conn.execute(
+                "DELETE FROM workspace_group_members WHERE workspace_id = ? AND group_id = ? AND user_id = ?",
+                (workspace_id, group["id"], user_id),
+            )
+            removed = cursor.rowcount > 0
+            if removed:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "workspace_group_member.remove",
+                    target_type="workspace_group",
+                    target_id=group["id"],
+                    details={"user_id": user_id, "group_name": group["name"]},
+                )
+        return removed
+
+    def _workspace_group(self, workspace_id: str, group_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            """
+            SELECT g.id, g.workspace_id, g.name, g.created_at,
+                   COUNT(gm.user_id) AS member_count
+            FROM workspace_groups g
+            LEFT JOIN workspace_group_members gm ON gm.group_id = g.id
+            WHERE g.workspace_id = ? AND g.id = ?
+            GROUP BY g.id
+            """,
+            (workspace_id, group_id.strip()),
+        )
+        return dict(row) if row else None
+
+    def _require_workspace_group(self, workspace_id: str, group_id: str) -> dict[str, Any]:
+        group = self._workspace_group(workspace_id, group_id)
+        if not group:
+            raise ValueError(f"Group not found: {group_id}")
+        return group
 
     def _workspace_owner_count(self, workspace_id: str) -> int:
         row = self.conn.execute(
@@ -1149,9 +1339,17 @@ class EnterpriseStore:
                 WHERE dag.doc_id = {alias}.id
                   AND dag.user_id = ?
               )
+              OR EXISTS (
+                SELECT 1
+                FROM document_group_access_grants dgag
+                JOIN workspace_group_members wgm ON wgm.group_id = dgag.group_id
+                WHERE dgag.doc_id = {alias}.id
+                  AND wgm.workspace_id = {alias}.workspace_id
+                  AND wgm.user_id = ?
+              )
             )
             """,
-            [actor_user_id, actor_user_id],
+            [actor_user_id, actor_user_id, actor_user_id],
         )
 
     def _can_read_document(self, document: dict[str, Any], actor_user_id: str | None) -> bool:
@@ -1166,6 +1364,17 @@ class EnterpriseStore:
             self._one(
                 "SELECT 1 FROM document_access_grants WHERE doc_id = ? AND user_id = ?",
                 (document["id"], actor_user_id),
+            )
+            or self._one(
+                """
+                SELECT 1
+                FROM document_group_access_grants dgag
+                JOIN workspace_group_members wgm ON wgm.group_id = dgag.group_id
+                WHERE dgag.doc_id = ?
+                  AND wgm.workspace_id = ?
+                  AND wgm.user_id = ?
+                """,
+                (document["id"], document["workspace_id"], actor_user_id),
             )
         )
 
@@ -1817,6 +2026,28 @@ class EnterpriseStore:
                     (workspace_id,),
                 )
             ),
+            "workspace_groups.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT id, workspace_id, name, created_at
+                    FROM workspace_groups
+                    WHERE workspace_id = ?
+                    ORDER BY name, id
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "workspace_group_members.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT group_id, workspace_id, user_id, created_at
+                    FROM workspace_group_members
+                    WHERE workspace_id = ?
+                    ORDER BY group_id, user_id
+                    """,
+                    (workspace_id,),
+                )
+            ),
             "folders.jsonl": _rows(
                 self.conn.execute(
                     """
@@ -1836,6 +2067,17 @@ class EnterpriseStore:
                     FROM document_access_grants
                     WHERE workspace_id = ?
                     ORDER BY doc_id, user_id
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "document_group_access_grants.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT doc_id, workspace_id, group_id, role, granted_by, created_at
+                    FROM document_group_access_grants
+                    WHERE workspace_id = ?
+                    ORDER BY doc_id, group_id
                     """,
                     (workspace_id,),
                 )
@@ -2544,11 +2786,23 @@ class EnterpriseStore:
             """,
             (document["id"],),
         )
+        group_rows = self.conn.execute(
+            """
+            SELECT dg.doc_id, dg.workspace_id, dg.group_id, g.name AS group_name,
+                   dg.role, dg.granted_by, dg.created_at
+            FROM document_group_access_grants dg
+            JOIN workspace_groups g ON g.id = dg.group_id
+            WHERE dg.doc_id = ?
+            ORDER BY g.name, dg.group_id
+            """,
+            (document["id"],),
+        )
         return {
             "doc_id": document["id"],
             "workspace_id": workspace_id,
             "access_mode": document.get("access_mode", "workspace"),
             "grants": [dict(row) for row in rows],
+            "group_grants": [dict(row) for row in group_rows],
         }
 
     def set_document_access_mode(
@@ -2618,6 +2872,42 @@ class EnterpriseStore:
             )
         return self.list_document_access(document["id"], workspace_id=workspace_id, actor_user_id=actor_user_id)
 
+    def grant_document_group_access(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        group_id: str,
+    ) -> dict[str, Any] | None:
+        document = self.get_document(doc_id.strip())
+        if not document or document["workspace_id"] != workspace_id:
+            return None
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        group = self._require_workspace_group(workspace_id, group_id)
+        now = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO document_group_access_grants (doc_id, workspace_id, group_id, role, granted_by, created_at)
+                VALUES (?, ?, ?, 'read', ?, ?)
+                ON CONFLICT(doc_id, group_id) DO UPDATE SET
+                  role = excluded.role,
+                  granted_by = excluded.granted_by,
+                  created_at = excluded.created_at
+                """,
+                (document["id"], workspace_id, group["id"], actor_user_id, now),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "document.group_access_grant",
+                target_type="document",
+                target_id=document["id"],
+                details={"group_id": group["id"], "group_name": group["name"], "role": "read"},
+            )
+        return self.list_document_access(document["id"], workspace_id=workspace_id, actor_user_id=actor_user_id)
+
     def revoke_document_access(
         self,
         doc_id: str,
@@ -2647,6 +2937,36 @@ class EnterpriseStore:
                     target_type="document",
                     target_id=document["id"],
                     details={"user_id": user_id, "role": "read"},
+                )
+        return revoked
+
+    def revoke_document_group_access(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        group_id: str,
+    ) -> bool:
+        document = self.get_document(doc_id.strip())
+        if not document or document["workspace_id"] != workspace_id:
+            return False
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        group = self._require_workspace_group(workspace_id, group_id)
+        with self._atomic():
+            cursor = self.conn.execute(
+                "DELETE FROM document_group_access_grants WHERE doc_id = ? AND group_id = ?",
+                (document["id"], group["id"]),
+            )
+            revoked = cursor.rowcount > 0
+            if revoked:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "document.group_access_revoke",
+                    target_type="document",
+                    target_id=document["id"],
+                    details={"group_id": group["id"], "group_name": group["name"]},
                 )
         return revoked
 

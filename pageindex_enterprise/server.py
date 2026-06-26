@@ -200,6 +200,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if document_access_id:
                 self._get_document_access(document_access_id)
                 return
+            folder_access_id = _folder_access_path(parsed.path)
+            if folder_access_id:
+                self._get_folder_access(folder_access_id)
+                return
             document_pages_id = _document_pages_path(parsed.path)
             if document_pages_id:
                 params = parse_qs(parsed.query)
@@ -335,6 +339,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/folders":
                 self._create_folder(payload)
+                return
+            folder_access_id = _folder_access_path(parsed.path)
+            if folder_access_id:
+                self._set_folder_access(folder_access_id, payload)
                 return
             folder_move_id = _folder_move_path(parsed.path)
             if folder_move_id:
@@ -680,6 +688,99 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 self._json({"error": "folder not found"}, HTTPStatus.NOT_FOUND)
                 return
             self._json({"folder": folder})
+        finally:
+            store.close()
+
+    def _get_folder_access(self, folder_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+            access = store.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id=user_id)
+            if access is None:
+                self._json({"error": "folder not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._json({"access": access})
+        finally:
+            store.close()
+
+    def _set_folder_access(self, folder_id: str, payload: dict[str, Any]) -> None:
+        actions = [
+            key
+            for key in ("grant_user_id", "revoke_user_id", "grant_group_id", "revoke_group_id")
+            if key in payload and payload[key] is not None
+        ]
+        if len(actions) != 1:
+            raise ValueError("choose exactly one folder access update")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope=("audit", "write"),
+                require_api_token=True,
+            )
+            action = actions[0]
+            if action == "grant_user_id":
+                grant_user_id = payload.get("grant_user_id")
+                if not isinstance(grant_user_id, str):
+                    raise ValueError("grant_user_id must be a string")
+                access = store.grant_folder_access(
+                    folder_id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                    user_id=grant_user_id,
+                )
+                if access is None:
+                    self._json({"error": "folder not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                self._json({"access": access})
+                return
+            if action == "grant_group_id":
+                grant_group_id = payload.get("grant_group_id")
+                if not isinstance(grant_group_id, str):
+                    raise ValueError("grant_group_id must be a string")
+                access = store.grant_folder_group_access(
+                    folder_id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                    group_id=grant_group_id,
+                )
+                if access is None:
+                    self._json({"error": "folder not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                self._json({"access": access})
+                return
+            if action == "revoke_group_id":
+                revoke_group_id = payload.get("revoke_group_id")
+                if not isinstance(revoke_group_id, str):
+                    raise ValueError("revoke_group_id must be a string")
+                access = store.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id=user_id)
+                if access is None:
+                    self._json({"error": "folder not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                revoked = store.revoke_folder_group_access(
+                    folder_id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                    group_id=revoke_group_id,
+                )
+                access = store.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id=user_id)
+                self._json({"revoked": revoked, "access": access})
+                return
+            revoke_user_id = payload.get("revoke_user_id")
+            if not isinstance(revoke_user_id, str):
+                raise ValueError("revoke_user_id must be a string")
+            access = store.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id=user_id)
+            if access is None:
+                self._json({"error": "folder not found"}, HTTPStatus.NOT_FOUND)
+                return
+            revoked = store.revoke_folder_access(
+                folder_id,
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+                user_id=revoke_user_id,
+            )
+            access = store.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id=user_id)
+            self._json({"revoked": revoked, "access": access})
         finally:
             store.close()
 
@@ -1664,6 +1765,13 @@ def _folder_path(path: str) -> str | None:
 def _folder_move_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 3 and parts[0] == "folders" and parts[2] == "move":
+        return unquote(parts[1])
+    return None
+
+
+def _folder_access_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "folders" and parts[2] == "access":
         return unquote(parts[1])
     return None
 

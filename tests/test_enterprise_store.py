@@ -6574,6 +6574,66 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(member_pages["pages"], [])
             self.assertEqual(owner_pages["pages"][0]["content"], "Secret customer acquisition evidence.")
 
+    def test_folder_access_grants_inherit_to_restricted_documents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "folder-secret.txt"
+            source.write_text("Inherited folder access evidence.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(workspace_id, "carol", "member", actor_user_id="alice")
+            parent = store.create_folder("Legal", workspace_id=workspace_id, actor_user_id="alice")
+            child = store.create_folder("Contracts", parent_id=parent, actor_user_id="alice")
+            doc_id = store.ingest_file(source, folder_id=child, workspace_id=workspace_id, actor_user_id="alice", name="Secret folder memo")
+            store.set_document_access_mode(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+
+            before_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
+            before_pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="bob")
+            granted = store.grant_folder_access(parent, workspace_id=workspace_id, actor_user_id="alice", user_id="bob")
+            after_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
+            after_pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="bob")
+            after_query = store.query_corpus("inherited folder access", workspace_id=workspace_id, actor_user_id="bob")
+            revoked = store.revoke_folder_access(parent, workspace_id=workspace_id, actor_user_id="alice", user_id="bob")
+            revoked_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
+            group = store.create_workspace_group(workspace_id, "alice", "Reviewers")
+            store.add_workspace_group_member(workspace_id, "alice", group["id"], "carol")
+            group_granted = store.grant_folder_group_access(
+                parent,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                group_id=group["id"],
+            )
+            group_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="carol")
+            group_query = store.query_corpus("inherited folder access", workspace_id=workspace_id, actor_user_id="carol")
+            group_revoked = store.revoke_folder_group_access(
+                parent,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                group_id=group["id"],
+            )
+            group_revoked_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="carol")
+
+            self.assertEqual(before_docs, [])
+            self.assertEqual(before_pages["pages"], [])
+            self.assertEqual([grant["user_id"] for grant in granted["grants"]], ["bob"])
+            self.assertEqual([doc["id"] for doc in after_docs], [doc_id])
+            self.assertEqual(after_pages["pages"][0]["content"], "Inherited folder access evidence.")
+            self.assertEqual([citation["doc_id"] for citation in after_query["citations"]], [doc_id])
+            self.assertTrue(revoked)
+            self.assertEqual(revoked_docs, [])
+            self.assertEqual([grant["group_id"] for grant in group_granted["group_grants"]], [group["id"]])
+            self.assertEqual([doc["id"] for doc in group_docs], [doc_id])
+            self.assertEqual([citation["doc_id"] for citation in group_query["citations"]], [doc_id])
+            self.assertTrue(group_revoked)
+            self.assertEqual(group_revoked_docs, [])
+
     def test_http_document_access_management_requires_admin_bearer_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -6647,6 +6707,103 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(revoked["revoked"])
             self.assertEqual(revoked["access"]["grants"], [])
             self.assertFalse(revoked_again["revoked"])
+
+    def test_http_folder_access_management_inherits_to_restricted_documents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "folder-access.txt"
+            source.write_text("HTTP inherited folder access evidence.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            other_workspace = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(workspace_id, "carol", "member", actor_user_id="alice")
+            store.add_workspace_member(other_workspace, "mallory", "owner")
+            parent = store.create_folder("Legal", workspace_id=workspace_id, actor_user_id="alice")
+            child = store.create_folder("Contracts", parent_id=parent, actor_user_id="alice")
+            doc_id = store.ingest_file(source, folder_id=child, workspace_id=workspace_id, actor_user_id="alice", name="Folder Access memo")
+            store.set_document_access_mode(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+            group = store.create_workspace_group(workspace_id, "alice", "Reviewers")
+            store.add_workspace_group_member(workspace_id, "alice", group["id"], "carol")
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            carol_token_record = store.create_api_token(workspace_id, "carol", name="carol")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id IN (?, ?)",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"], carol_token_record["id"]),
+            )
+            store.conn.commit()
+            member_token = member_token_record["token"]
+            carol_token = carol_token_record["token"]
+            other_token = store.create_api_token(other_workspace, "mallory", name="other")["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            access_url = f"{base}/folders/{parent}/access"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            audit_headers = {"Authorization": f"Bearer {audit_token}"}
+            write_headers = {"Authorization": f"Bearer {write_token}"}
+            member_headers = {"Authorization": f"Bearer {member_token}"}
+            carol_headers = {"Authorization": f"Bearer {carol_token}"}
+            other_headers = {"Authorization": f"Bearer {other_token}"}
+            try:
+                missing_token = _get_error(access_url)
+                write_get = _get_error(access_url, headers=write_headers)
+                audit_read = _get_json(access_url, headers=audit_headers)
+                bad_action = _post_json(
+                    access_url,
+                    {"grant_user_id": "bob", "grant_group_id": group["id"]},
+                    status=400,
+                    headers=owner_headers,
+                )
+                member_write = _post_json(
+                    access_url,
+                    {"grant_user_id": "bob"},
+                    status=403,
+                    headers=member_headers,
+                )
+                foreign_get = _get_error(access_url, headers=other_headers)
+                before_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=member_headers)
+                granted = _post_json(access_url, {"grant_user_id": "bob"}, headers=owner_headers)
+                after_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=member_headers)
+                revoked = _post_json(access_url, {"revoke_user_id": "bob"}, headers=owner_headers)
+                after_revoke_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=member_headers)
+                group_granted = _post_json(access_url, {"grant_group_id": group["id"]}, headers=owner_headers)
+                group_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=carol_headers)
+                group_revoked = _post_json(access_url, {"revoke_group_id": group["id"]}, headers=owner_headers)
+                after_group_revoke_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=carol_headers)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(missing_token["error"], "api token required")
+            self.assertEqual(write_get["error"], "api token scope denied")
+            self.assertEqual(audit_read["access"]["folder"]["path"], "/Legal")
+            self.assertEqual(audit_read["access"]["grants"], [])
+            self.assertEqual(bad_action["error"], "choose exactly one folder access update")
+            self.assertEqual(member_write["error"], "workspace role denied")
+            self.assertEqual(foreign_get["error"], "folder not found")
+            self.assertEqual(before_query["citations"], [])
+            self.assertEqual([grant["user_id"] for grant in granted["access"]["grants"]], ["bob"])
+            self.assertEqual([citation["doc_id"] for citation in after_query["citations"]], [doc_id])
+            self.assertTrue(revoked["revoked"])
+            self.assertEqual(after_revoke_query["citations"], [])
+            self.assertEqual([grant["group_id"] for grant in group_granted["access"]["group_grants"]], [group["id"]])
+            self.assertEqual([citation["doc_id"] for citation in group_query["citations"]], [doc_id])
+            self.assertTrue(group_revoked["revoked"])
+            self.assertEqual(after_group_revoke_query["citations"], [])
 
     def test_http_workspace_group_routes_grant_document_access(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7313,6 +7470,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("renameFolder", body)
                     self.assertIn("moveFolder", body)
                     self.assertIn("deleteFolder", body)
+                    self.assertIn("folderAccessPanel", body)
+                    self.assertIn("folderAccessUserInput", body)
+                    self.assertIn("folderAccessGroupInput", body)
+                    self.assertIn("loadFolderAccess", body)
+                    self.assertIn("grantFolderAccess", body)
+                    self.assertIn("grantFolderGroupAccess", body)
                     self.assertIn("data-rename-folder-id", body)
                     self.assertIn("data-move-folder-id", body)
                     self.assertIn("data-delete-folder-id", body)
@@ -7538,6 +7701,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["folderExercised"], True)
             self.assertEqual(smoke["folderLifecycleExercised"], True)
             self.assertEqual(smoke["folderMoveExercised"], True)
+            self.assertEqual(smoke["folderAccessExercised"], True)
             self.assertEqual(smoke["virtualNodeExercised"], True)
             self.assertEqual(smoke["invitationExercised"], True)
             self.assertEqual(smoke["conversationExportExercised"], True)

@@ -367,6 +367,18 @@ DASHBOARD_HTML = """<!doctype html>
               </select>
               <button id="refreshFoldersButton" class="secondary" type="button">Refresh folders</button>
               <div id="folderList" class="folder-list muted">No folders loaded.</div>
+              <button id="loadFolderAccessButton" class="secondary" type="button">Folder access</button>
+              <div class="access-actions">
+                <input id="folderAccessUserInput" value="" placeholder="user id" aria-label="Folder access user id">
+                <button id="grantFolderAccessButton" type="button">Grant user</button>
+                <button id="revokeFolderAccessButton" class="secondary" type="button">Revoke user</button>
+              </div>
+              <div class="access-actions">
+                <input id="folderAccessGroupInput" value="" placeholder="group id" aria-label="Folder access group id">
+                <button id="grantFolderGroupAccessButton" type="button">Grant group</button>
+                <button id="revokeFolderGroupAccessButton" class="secondary" type="button">Revoke group</button>
+              </div>
+              <div id="folderAccessPanel" class="muted">No folder access loaded.</div>
             </div>
           </section>
           <section>
@@ -669,6 +681,7 @@ DASHBOARD_HTML = """<!doctype html>
     const statusEl = document.getElementById("status");
     const documentList = document.getElementById("documentList");
     const documentAccessPanel = document.getElementById("documentAccessPanel");
+    const folderAccessPanel = document.getElementById("folderAccessPanel");
     const versionList = document.getElementById("versionList");
     const pagePreviewList = document.getElementById("pagePreviewList");
     const folderList = document.getElementById("folderList");
@@ -925,6 +938,64 @@ DASHBOARD_HTML = """<!doctype html>
       });
       folderList.querySelectorAll("[data-delete-folder-id]").forEach((button) => {
         button.addEventListener("click", () => deleteFolder(button.dataset.deleteFolderId).catch((error) => setStatus(error.message, "error")));
+      });
+    }
+
+    function renderFolderAccess(access) {
+      if (!access) {
+        folderAccessPanel.className = "muted";
+        folderAccessPanel.textContent = "No folder access loaded.";
+        return;
+      }
+      const grants = access.grants || [];
+      const groupGrants = access.group_grants || [];
+      const folder = access.folder || {};
+      const grantsHtml = grants.length
+        ? grants.map((grant) => `
+          <article class="member">
+            <div class="member-row">
+              <div>
+                <strong>${escapeHtml(grant.user_id)}</strong>
+                <div class="muted">${escapeHtml(grant.role || "read")} | granted by ${escapeHtml(grant.granted_by || "unknown")}</div>
+              </div>
+              <button class="secondary" type="button" data-revoke-folder-access-user-id="${escapeHtml(grant.user_id)}">Revoke</button>
+            </div>
+          </article>
+        `).join("")
+        : `<div class="muted">No direct folder grants.</div>`;
+      const groupGrantsHtml = groupGrants.length
+        ? groupGrants.map((grant) => `
+          <article class="member">
+            <div class="member-row">
+              <div>
+                <strong>${escapeHtml(grant.group_name || grant.group_id)}</strong>
+                <div class="muted">${escapeHtml(grant.group_id)} | ${escapeHtml(grant.role || "read")} | granted by ${escapeHtml(grant.granted_by || "unknown")}</div>
+              </div>
+              <button class="secondary" type="button" data-revoke-folder-access-group-id="${escapeHtml(grant.group_id)}">Revoke</button>
+            </div>
+          </article>
+        `).join("")
+        : `<div class="muted">No folder group grants.</div>`;
+      folderAccessPanel.className = "stack";
+      folderAccessPanel.innerHTML = `
+        <article class="folder">
+          <strong>${escapeHtml(folder.path || folder.name || folder.id || "Folder")}</strong>
+          <div class="muted">inherited by descendant folders</div>
+        </article>
+        <div class="member-list">
+          <strong>Direct folder grants</strong>
+          ${grantsHtml}
+        </div>
+        <div class="member-list">
+          <strong>Folder group grants</strong>
+          ${groupGrantsHtml}
+        </div>
+      `;
+      folderAccessPanel.querySelectorAll("[data-revoke-folder-access-user-id]").forEach((button) => {
+        button.addEventListener("click", () => revokeFolderAccess(button.dataset.revokeFolderAccessUserId).catch((error) => setStatus(error.message, "error")));
+      });
+      folderAccessPanel.querySelectorAll("[data-revoke-folder-access-group-id]").forEach((button) => {
+        button.addEventListener("click", () => revokeFolderGroupAccess(button.dataset.revokeFolderAccessGroupId).catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -1322,6 +1393,86 @@ DASHBOARD_HTML = """<!doctype html>
       await updateDocumentAccess(docId, { revoke_group_id: targetGroupId }, "Document group access revoked.");
     }
 
+    async function loadFolderAccess(folderId = selectedFolderId()) {
+      if (!folderId) {
+        setStatus("Select a folder.", "warn");
+        return;
+      }
+      setStatus("Refreshing folder access...");
+      const payload = await api(`/folders/${encodeURIComponent(folderId)}/access`);
+      renderFolderAccess(payload.access);
+      setStatus("Folder access refreshed.", "ok");
+    }
+
+    async function updateFolderAccess(folderId, payload, message) {
+      const updated = await api(`/folders/${encodeURIComponent(folderId)}/access`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      renderFolderAccess(updated.access);
+      setStatus(message, "ok");
+    }
+
+    async function grantFolderAccess() {
+      const folderId = selectedFolderId();
+      const input = document.getElementById("folderAccessUserInput");
+      const userId = input.value.trim();
+      if (!folderId) {
+        setStatus("Select a folder.", "warn");
+        return;
+      }
+      if (!userId) {
+        setStatus("Enter a user id.", "warn");
+        return;
+      }
+      await updateFolderAccess(folderId, { grant_user_id: userId }, "Folder access granted.");
+    }
+
+    async function revokeFolderAccess(userId = "") {
+      const folderId = selectedFolderId();
+      const input = document.getElementById("folderAccessUserInput");
+      const targetUserId = (userId || (input ? input.value : "")).trim();
+      if (!folderId) {
+        setStatus("Select a folder.", "warn");
+        return;
+      }
+      if (!targetUserId) {
+        setStatus("Enter a user id.", "warn");
+        return;
+      }
+      await updateFolderAccess(folderId, { revoke_user_id: targetUserId }, "Folder access revoked.");
+    }
+
+    async function grantFolderGroupAccess() {
+      const folderId = selectedFolderId();
+      const input = document.getElementById("folderAccessGroupInput");
+      const groupId = input.value.trim();
+      if (!folderId) {
+        setStatus("Select a folder.", "warn");
+        return;
+      }
+      if (!groupId) {
+        setStatus("Enter a group id.", "warn");
+        return;
+      }
+      await updateFolderAccess(folderId, { grant_group_id: groupId }, "Folder group access granted.");
+    }
+
+    async function revokeFolderGroupAccess(groupId = "") {
+      const folderId = selectedFolderId();
+      const input = document.getElementById("folderAccessGroupInput");
+      const targetGroupId = (groupId || (input ? input.value : "")).trim();
+      if (!folderId) {
+        setStatus("Select a folder.", "warn");
+        return;
+      }
+      if (!targetGroupId) {
+        setStatus("Enter a group id.", "warn");
+        return;
+      }
+      await updateFolderAccess(folderId, { revoke_group_id: targetGroupId }, "Folder group access revoked.");
+    }
+
     async function refreshFolders(options = {}) {
       if (!options.quiet) {
         setStatus("Refreshing folders...");
@@ -1644,6 +1795,7 @@ DASHBOARD_HTML = """<!doctype html>
       if (payload.deleted && activeFolderId === folderId) {
         activeFolderId = "";
         folderSelect.value = "";
+        renderFolderAccess(null);
       }
       await refreshFolders({ quiet: true });
       setStatus(payload.deleted ? "Folder deleted." : "Folder not found.", payload.deleted ? "ok" : "warn");
@@ -2303,6 +2455,11 @@ DASHBOARD_HTML = """<!doctype html>
     });
     document.getElementById("createFolderButton").addEventListener("click", () => createFolder().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshFoldersButton").addEventListener("click", () => refreshFolders().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("loadFolderAccessButton").addEventListener("click", () => loadFolderAccess().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("grantFolderAccessButton").addEventListener("click", () => grantFolderAccess().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("revokeFolderAccessButton").addEventListener("click", () => revokeFolderAccess().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("grantFolderGroupAccessButton").addEventListener("click", () => grantFolderGroupAccess().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("revokeFolderGroupAccessButton").addEventListener("click", () => revokeFolderGroupAccess().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshVirtualNodesButton").addEventListener("click", () => refreshVirtualNodes().catch((error) => setStatus(error.message, "error")));
     document.getElementById("planVirtualNodesButton").addEventListener("click", () => planVirtualNodes().catch((error) => setStatus(error.message, "error")));
     document.getElementById("uploadButton").addEventListener("click", () => uploadFile().catch((error) => setStatus(error.message, "error")));

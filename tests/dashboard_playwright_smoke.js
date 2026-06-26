@@ -214,6 +214,35 @@ async function waitForAnyText(page, selector, expectedValues) {
     const folderId = await folderCard.getAttribute("data-folder-id");
     assert(folderId, "created folder id was not rendered");
 
+    const loadFolderAccessResponse = page.waitForResponse(
+      (response) => response.url().includes(`/folders/${folderId}/access`) && response.request().method() === "GET"
+    );
+    await page.click("#loadFolderAccessButton");
+    await loadFolderAccessResponse;
+    await waitForText(page, "#status", "Folder access refreshed.");
+    await waitForText(page, "#folderAccessPanel", "No direct folder grants.");
+
+    await page.fill("#folderAccessUserInput", "alice");
+    const grantFolderAccessResponse = page.waitForResponse(
+      (response) => response.url().includes(`/folders/${folderId}/access`)
+        && response.request().method() === "POST"
+        && (response.request().postData() || "").includes("grant_user_id")
+    );
+    await page.click("#grantFolderAccessButton");
+    await grantFolderAccessResponse;
+    await waitForText(page, "#status", "Folder access granted.");
+    await waitForText(page, "#folderAccessPanel", "alice");
+
+    const revokeFolderAccessResponse = page.waitForResponse(
+      (response) => response.url().includes(`/folders/${folderId}/access`)
+        && response.request().method() === "POST"
+        && (response.request().postData() || "").includes("revoke_user_id")
+    );
+    await page.locator("[data-revoke-folder-access-user-id='alice']").click();
+    await revokeFolderAccessResponse;
+    await waitForText(page, "#status", "Folder access revoked.");
+    await waitForText(page, "#folderAccessPanel", "No direct folder grants.");
+
     await page.fill("#folderNameInput", "Browser Child");
     const createChildFolderResponse = page.waitForResponse(
       (response) => response.url().endsWith("/folders") && response.request().method() === "POST"
@@ -562,6 +591,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       folderExercised: true,
       folderLifecycleExercised: true,
       folderMoveExercised: true,
+      folderAccessExercised: true,
       virtualNodeExercised: true,
       invitationExercised: true,
       conversationExportExercised: true,

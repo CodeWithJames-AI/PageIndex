@@ -37,6 +37,8 @@ WORKSPACE_EXPORT_TABLES = (
     "workspace_groups",
     "workspace_group_members",
     "folders",
+    "folder_access_grants",
+    "folder_group_access_grants",
     "documents",
     "document_access_grants",
     "document_group_access_grants",
@@ -594,6 +596,26 @@ class EnterpriseStore:
               name TEXT NOT NULL,
               path TEXT NOT NULL,
               created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS folder_access_grants (
+              folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              user_id TEXT NOT NULL,
+              role TEXT NOT NULL DEFAULT 'read',
+              granted_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (folder_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS folder_group_access_grants (
+              folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              group_id TEXT NOT NULL REFERENCES workspace_groups(id) ON DELETE CASCADE,
+              role TEXT NOT NULL DEFAULT 'read',
+              granted_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (folder_id, group_id)
             );
 
             CREATE TABLE IF NOT EXISTS documents (
@@ -1516,9 +1538,35 @@ class EnterpriseStore:
                   AND wgm.workspace_id = {alias}.workspace_id
                   AND wgm.user_id = ?
               )
+              OR EXISTS (
+                SELECT 1
+                FROM folder_access_grants fag
+                JOIN folders granted_folder ON granted_folder.id = fag.folder_id
+                JOIN folders document_folder ON document_folder.id = {alias}.folder_id
+                WHERE fag.workspace_id = {alias}.workspace_id
+                  AND fag.user_id = ?
+                  AND (
+                    document_folder.path = granted_folder.path
+                    OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                  )
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM folder_group_access_grants fgag
+                JOIN folders granted_folder ON granted_folder.id = fgag.folder_id
+                JOIN folders document_folder ON document_folder.id = {alias}.folder_id
+                JOIN workspace_group_members wgm ON wgm.group_id = fgag.group_id
+                WHERE fgag.workspace_id = {alias}.workspace_id
+                  AND wgm.workspace_id = {alias}.workspace_id
+                  AND wgm.user_id = ?
+                  AND (
+                    document_folder.path = granted_folder.path
+                    OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                  )
+              )
             )
             """,
-            [actor_user_id, actor_user_id, actor_user_id],
+            [actor_user_id, actor_user_id, actor_user_id, actor_user_id, actor_user_id],
         )
 
     def _can_read_document(self, document: dict[str, Any], actor_user_id: str | None) -> bool:
@@ -1544,6 +1592,38 @@ class EnterpriseStore:
                   AND wgm.user_id = ?
                 """,
                 (document["id"], document["workspace_id"], actor_user_id),
+            )
+            or self._one(
+                """
+                SELECT 1
+                FROM folder_access_grants fag
+                JOIN folders granted_folder ON granted_folder.id = fag.folder_id
+                JOIN folders document_folder ON document_folder.id = ?
+                WHERE fag.workspace_id = ?
+                  AND fag.user_id = ?
+                  AND (
+                    document_folder.path = granted_folder.path
+                    OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                  )
+                """,
+                (document["folder_id"], document["workspace_id"], actor_user_id),
+            )
+            or self._one(
+                """
+                SELECT 1
+                FROM folder_group_access_grants fgag
+                JOIN folders granted_folder ON granted_folder.id = fgag.folder_id
+                JOIN folders document_folder ON document_folder.id = ?
+                JOIN workspace_group_members wgm ON wgm.group_id = fgag.group_id
+                WHERE fgag.workspace_id = ?
+                  AND wgm.workspace_id = ?
+                  AND wgm.user_id = ?
+                  AND (
+                    document_folder.path = granted_folder.path
+                    OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                  )
+                """,
+                (document["folder_id"], document["workspace_id"], document["workspace_id"], actor_user_id),
             )
         )
 
@@ -2228,6 +2308,28 @@ class EnterpriseStore:
                     (workspace_id,),
                 )
             ),
+            "folder_access_grants.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT folder_id, workspace_id, user_id, role, granted_by, created_at
+                    FROM folder_access_grants
+                    WHERE workspace_id = ?
+                    ORDER BY folder_id, user_id
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "folder_group_access_grants.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT folder_id, workspace_id, group_id, role, granted_by, created_at
+                    FROM folder_group_access_grants
+                    WHERE workspace_id = ?
+                    ORDER BY folder_id, group_id
+                    """,
+                    (workspace_id,),
+                )
+            ),
             "documents.jsonl": documents,
             "document_access_grants.jsonl": _rows(
                 self.conn.execute(
@@ -2761,6 +2863,181 @@ class EnterpriseStore:
                     details={"name": folder["name"], "path": folder["path"]},
                 )
         return deleted
+
+    def list_folder_access(
+        self,
+        folder_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+    ) -> dict[str, Any] | None:
+        folder = self._one("SELECT * FROM folders WHERE id = ?", (folder_id.strip(),))
+        if not folder or folder["workspace_id"] != workspace_id:
+            return None
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        rows = self.conn.execute(
+            """
+            SELECT folder_id, workspace_id, user_id, role, granted_by, created_at
+            FROM folder_access_grants
+            WHERE folder_id = ?
+            ORDER BY user_id
+            """,
+            (folder["id"],),
+        )
+        group_rows = self.conn.execute(
+            """
+            SELECT fg.folder_id, fg.workspace_id, fg.group_id, g.name AS group_name,
+                   fg.role, fg.granted_by, fg.created_at
+            FROM folder_group_access_grants fg
+            JOIN workspace_groups g ON g.id = fg.group_id
+            WHERE fg.folder_id = ?
+            ORDER BY g.name, fg.group_id
+            """,
+            (folder["id"],),
+        )
+        return {
+            "folder": dict(folder),
+            "workspace_id": workspace_id,
+            "grants": [dict(row) for row in rows],
+            "group_grants": [dict(row) for row in group_rows],
+        }
+
+    def grant_folder_access(
+        self,
+        folder_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        folder = self._one("SELECT * FROM folders WHERE id = ?", (folder_id.strip(),))
+        if not folder or folder["workspace_id"] != workspace_id:
+            return None
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        user_id = user_id.strip()
+        if not user_id:
+            raise ValueError("User id is required.")
+        self.require_workspace_access(workspace_id, user_id)
+        now = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO folder_access_grants (folder_id, workspace_id, user_id, role, granted_by, created_at)
+                VALUES (?, ?, ?, 'read', ?, ?)
+                ON CONFLICT(folder_id, user_id) DO UPDATE SET
+                  role = excluded.role,
+                  granted_by = excluded.granted_by,
+                  created_at = excluded.created_at
+                """,
+                (folder["id"], workspace_id, user_id, actor_user_id, now),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "folder.access_grant",
+                target_type="folder",
+                target_id=folder["id"],
+                details={"user_id": user_id, "role": "read", "path": folder["path"]},
+            )
+        return self.list_folder_access(folder["id"], workspace_id=workspace_id, actor_user_id=actor_user_id)
+
+    def grant_folder_group_access(
+        self,
+        folder_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        group_id: str,
+    ) -> dict[str, Any] | None:
+        folder = self._one("SELECT * FROM folders WHERE id = ?", (folder_id.strip(),))
+        if not folder or folder["workspace_id"] != workspace_id:
+            return None
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        group = self._require_workspace_group(workspace_id, group_id)
+        now = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO folder_group_access_grants (folder_id, workspace_id, group_id, role, granted_by, created_at)
+                VALUES (?, ?, ?, 'read', ?, ?)
+                ON CONFLICT(folder_id, group_id) DO UPDATE SET
+                  role = excluded.role,
+                  granted_by = excluded.granted_by,
+                  created_at = excluded.created_at
+                """,
+                (folder["id"], workspace_id, group["id"], actor_user_id, now),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "folder.group_access_grant",
+                target_type="folder",
+                target_id=folder["id"],
+                details={"group_id": group["id"], "group_name": group["name"], "role": "read", "path": folder["path"]},
+            )
+        return self.list_folder_access(folder["id"], workspace_id=workspace_id, actor_user_id=actor_user_id)
+
+    def revoke_folder_access(
+        self,
+        folder_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        user_id: str,
+    ) -> bool:
+        folder = self._one("SELECT * FROM folders WHERE id = ?", (folder_id.strip(),))
+        if not folder or folder["workspace_id"] != workspace_id:
+            return False
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        user_id = user_id.strip()
+        if not user_id:
+            raise ValueError("User id is required.")
+        with self._atomic():
+            cursor = self.conn.execute(
+                "DELETE FROM folder_access_grants WHERE folder_id = ? AND user_id = ?",
+                (folder["id"], user_id),
+            )
+            revoked = cursor.rowcount > 0
+            if revoked:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "folder.access_revoke",
+                    target_type="folder",
+                    target_id=folder["id"],
+                    details={"user_id": user_id, "role": "read", "path": folder["path"]},
+                )
+        return revoked
+
+    def revoke_folder_group_access(
+        self,
+        folder_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        group_id: str,
+    ) -> bool:
+        folder = self._one("SELECT * FROM folders WHERE id = ?", (folder_id.strip(),))
+        if not folder or folder["workspace_id"] != workspace_id:
+            return False
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        group = self._require_workspace_group(workspace_id, group_id)
+        with self._atomic():
+            cursor = self.conn.execute(
+                "DELETE FROM folder_group_access_grants WHERE folder_id = ? AND group_id = ?",
+                (folder["id"], group["id"]),
+            )
+            revoked = cursor.rowcount > 0
+            if revoked:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "folder.group_access_revoke",
+                    target_type="folder",
+                    target_id=folder["id"],
+                    details={"group_id": group["id"], "group_name": group["name"], "path": folder["path"]},
+                )
+        return revoked
 
     def register_document(
         self,

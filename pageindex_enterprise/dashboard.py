@@ -628,6 +628,14 @@ DASHBOARD_HTML = """<!doctype html>
               <button id="refreshQueryRunsButton" class="secondary" type="button">Refresh runs</button>
             </div>
             <div class="import-row">
+              <input id="queryRunActorFilterInput" value="" placeholder="actor user id" aria-label="Query run actor filter">
+              <input id="queryRunSearchInput" value="" placeholder="query text" aria-label="Query run text filter">
+            </div>
+            <div class="import-row">
+              <input id="queryRunSinceInput" value="" placeholder="since ISO time" aria-label="Query run since filter">
+              <input id="queryRunUntilInput" value="" placeholder="until ISO time" aria-label="Query run until filter">
+            </div>
+            <div class="import-row">
               <select id="queryRunExportFormatInput" aria-label="Query run export format">
                 <option value="jsonl">jsonl</option>
                 <option value="csv">csv</option>
@@ -725,6 +733,10 @@ DASHBOARD_HTML = """<!doctype html>
     const citationList = document.getElementById("citationList");
     const traceText = document.getElementById("traceText");
     const queryRunList = document.getElementById("queryRunList");
+    const queryRunActorFilterInput = document.getElementById("queryRunActorFilterInput");
+    const queryRunSearchInput = document.getElementById("queryRunSearchInput");
+    const queryRunSinceInput = document.getElementById("queryRunSinceInput");
+    const queryRunUntilInput = document.getElementById("queryRunUntilInput");
     const queryRunExportFormatInput = document.getElementById("queryRunExportFormatInput");
     const queryRunExportText = document.getElementById("queryRunExportText");
     const queryRetentionDaysInput = document.getElementById("queryRetentionDaysInput");
@@ -2517,19 +2529,41 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus(payload.verification && payload.verification.ok ? "Trace verified." : "Trace returned warnings.", payload.verification && payload.verification.ok ? "ok" : "warn");
     }
 
+    function queryRunQueryString(options = {}) {
+      const params = new URLSearchParams();
+      params.set("limit", options.limit || "25");
+      const actor = queryRunActorFilterInput.value.trim();
+      const query = queryRunSearchInput.value.trim();
+      const since = queryRunSinceInput.value.trim();
+      const until = queryRunUntilInput.value.trim();
+      if (actor) {
+        params.set("actor_user_id", actor);
+      }
+      if (query) {
+        params.set("query", query);
+      }
+      if (since) {
+        params.set("since", since);
+      }
+      if (until) {
+        params.set("until", until);
+      }
+      if (options.format) {
+        params.set("format", options.format);
+      }
+      return `?${params.toString()}`;
+    }
+
     async function refreshQueryRuns() {
       setStatus("Refreshing query runs...");
-      const payload = await api("/query-runs?limit=25");
+      const payload = await api(`/query-runs${queryRunQueryString({ limit: "25" })}`);
       renderQueryRuns(payload.runs || []);
       setStatus("Query runs refreshed.", "ok");
     }
 
     async function exportQueryRuns() {
       setStatus("Exporting query runs...");
-      const params = new URLSearchParams();
-      params.set("limit", "100");
-      params.set("format", queryRunExportFormatInput.value || "jsonl");
-      const response = await fetch(`/query-runs/export?${params.toString()}`, {
+      const response = await fetch(`/query-runs/export${queryRunQueryString({ limit: "100", format: queryRunExportFormatInput.value || "jsonl" })}`, {
         headers: authHeaders()
       });
       const text = await response.text();

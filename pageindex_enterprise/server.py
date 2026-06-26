@@ -156,6 +156,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                         workspace_id,
                         user_id,
                         limit=limit,
+                        run_actor_user_id=_str_param(params, "actor_user_id"),
+                        since=_str_param(params, "since"),
+                        until=_str_param(params, "until"),
+                        query=_str_param(params, "query"),
                         format=export_format,
                     )
                     content_type = "text/csv; charset=utf-8" if export_format_name == "csv" else "application/x-ndjson; charset=utf-8"
@@ -169,7 +173,19 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 store = EnterpriseStore(self.server.root)
                 try:
                     workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
-                    self._json({"runs": store.list_query_runs(workspace_id, user_id, limit=limit)})
+                    self._json(
+                        {
+                            "runs": store.list_query_runs(
+                                workspace_id,
+                                user_id,
+                                limit=limit,
+                                run_actor_user_id=_str_param(params, "actor_user_id"),
+                                since=_str_param(params, "since"),
+                                until=_str_param(params, "until"),
+                                query=_str_param(params, "query"),
+                            )
+                        }
+                    )
                 finally:
                     store.close()
                 return

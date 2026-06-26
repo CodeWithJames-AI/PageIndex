@@ -277,6 +277,10 @@ def main() -> None:
     query_export.add_argument("user_id")
     query_export.add_argument("--limit", type=int, default=500)
     query_export.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
+    query_export.add_argument("--actor-user-id")
+    query_export.add_argument("--since")
+    query_export.add_argument("--until")
+    query_export.add_argument("--query")
 
     delete_query_run = sub.add_parser("delete-query-run")
     delete_query_run.add_argument("workspace_id")
@@ -792,6 +796,10 @@ def main() -> None:
                         args.workspace_id,
                         args.user_id,
                         limit=args.limit,
+                        run_actor_user_id=args.actor_user_id,
+                        since=args.since,
+                        until=args.until,
+                        query=args.query,
                         format=args.format,
                     )
                 ),

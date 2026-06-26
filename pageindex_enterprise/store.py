@@ -4786,23 +4786,42 @@ class EnterpriseStore:
         actor_user_id: str,
         *,
         limit: int = 50,
+        run_actor_user_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        query: str | None = None,
     ) -> list[dict[str, Any]]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         limit = max(1, min(int(limit), 200))
+        where = ["q.workspace_id = ?"]
+        args: list[Any] = [workspace_id]
+        if run_actor_user_id and run_actor_user_id.strip():
+            where.append("q.actor_user_id = ?")
+            args.append(run_actor_user_id.strip())
+        if since and since.strip():
+            where.append("q.created_at >= ?")
+            args.append(since.strip())
+        if until and until.strip():
+            where.append("q.created_at <= ?")
+            args.append(until.strip())
+        if query and query.strip():
+            where.append("lower(q.query) LIKE ? ESCAPE '\\'")
+            args.append(f"%{_escape_like(query.strip().casefold())}%")
+        args.append(limit)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT q.id, q.workspace_id, q.actor_user_id, q.query, q.scope_json, q.created_at, q.completed_at,
                    COUNT(DISTINCT e.id) AS evidence_count,
                    COUNT(DISTINCT c.id) AS citation_count
             FROM query_runs q
             LEFT JOIN evidence e ON e.run_id = q.id
             LEFT JOIN citations c ON c.run_id = q.id
-            WHERE q.workspace_id = ?
+            WHERE {' AND '.join(where)}
             GROUP BY q.id
             ORDER BY q.created_at DESC, q.id DESC
             LIMIT ?
             """,
-            (workspace_id, limit),
+            args,
         )
         runs = []
         for row in rows:
@@ -4817,9 +4836,21 @@ class EnterpriseStore:
         actor_user_id: str,
         limit: int = 500,
         *,
+        run_actor_user_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        query: str | None = None,
         format: str = "jsonl",
     ) -> str:
-        runs = self.list_query_runs(workspace_id, actor_user_id, limit=limit)
+        runs = self.list_query_runs(
+            workspace_id,
+            actor_user_id,
+            limit=limit,
+            run_actor_user_id=run_actor_user_id,
+            since=since,
+            until=until,
+            query=query,
+        )
         ordered = list(reversed(runs))
         export_format = format.strip().casefold()
         if export_format == "jsonl":

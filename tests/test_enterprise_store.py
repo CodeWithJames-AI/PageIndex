@@ -917,13 +917,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="History memo")
             first = store.query_corpus("history evidence", workspace_id=workspace_id, actor_user_id="alice")
             second = store.query_corpus("operators history", workspace_id=workspace_id, actor_user_id="alice")
+            third = store.query_corpus("bob history", workspace_id=workspace_id, actor_user_id="bob")
 
             runs = store.list_query_runs(workspace_id, "alice")
             limited = store.list_query_runs(workspace_id, "alice", limit=1)
+            alice_runs = store.list_query_runs(workspace_id, "alice", run_actor_user_id="alice")
+            query_filtered = store.list_query_runs(workspace_id, "alice", query="operators")
+            future_runs = store.list_query_runs(workspace_id, "alice", since="2999-01-01T00:00:00+00:00")
+            old_until_runs = store.list_query_runs(workspace_id, "alice", until="1999-01-01T00:00:00+00:00")
             trace = store.get_query_trace(first["run_id"], workspace_id=workspace_id, actor_user_id="alice")
             foreign = store.get_query_trace(first["run_id"], workspace_id=other_workspace, actor_user_id="mallory")
-            jsonl_export = store.export_query_runs(workspace_id, "alice", format="jsonl")
-            csv_export = store.export_query_runs(workspace_id, "alice", format="csv")
+            jsonl_export = store.export_query_runs(workspace_id, "alice", run_actor_user_id="alice", format="jsonl")
+            csv_export = store.export_query_runs(workspace_id, "alice", run_actor_user_id="alice", format="csv")
             jsonl_rows = [json.loads(line) for line in jsonl_export.splitlines() if line.strip()]
             csv_rows = list(csv.DictReader(io.StringIO(csv_export)))
 
@@ -932,9 +937,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "format must be jsonl or csv"):
                 store.export_query_runs(workspace_id, "alice", format="xml")
 
-            self.assertEqual([run["id"] for run in runs], [second["run_id"], first["run_id"]])
-            self.assertEqual([run["id"] for run in limited], [second["run_id"]])
-            self.assertEqual(runs[0]["actor_user_id"], "alice")
+            self.assertEqual([run["id"] for run in runs], [third["run_id"], second["run_id"], first["run_id"]])
+            self.assertEqual([run["id"] for run in limited], [third["run_id"]])
+            self.assertEqual([run["id"] for run in alice_runs], [second["run_id"], first["run_id"]])
+            self.assertEqual([run["id"] for run in query_filtered], [second["run_id"]])
+            self.assertEqual(future_runs, [])
+            self.assertEqual(old_until_runs, [])
+            self.assertEqual(runs[0]["actor_user_id"], "bob")
             self.assertEqual(runs[0]["citation_count"], 1)
             self.assertEqual(trace["id"], first["run_id"])
             self.assertEqual(trace["actor_user_id"], "alice")
@@ -4273,11 +4282,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                 store.ingest_file(source, workspace_id="ws_cli", actor_user_id="alice", name="CLI export memo")
                 first = store.query_corpus("query export", workspace_id="ws_cli", actor_user_id="alice")
                 second = store.query_corpus("export evidence", workspace_id="ws_cli", actor_user_id="alice")
+                store.query_corpus("mona export", workspace_id="ws_cli", actor_user_id="mona")
             finally:
                 store.close()
 
             jsonl_export = subprocess.run(
-                [*base, "query-export", "ws_cli", "alice", "--format", "jsonl"],
+                [*base, "query-export", "ws_cli", "alice", "--format", "jsonl", "--actor-user-id", "alice"],
                 cwd=repo_root,
                 env=env,
                 capture_output=True,
@@ -4285,7 +4295,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 check=True,
             ).stdout
             csv_export = subprocess.run(
-                [*base, "query-export", "ws_cli", "alice", "--format", "csv"],
+                [*base, "query-export", "ws_cli", "alice", "--format", "csv", "--actor-user-id", "alice"],
                 cwd=repo_root,
                 env=env,
                 capture_output=True,
@@ -5106,6 +5116,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.add_workspace_member(other_workspace, "mallory", "owner")
             store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="History HTTP memo")
             result = store.query_corpus("http query history", workspace_id=workspace_id, actor_user_id="alice")
+            bob_result = store.query_corpus("bob http history", workspace_id=workspace_id, actor_user_id="bob")
             owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
             audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
             write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
@@ -5131,12 +5142,19 @@ class EnterpriseStoreTest(unittest.TestCase):
                 missing_token = _get_error(f"{base}/query-runs")
                 write_get = _get_error(f"{base}/query-runs", headers=write_headers)
                 member_get = _get_error(f"{base}/query-runs", headers=member_headers)
-                audit_list = _get_json(f"{base}/query-runs?limit=5", headers=audit_headers)
+                audit_list = _get_json(f"{base}/query-runs?limit=5&actor_user_id=alice&query=http", headers=audit_headers)
+                bob_list = _get_json(f"{base}/query-runs?limit=5&actor_user_id=bob", headers=audit_headers)
                 owner_trace = _get_json(f"{base}/query-runs/{result['run_id']}", headers=owner_headers)
                 foreign_trace = _get_error(f"{base}/query-runs/{result['run_id']}", headers=other_headers)
                 write_export = _get_error(f"{base}/query-runs/export?format=jsonl", headers=write_headers)
-                exported, exported_type = _get_text(f"{base}/query-runs/export?format=jsonl", headers=audit_headers)
-                exported_csv, exported_csv_type = _get_text(f"{base}/query-runs/export?format=csv", headers=owner_headers)
+                exported, exported_type = _get_text(
+                    f"{base}/query-runs/export?format=jsonl&actor_user_id=alice&query=http",
+                    headers=audit_headers,
+                )
+                exported_csv, exported_csv_type = _get_text(
+                    f"{base}/query-runs/export?format=csv&actor_user_id=alice&query=http",
+                    headers=owner_headers,
+                )
                 audit_delete = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=audit_headers, status=403)
                 write_delete = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=write_headers, status=403)
                 member_delete = _delete_json(f"{base}/query-runs/{result['run_id']}", headers=member_headers, status=403)
@@ -5159,6 +5177,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(member_get["error"], "workspace role denied")
             self.assertEqual(audit_list["runs"][0]["id"], result["run_id"])
             self.assertEqual(audit_list["runs"][0]["actor_user_id"], "alice")
+            self.assertEqual([run["id"] for run in bob_list["runs"]], [bob_result["run_id"]])
             self.assertEqual(audit_list["runs"][0]["citation_count"], 1)
             self.assertEqual(owner_trace["trace"]["id"], result["run_id"])
             self.assertEqual(owner_trace["trace"]["actor_user_id"], "alice")
@@ -8279,6 +8298,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("previewQueryPurge", body)
                     self.assertIn("purgeQueryRuns", body)
                     self.assertIn("/query-runs/export", body)
+                    self.assertIn("queryRunActorFilterInput", body)
+                    self.assertIn("queryRunSearchInput", body)
+                    self.assertIn("queryRunSinceInput", body)
+                    self.assertIn("queryRunUntilInput", body)
+                    self.assertIn("queryRunQueryString", body)
                     self.assertIn("queryRunExportFormatInput", body)
                     self.assertIn("queryRunExportText", body)
                     self.assertIn("exportQueryRuns", body)

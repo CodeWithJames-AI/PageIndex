@@ -285,6 +285,14 @@ DASHBOARD_HTML = """<!doctype html>
       grid-template-columns: 1fr 1fr 1fr;
       gap: 8px;
     }
+    .download-link {
+      color: var(--accent);
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .download-link[hidden] {
+      display: none;
+    }
     .doc strong,
     .citation strong {
       display: block;
@@ -491,6 +499,14 @@ DASHBOARD_HTML = """<!doctype html>
             </div>
           </section>
           <section>
+            <h2 class="section-title">Workspace export</h2>
+            <div class="stack">
+              <button id="exportWorkspaceButton" class="secondary" type="button">Export workspace</button>
+              <a id="workspaceExportLink" class="download-link" hidden href="#" download="pageindex-workspace-export.zip">Download latest export</a>
+              <div id="workspaceExportSummary" class="muted">No workspace export prepared.</div>
+            </div>
+          </section>
+          <section>
             <h2 class="section-title">Readiness</h2>
             <div class="stack">
               <div class="scope-row" aria-label="Deployment readiness options">
@@ -587,6 +603,8 @@ DASHBOARD_HTML = """<!doctype html>
     const auditExportText = document.getElementById("auditExportText");
     const auditRetentionDaysInput = document.getElementById("auditRetentionDaysInput");
     const auditRetentionSummary = document.getElementById("auditRetentionSummary");
+    const workspaceExportLink = document.getElementById("workspaceExportLink");
+    const workspaceExportSummary = document.getElementById("workspaceExportSummary");
     const readinessCheckProviderInput = document.getElementById("readinessCheckProviderInput");
     const readinessRequireProviderKeyInput = document.getElementById("readinessRequireProviderKeyInput");
     const readinessSummary = document.getElementById("readinessSummary");
@@ -616,6 +634,7 @@ DASHBOARD_HTML = """<!doctype html>
     const traceText = document.getElementById("traceText");
     let activeConversationId = "";
     let activeFolderId = "";
+    let workspaceExportUrl = "";
     let currentFolders = [];
 
     function headers() {
@@ -1509,6 +1528,40 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Audit exported.", "ok");
     }
 
+    function filenameFromDisposition(value) {
+      const match = /filename="([^"]+)"/.exec(value || "");
+      return match ? match[1] : "pageindex-workspace-export.zip";
+    }
+
+    async function exportWorkspaceBundle() {
+      setStatus("Exporting workspace...");
+      const response = await fetch("/workspace-export", {
+        headers: authHeaders()
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        try {
+          const payload = JSON.parse(text);
+          throw new Error(payload.error || response.statusText);
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            throw new Error(response.statusText);
+          }
+          throw error;
+        }
+      }
+      const blob = await response.blob();
+      if (workspaceExportUrl) {
+        URL.revokeObjectURL(workspaceExportUrl);
+      }
+      workspaceExportUrl = URL.createObjectURL(blob);
+      workspaceExportLink.href = workspaceExportUrl;
+      workspaceExportLink.download = filenameFromDisposition(response.headers.get("Content-Disposition"));
+      workspaceExportLink.hidden = false;
+      workspaceExportSummary.textContent = `workspace export ready (${blob.size} bytes)`;
+      setStatus("Workspace export prepared.", "ok");
+    }
+
     function parsedRetentionDays() {
       const value = auditRetentionDaysInput.value.trim();
       if (!value) {
@@ -1780,6 +1833,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("clearTokenPolicyButton").addEventListener("click", () => clearApiTokenPolicy().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshAuditButton").addEventListener("click", () => refreshAuditEvents().catch((error) => setStatus(error.message, "error")));
     document.getElementById("exportAuditButton").addEventListener("click", () => exportAuditEvents().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("exportWorkspaceButton").addEventListener("click", () => exportWorkspaceBundle().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshAuditRetentionButton").addEventListener("click", () => refreshAuditRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveAuditRetentionButton").addEventListener("click", () => saveAuditRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearAuditRetentionButton").addEventListener("click", () => clearAuditRetention().catch((error) => setStatus(error.message, "error")));

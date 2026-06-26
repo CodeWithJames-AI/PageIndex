@@ -2452,6 +2452,81 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("source_path", serialized_bundle)
             self.assertNotIn(str(source), serialized_bundle)
 
+    def test_http_workspace_export_requires_admin_bearer_and_returns_redacted_zip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "http-export-source.txt"
+            source.write_text("HTTP workspace export content.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team", workspace_id="ws_export_http")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="HTTP export memo")
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            created_token = store.create_api_token(workspace_id, "alice", name="child")
+            write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store.conn.commit()
+            member_token = member_token_record["token"]
+            store.query_corpus("workspace export", workspace_id=workspace_id, actor_user_id="alice")
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            url = f"{base}/workspace-export"
+            try:
+                missing = _get_error(url)
+                write_denied = _get_error(url, headers={"Authorization": f"Bearer {write_token}"})
+                member_denied = _get_error(url, headers={"Authorization": f"Bearer {member_token}"})
+                body, content_type, disposition = _get_binary(
+                    url,
+                    headers={"Authorization": f"Bearer {owner_token}"},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            with zipfile.ZipFile(io.BytesIO(body)) as archive:
+                names = set(archive.namelist())
+                manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+                documents = [
+                    json.loads(line)
+                    for line in archive.read("documents.jsonl").decode("utf-8").splitlines()
+                    if line.strip()
+                ]
+                pages = [
+                    json.loads(line)
+                    for line in archive.read("document_pages.jsonl").decode("utf-8").splitlines()
+                    if line.strip()
+                ]
+                serialized_bundle = "\n".join(archive.read(name).decode("utf-8") for name in names)
+
+            self.assertEqual(missing["error"], "api token required")
+            self.assertEqual(write_denied["error"], "api token scope denied")
+            self.assertEqual(member_denied["error"], "workspace role denied")
+            self.assertEqual(content_type, "application/zip")
+            self.assertIn("attachment", disposition)
+            self.assertIn("pageindex-ws_export_http-workspace-export.zip", disposition)
+            self.assertEqual(manifest["format"], "pageindex.workspace-export.v1")
+            self.assertEqual(manifest["workspace_id"], workspace_id)
+            self.assertIn("document_pages.jsonl", names)
+            self.assertEqual(documents[0]["id"], doc_id)
+            self.assertEqual(pages[0]["content"], "HTTP workspace export content.")
+            self.assertEqual(list((root / "exports").glob("*.zip")), [])
+            self.assertNotIn(owner_token, serialized_bundle)
+            self.assertNotIn(created_token["token"], serialized_bundle)
+            self.assertNotIn("pit_", serialized_bundle)
+            self.assertNotIn("token_hash", serialized_bundle)
+            self.assertNotIn("source_path", serialized_bundle)
+            self.assertNotIn(str(source), serialized_bundle)
+
     def test_token_lifecycle_cli_lists_and_revokes_without_leaking_hashes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -6123,6 +6198,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("auditExportText", body)
                     self.assertIn("refreshAuditEvents", body)
                     self.assertIn("exportAuditEvents", body)
+                    self.assertIn("/workspace-export", body)
+                    self.assertIn("exportWorkspaceButton", body)
+                    self.assertIn("workspaceExportSummary", body)
+                    self.assertIn("workspaceExportLink", body)
+                    self.assertIn("exportWorkspaceBundle", body)
                     self.assertIn("/audit-retention", body)
                     self.assertIn("/audit-retention/purge", body)
                     self.assertIn("auditRetentionDaysInput", body)
@@ -6238,6 +6318,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["tokenExercised"], True)
             self.assertEqual(smoke["tokenPolicyExercised"], True)
             self.assertEqual(smoke["auditExercised"], True)
+            self.assertEqual(smoke["workspaceExportExercised"], True)
             self.assertEqual(smoke["retentionExercised"], True)
             self.assertEqual(smoke["readinessExercised"], True)
             self.assertEqual(smoke["providerExercised"], True)
@@ -6758,6 +6839,18 @@ def _get_text(url: str, status: int = 200, headers=None):
         body = response.read().decode("utf-8")
         assert response.status == status
         return body, response.headers.get("Content-Type", "")
+
+
+def _get_binary(url: str, status: int = 200, headers=None):
+    request = Request(url, headers=headers or {})
+    with urlopen(request) as response:
+        body = response.read()
+        assert response.status == status
+        return (
+            body,
+            response.headers.get("Content-Type", ""),
+            response.headers.get("Content-Disposition", ""),
+        )
 
 
 def _get_error(url: str, headers=None):

@@ -264,6 +264,20 @@ async function waitForAnyText(page, selector, expectedValues) {
     assert(!auditExport.includes(createdSecret), "audit export leaked created token secret");
     assert(!auditExport.includes(rotatedSecret), "audit export leaked rotated token secret");
 
+    const workspaceExportResponsePromise = page.waitForResponse(
+      (response) => response.url().endsWith("/workspace-export") && response.request().method() === "GET"
+    );
+    await page.click("#exportWorkspaceButton");
+    const workspaceExportResponse = await workspaceExportResponsePromise;
+    const workspaceExportLength = Number(workspaceExportResponse.headers()["content-length"] || "0");
+    await waitForText(page, "#status", "Workspace export prepared.");
+    await waitForText(page, "#workspaceExportSummary", "workspace export ready");
+    const workspaceExportSummary = (await page.textContent("#workspaceExportSummary")) || "";
+    const workspaceExportDownload = await page.locator("#workspaceExportLink").getAttribute("download");
+    assert(workspaceExportLength > 0, "workspace export response was empty");
+    assert(!workspaceExportSummary.includes("(0 bytes)"), "workspace export summary reported zero bytes");
+    assert(workspaceExportDownload && workspaceExportDownload.includes("workspace-export.zip"), "workspace export download filename was not set");
+
     await waitForText(page, "#auditRetentionSummary", "Retention not set.");
     await page.fill("#auditRetentionDaysInput", "1");
     const saveRetentionResponse = page.waitForResponse(
@@ -387,6 +401,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       tokenExercised: true,
       tokenPolicyExercised: true,
       auditExercised: true,
+      workspaceExportExercised: true,
       retentionExercised: true,
       readinessExercised: true,
       providerExercised: true,

@@ -242,6 +242,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            if parsed.path == "/workspace-export":
+                self._workspace_export()
+                return
             if parsed.path == "/workspace-members":
                 store = EnterpriseStore(self.server.root)
                 try:
@@ -599,6 +602,34 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             self._json({"updated": True, "document": document})
         finally:
+            store.close()
+
+    def _workspace_export(self) -> None:
+        store = EnterpriseStore(self.server.root)
+        output: Path | None = None
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope=("audit", "write"),
+                require_api_token=True,
+            )
+            root = Path(self.server.root).expanduser().resolve()
+            export_dir = (root / "exports").resolve()
+            if not _is_relative_to(export_dir, root):
+                raise ValueError("workspace export path is invalid")
+            export_dir.mkdir(parents=True, exist_ok=True)
+            output = export_dir / f"workspace-export-{uuid.uuid4().hex}.zip"
+            store.export_workspace_bundle(workspace_id, user_id, output)
+            body = output.read_bytes()
+            filename = f"pageindex-{_safe_path_segment(workspace_id)}-workspace-export.zip"
+            self._bytes(
+                body,
+                content_type="application/zip",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        finally:
+            if output is not None:
+                output.unlink(missing_ok=True)
             store.close()
 
     def _get_document_access(self, doc_id: str) -> None:
@@ -1094,6 +1125,22 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _bytes(
+        self,
+        payload: bytes,
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        content_type: str = "application/octet-stream",
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(payload)
 
 
 def serve(root: str | Path, host: str = "127.0.0.1", port: int = 8765, *, require_api_token: bool = False) -> None:

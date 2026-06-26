@@ -81,6 +81,134 @@ class EnterpriseStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Folder path already exists"):
                 store.create_folder("Reports", workspace_id=workspace_a, actor_user_id="alice")
 
+    def test_workspace_folders_can_be_renamed_and_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EnterpriseStore(Path(tmp) / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "vera", "viewer", actor_user_id="alice")
+
+            reports = store.create_folder("Reports", workspace_id=workspace_id, actor_user_id="alice")
+            archive = store.create_folder("Archive", parent_id=reports, actor_user_id="alice")
+            store.create_folder("Legal", workspace_id=workspace_id, actor_user_id="alice")
+            doc_id = store.register_document(
+                name="Foldered note",
+                source_path="/docs/foldered.txt",
+                kind="txt",
+                description="folder lifecycle",
+                folder_id=archive,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Folder path already exists"):
+                store.rename_folder(reports, "Legal", workspace_id=workspace_id, actor_user_id="alice")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.rename_folder(reports, "Viewer Edit", workspace_id=workspace_id, actor_user_id="vera")
+
+            renamed = store.rename_folder(reports, "Reports 2026", workspace_id=workspace_id, actor_user_id="alice")
+            folders = store.list_folders(workspace_id)
+
+            self.assertIsNotNone(renamed)
+            self.assertEqual(renamed["path"], "/Reports 2026")
+            self.assertIn("/Reports 2026/Archive", [folder["path"] for folder in folders])
+            self.assertEqual(store.get_document(doc_id)["folder_id"], archive)
+
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.delete_folder(reports, workspace_id=workspace_id, actor_user_id="vera")
+            self.assertTrue(store.delete_folder(reports, workspace_id=workspace_id, actor_user_id="alice"))
+            self.assertFalse(store.delete_folder(reports, workspace_id=workspace_id, actor_user_id="alice"))
+
+            self.assertNotIn("/Reports 2026/Archive", [folder["path"] for folder in store.list_folders(workspace_id)])
+            self.assertIsNone(store.get_document(doc_id)["folder_id"])
+            self.assertEqual(
+                [event["action"] for event in store.list_audit_events(workspace_id, "alice", action="folder.rename")],
+                ["folder.rename"],
+            )
+            self.assertEqual(
+                [event["action"] for event in store.list_audit_events(workspace_id, "alice", action="folder.delete")],
+                ["folder.delete"],
+            )
+
+    def test_workspace_folder_lifecycle_cli_renames_and_deletes_without_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run(
+                [*base, "workspace", "Team", "--workspace-id", "ws_folder_cli"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_folder_cli", "alice", "--role", "owner"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_folder_cli", "vera", "--role", "viewer", "--actor-user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            folder_id = subprocess.run(
+                [*base, "folder", "Reports", "--workspace-id", "ws_folder_cli", "--user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            denied = subprocess.run(
+                [*base, "rename-folder", folder_id, "Blocked", "--workspace-id", "ws_folder_cli", "--user-id", "vera"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            renamed = json.loads(
+                subprocess.run(
+                    [*base, "rename-folder", folder_id, "Reports 2026", "--workspace-id", "ws_folder_cli", "--user-id", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            deleted = json.loads(
+                subprocess.run(
+                    [*base, "delete-folder", folder_id, "--workspace-id", "ws_folder_cli", "--user-id", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            store = EnterpriseStore(root)
+            try:
+                folders = store.list_folders("ws_folder_cli")
+            finally:
+                store.close()
+
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertIn("workspace role denied", denied.stderr)
+            self.assertNotIn("Traceback", denied.stderr)
+            self.assertEqual(renamed["path"], "/Reports 2026")
+            self.assertEqual(deleted, {"deleted": True})
+            self.assertEqual(folders, [])
+
     def test_workspace_member_lifecycle_is_owner_admin_audited_and_invalidates_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = EnterpriseStore(Path(tmp) / "workspace")
@@ -4845,6 +4973,24 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )
                 bad_name = _post_json(f"{base}/folders", {"name": " "}, headers=owner_a_headers, status=400)
                 duplicate = _post_json(f"{base}/folders", {"name": "Reports"}, headers=owner_a_headers, status=400)
+                read_rename_blocked = _put_json(
+                    f"{base}/folders/{reports_a['folder_id']}",
+                    {"name": "Blocked"},
+                    headers=read_a_headers,
+                    status=403,
+                )
+                viewer_rename_blocked = _put_json(
+                    f"{base}/folders/{reports_a['folder_id']}",
+                    {"name": "Viewer blocked"},
+                    headers=viewer_headers,
+                    status=403,
+                )
+                renamed = _put_json(
+                    f"{base}/folders/{reports_a['folder_id']}",
+                    {"name": "Reports 2026"},
+                    headers=owner_a_headers,
+                )
+                folders_a_renamed = _get_json(f"{base}/folders", headers=read_a_headers)
                 reports_b = _post_json(f"{base}/folders", {"name": "Reports"}, headers=owner_b_headers, status=201)
                 foreign_parent_blocked = _post_json(
                     f"{base}/folders",
@@ -4858,6 +5004,30 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=owner_b_headers,
                     status=403,
                 )
+                foreign_rename_blocked = _put_json(
+                    f"{base}/folders/{reports_a['folder_id']}",
+                    {"name": "Cross"},
+                    headers=owner_b_headers,
+                    status=404,
+                )
+                read_delete_blocked = _delete_json(
+                    f"{base}/folders/{reports_a['folder_id']}",
+                    headers=read_a_headers,
+                    status=403,
+                )
+                viewer_delete_blocked = _delete_json(
+                    f"{base}/folders/{reports_a['folder_id']}",
+                    headers=viewer_headers,
+                    status=403,
+                )
+                foreign_delete_blocked = _delete_json(
+                    f"{base}/folders/{reports_a['folder_id']}",
+                    headers=owner_b_headers,
+                )
+                deleted = _delete_json(f"{base}/folders/{reports_a['folder_id']}", headers=owner_a_headers)
+                deleted_again = _delete_json(f"{base}/folders/{reports_a['folder_id']}", headers=owner_a_headers)
+                folders_a_after_delete = _get_json(f"{base}/folders", headers=read_a_headers)
+                documents_after_delete = _get_json(f"{base}/documents", headers=read_a_headers)
                 folders_b = _get_json(f"{base}/folders", headers=owner_b_headers)
             finally:
                 server.shutdown()
@@ -4872,15 +5042,30 @@ class EnterpriseStoreTest(unittest.TestCase):
                 [(folder["name"], folder["path"]) for folder in folders_a["folders"]],
                 [("Reports", "/Reports"), ("Archive", "/Reports/Archive")],
             )
+            self.assertEqual(renamed["folder"]["path"], "/Reports 2026")
+            self.assertEqual(
+                [(folder["name"], folder["path"]) for folder in folders_a_renamed["folders"]],
+                [("Reports 2026", "/Reports 2026"), ("Archive", "/Reports 2026/Archive")],
+            )
             self.assertEqual([(folder["name"], folder["path"]) for folder in folders_b["folders"]], [("Reports", "/Reports")])
             self.assertEqual(documents_a["documents"][0]["id"], foldered_doc["doc_id"])
             self.assertEqual(documents_a["documents"][0]["folder_id"], archive_a["folder_id"])
+            self.assertEqual(documents_after_delete["documents"][0]["folder_id"], None)
+            self.assertEqual(folders_a_after_delete["folders"], [])
             self.assertEqual(read_write_blocked["error"], "api token scope denied")
             self.assertEqual(viewer_write_blocked["error"], "workspace role denied")
             self.assertEqual(bad_name["error"], "name is required")
             self.assertEqual(duplicate["error"], "Folder path already exists in this workspace.")
+            self.assertEqual(read_rename_blocked["error"], "api token scope denied")
+            self.assertEqual(viewer_rename_blocked["error"], "workspace role denied")
             self.assertEqual(foreign_parent_blocked["error"], "folder access denied")
             self.assertEqual(foreign_folder_ingest_blocked["error"], "folder access denied")
+            self.assertEqual(foreign_rename_blocked["error"], "folder not found")
+            self.assertEqual(read_delete_blocked["error"], "api token scope denied")
+            self.assertEqual(viewer_delete_blocked["error"], "workspace role denied")
+            self.assertEqual(foreign_delete_blocked["deleted"], False)
+            self.assertEqual(deleted["deleted"], True)
+            self.assertEqual(deleted_again["deleted"], False)
 
     def test_http_virtual_nodes_are_workspace_scoped_and_read_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7006,6 +7191,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("folderList", body)
                     self.assertIn("refreshFolders", body)
                     self.assertIn("createFolder", body)
+                    self.assertIn("renameFolder", body)
+                    self.assertIn("deleteFolder", body)
+                    self.assertIn("data-rename-folder-id", body)
+                    self.assertIn("data-delete-folder-id", body)
                     self.assertIn("/virtual-nodes", body)
                     self.assertIn("virtualNodeQueryInput", body)
                     self.assertIn("virtualNodeList", body)
@@ -7226,6 +7415,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["groupExercised"], True)
             self.assertEqual(smoke["groupLifecycleExercised"], True)
             self.assertEqual(smoke["folderExercised"], True)
+            self.assertEqual(smoke["folderLifecycleExercised"], True)
             self.assertEqual(smoke["virtualNodeExercised"], True)
             self.assertEqual(smoke["invitationExercised"], True)
             self.assertEqual(smoke["conversationExportExercised"], True)

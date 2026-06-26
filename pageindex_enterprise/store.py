@@ -2564,6 +2564,117 @@ class EnterpriseStore:
             rows = self.conn.execute("SELECT * FROM folders ORDER BY path")
         return [dict(row) for row in rows]
 
+    def rename_folder(
+        self,
+        folder_id: str,
+        name: str,
+        *,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        folder_id = folder_id.strip()
+        name = name.strip()
+        if not folder_id:
+            raise ValueError("Folder id is required.")
+        if not name or "/" in name:
+            raise ValueError("Folder name must be non-empty and must not contain '/'.")
+        folder = self._one("SELECT * FROM folders WHERE id = ?", (folder_id,))
+        if not folder:
+            return None
+        if workspace_id and folder["workspace_id"] != workspace_id:
+            return None
+        folder_workspace_id = folder["workspace_id"]
+        self.require_workspace_write(folder_workspace_id, actor_user_id)
+        parent_path = ""
+        if folder["parent_id"]:
+            parent = self._one("SELECT path, workspace_id FROM folders WHERE id = ?", (folder["parent_id"],))
+            if not parent:
+                raise ValueError(f"Parent folder not found: {folder['parent_id']}")
+            if parent["workspace_id"] != folder_workspace_id:
+                raise PermissionError("folder access denied")
+            parent_path = parent["path"]
+        old_path = folder["path"]
+        new_path = f"{parent_path}/{name}" if parent_path else f"/{name}"
+        existing = self._one(
+            """
+            SELECT id
+            FROM folders
+            WHERE id != ?
+              AND path = ?
+              AND (workspace_id = ? OR (workspace_id IS NULL AND ? IS NULL))
+            """,
+            (folder_id, new_path, folder_workspace_id, folder_workspace_id),
+        )
+        if existing:
+            raise ValueError("Folder path already exists in this workspace.")
+        if folder_workspace_id:
+            rows = self.conn.execute("SELECT id, path FROM folders WHERE workspace_id = ?", (folder_workspace_id,))
+        else:
+            rows = self.conn.execute("SELECT id, path FROM folders WHERE workspace_id IS NULL")
+        descendants = sorted(
+            [dict(row) for row in rows if row["path"].startswith(f"{old_path}/")],
+            key=lambda row: len(row["path"]),
+        )
+        try:
+            with self._atomic():
+                self.conn.execute(
+                    "UPDATE folders SET name = ?, path = ? WHERE id = ?",
+                    (name, new_path, folder_id),
+                )
+                for descendant in descendants:
+                    suffix = descendant["path"][len(old_path) :]
+                    self.conn.execute(
+                        "UPDATE folders SET path = ? WHERE id = ?",
+                        (f"{new_path}{suffix}", descendant["id"]),
+                    )
+                if actor_user_id and folder_workspace_id:
+                    self._insert_audit_event(
+                        folder_workspace_id,
+                        actor_user_id,
+                        "folder.rename",
+                        target_type="folder",
+                        target_id=folder_id,
+                        details={"name": name, "previous_path": old_path, "path": new_path},
+                    )
+        except sqlite3.IntegrityError as exc:
+            message = str(exc).casefold()
+            if "folders" in message and "path" in message:
+                raise ValueError("Folder path already exists in this workspace.") from exc
+            raise
+        renamed = self._one("SELECT * FROM folders WHERE id = ?", (folder_id,))
+        return dict(renamed) if renamed else None
+
+    def delete_folder(
+        self,
+        folder_id: str,
+        *,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> bool:
+        folder_id = folder_id.strip()
+        if not folder_id:
+            raise ValueError("Folder id is required.")
+        folder = self._one("SELECT * FROM folders WHERE id = ?", (folder_id,))
+        if not folder:
+            return False
+        if workspace_id and folder["workspace_id"] != workspace_id:
+            return False
+        folder_workspace_id = folder["workspace_id"]
+        self.require_workspace_write(folder_workspace_id, actor_user_id)
+        with self._atomic():
+            cursor = self.conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+            deleted = cursor.rowcount > 0
+            if deleted and actor_user_id and folder_workspace_id:
+                self._insert_audit_event(
+                    folder_workspace_id,
+                    actor_user_id,
+                    "folder.delete",
+                    target_type="folder",
+                    target_id=folder_id,
+                    details={"name": folder["name"], "path": folder["path"]},
+                )
+        return deleted
+
     def register_document(
         self,
         *,

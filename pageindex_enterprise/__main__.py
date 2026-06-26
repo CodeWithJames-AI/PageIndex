@@ -50,6 +50,13 @@ def _api_token_cli(action):
         raise SystemExit(str(exc)) from exc
 
 
+def _folder_cli(action):
+    try:
+        return action()
+    except (PermissionError, ValueError, FileNotFoundError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def _delete_document_cli(action):
     try:
         deleted = action()
@@ -80,6 +87,17 @@ def main() -> None:
     folder.add_argument("--parent-id")
     folder.add_argument("--workspace-id")
     folder.add_argument("--user-id")
+
+    rename_folder = sub.add_parser("rename-folder")
+    rename_folder.add_argument("folder_id")
+    rename_folder.add_argument("name")
+    rename_folder.add_argument("--workspace-id")
+    rename_folder.add_argument("--user-id")
+
+    delete_folder = sub.add_parser("delete-folder")
+    delete_folder.add_argument("folder_id")
+    delete_folder.add_argument("--workspace-id")
+    delete_folder.add_argument("--user-id")
 
     workspace = sub.add_parser("workspace")
     workspace.add_argument("name")
@@ -400,7 +418,37 @@ def main() -> None:
     store = EnterpriseStore(args.root)
     try:
         if args.command == "folder":
-            print(store.create_folder(args.name, args.parent_id, workspace_id=args.workspace_id, actor_user_id=args.user_id))
+            print(
+                _folder_cli(
+                    lambda: store.create_folder(
+                        args.name,
+                        args.parent_id,
+                        workspace_id=args.workspace_id,
+                        actor_user_id=args.user_id,
+                    )
+                )
+            )
+        elif args.command == "rename-folder":
+            renamed_folder = _folder_cli(
+                lambda: store.rename_folder(
+                    args.folder_id,
+                    args.name,
+                    workspace_id=args.workspace_id,
+                    actor_user_id=args.user_id,
+                )
+            )
+            if renamed_folder is None:
+                raise SystemExit("folder not found")
+            print(json.dumps(renamed_folder, indent=2))
+        elif args.command == "delete-folder":
+            deleted = _folder_cli(
+                lambda: store.delete_folder(
+                    args.folder_id,
+                    workspace_id=args.workspace_id,
+                    actor_user_id=args.user_id,
+                )
+            )
+            print(json.dumps({"deleted": deleted}))
         elif args.command == "workspace":
             print(store.create_workspace(args.name, workspace_id=args.workspace_id))
         elif args.command == "add-member":

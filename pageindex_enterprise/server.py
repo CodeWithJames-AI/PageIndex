@@ -388,6 +388,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         try:
             parsed = urlparse(self.path)
+            folder_id = _folder_path(parsed.path)
+            if folder_id:
+                self._rename_folder(folder_id, self._read_json())
+                return
             group_id = _workspace_group_path(parsed.path)
             if group_id:
                 self._rename_workspace_group(group_id, self._read_json())
@@ -461,6 +465,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     self._json({"deleted": deleted})
                 finally:
                     store.close()
+                return
+            folder_id = _folder_path(parsed.path)
+            if folder_id:
+                self._delete_folder(folder_id)
                 return
             doc_id = _document_path(parsed.path)
             if doc_id:
@@ -622,6 +630,35 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 actor_user_id=user_id,
             )
             self._json({"folder_id": folder_id}, HTTPStatus.CREATED)
+        finally:
+            store.close()
+
+    def _rename_folder(self, folder_id: str, payload: dict[str, Any]) -> None:
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name is required")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            folder = store.rename_folder(
+                folder_id,
+                name,
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+            )
+            if folder is None:
+                self._json({"error": "folder not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._json({"folder": folder})
+        finally:
+            store.close()
+
+    def _delete_folder(self, folder_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            deleted = store.delete_folder(folder_id, workspace_id=workspace_id, actor_user_id=user_id)
+            self._json({"deleted": deleted})
         finally:
             store.close()
 
@@ -1593,6 +1630,13 @@ def _document_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "documents":
         return parts[1]
+    return None
+
+
+def _folder_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "folders":
+        return unquote(parts[1])
     return None
 
 

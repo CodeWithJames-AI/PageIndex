@@ -210,6 +210,26 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#folderList", "/Browser");
     const selectedFolderLabel = await page.locator("#folderSelect option:checked").textContent();
     assert(selectedFolderLabel && selectedFolderLabel.includes("/Browser"), "created folder was not selected");
+    const folderCard = page.locator("[data-folder-id]").filter({ hasText: "/Browser" }).first();
+    const folderId = await folderCard.getAttribute("data-folder-id");
+    assert(folderId, "created folder id was not rendered");
+
+    await page.fill("#folderNameInput", "Browser Archive");
+    const renameFolderResponse = page.waitForResponse(
+      (response) => response.url().includes(`/folders/${folderId}`) && response.request().method() === "PUT"
+    );
+    await page.locator(`[data-folder-id="${folderId}"] [data-rename-folder-id]`).click();
+    await renameFolderResponse;
+    await waitForText(page, "#status", "Folder renamed.");
+    await waitForText(page, "#folderList", "/Browser Archive");
+
+    const deleteFolderResponse = page.waitForResponse(
+      (response) => response.url().includes(`/folders/${folderId}`) && response.request().method() === "DELETE"
+    );
+    await page.locator(`[data-folder-id="${folderId}"] [data-delete-folder-id]`).click();
+    await deleteFolderResponse;
+    await waitForText(page, "#status", "Folder deleted.");
+    await waitForText(page, "#folderList", "No folders loaded.");
 
     await waitForText(page, "#virtualNodeList", "/virtual/by-kind/txt");
     await page.fill("#virtualNodeQueryInput", "txt");
@@ -510,6 +530,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       groupExercised: true,
       groupLifecycleExercised: true,
       folderExercised: true,
+      folderLifecycleExercised: true,
       virtualNodeExercised: true,
       invitationExercised: true,
       conversationExportExercised: true,

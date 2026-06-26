@@ -897,19 +897,30 @@ DASHBOARD_HTML = """<!doctype html>
       }
       folderList.className = "folder-list";
       folderList.innerHTML = folders.map((folder) => `
-        <button class="folder ${folder.id === activeFolderId ? "active" : "secondary"}" type="button" data-folder-id="${escapeHtml(folder.id)}">
+        <article class="folder ${folder.id === activeFolderId ? "active" : ""}" data-folder-id="${escapeHtml(folder.id)}">
           <strong>${escapeHtml(folder.name)}</strong>
           <div class="muted">${escapeHtml(folder.path)}</div>
-        </button>
+          <div class="doc-actions">
+            <button class="secondary" type="button" data-select-folder-id="${escapeHtml(folder.id)}">Select</button>
+            <button class="secondary" type="button" data-rename-folder-id="${escapeHtml(folder.id)}">Rename</button>
+            <button class="secondary" type="button" data-delete-folder-id="${escapeHtml(folder.id)}">Delete</button>
+          </div>
+        </article>
       `).join("");
-      folderList.querySelectorAll("[data-folder-id]").forEach((button) => {
+      folderList.querySelectorAll("[data-select-folder-id]").forEach((button) => {
         button.addEventListener("click", () => {
-          activeFolderId = button.dataset.folderId || "";
+          activeFolderId = button.dataset.selectFolderId || "";
           folderSelect.value = activeFolderId;
           renderFolders(folders, activeFolderId);
           const selected = folders.find((folder) => folder.id === activeFolderId);
           setStatus(selected ? `Folder selected ${selected.path}.` : "No folder selected.", "ok");
         });
+      });
+      folderList.querySelectorAll("[data-rename-folder-id]").forEach((button) => {
+        button.addEventListener("click", () => renameFolder(button.dataset.renameFolderId).catch((error) => setStatus(error.message, "error")));
+      });
+      folderList.querySelectorAll("[data-delete-folder-id]").forEach((button) => {
+        button.addEventListener("click", () => deleteFolder(button.dataset.deleteFolderId).catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -1575,6 +1586,43 @@ DASHBOARD_HTML = """<!doctype html>
       folderNameInput.value = "";
       await refreshFolders({ quiet: true, selectedFolderId: created.folder_id });
       setStatus("Folder created.", "ok");
+    }
+
+    async function renameFolder(folderId) {
+      const name = folderNameInput.value.trim();
+      if (!folderId) {
+        setStatus("Folder not found.", "warn");
+        return;
+      }
+      if (!name) {
+        setStatus("Enter a folder name.", "warn");
+        return;
+      }
+      setStatus("Renaming folder...");
+      const payload = await api(`/folders/${encodeURIComponent(folderId)}`, {
+        method: "PUT",
+        body: JSON.stringify({ name })
+      });
+      folderNameInput.value = "";
+      await refreshFolders({ quiet: true, selectedFolderId: payload.folder ? payload.folder.id : folderId });
+      setStatus("Folder renamed.", "ok");
+    }
+
+    async function deleteFolder(folderId) {
+      if (!folderId) {
+        setStatus("Folder not found.", "warn");
+        return;
+      }
+      setStatus("Deleting folder...");
+      const payload = await api(`/folders/${encodeURIComponent(folderId)}`, {
+        method: "DELETE"
+      });
+      if (payload.deleted && activeFolderId === folderId) {
+        activeFolderId = "";
+        folderSelect.value = "";
+      }
+      await refreshFolders({ quiet: true });
+      setStatus(payload.deleted ? "Folder deleted." : "Folder not found.", payload.deleted ? "ok" : "warn");
     }
 
     async function createConversation() {

@@ -1073,7 +1073,7 @@ DASHBOARD_HTML = """<!doctype html>
       queryRunList.innerHTML = runs.map((run) => `
         <article class="query-run">
           <strong>${escapeHtml(run.query || run.id)}</strong>
-          <div class="muted">${escapeHtml(run.id)} | evidence ${escapeHtml(run.evidence_count || 0)} | citations ${escapeHtml(run.citation_count || 0)}</div>
+          <div class="muted">${escapeHtml(run.id)} | user ${escapeHtml(run.actor_user_id || "unknown")} | evidence ${escapeHtml(run.evidence_count || 0)} | citations ${escapeHtml(run.citation_count || 0)}</div>
           <div class="muted">${escapeHtml(run.completed_at || run.created_at || "")}</div>
           <div class="doc-actions">
             <button class="secondary" type="button" data-query-run-id="${escapeHtml(run.id)}">Trace</button>

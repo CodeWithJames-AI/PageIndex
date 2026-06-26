@@ -746,6 +746,7 @@ class EnterpriseStore:
             CREATE TABLE IF NOT EXISTS query_runs (
               id TEXT PRIMARY KEY,
               workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+              actor_user_id TEXT,
               query TEXT NOT NULL,
               scope_json TEXT NOT NULL,
               created_at TEXT NOT NULL,
@@ -864,6 +865,7 @@ class EnterpriseStore:
             },
             "query_runs": {
                 "workspace_id": "TEXT",
+                "actor_user_id": "TEXT",
             },
             "api_tokens": {
                 "expires_at": "TEXT",
@@ -2469,7 +2471,7 @@ class EnterpriseStore:
             "query_runs.jsonl": _rows(
                 self.conn.execute(
                     """
-                    SELECT id, workspace_id, query, scope_json, created_at, completed_at
+                    SELECT id, workspace_id, actor_user_id, query, scope_json, created_at, completed_at
                     FROM query_runs
                     WHERE workspace_id = ?
                     ORDER BY created_at, id
@@ -4246,7 +4248,12 @@ class EnterpriseStore:
             }
             if scope_extra:
                 scope.update(scope_extra)
-            run_id = self.start_query(stored_query or query, scope, workspace_id=workspace_id)
+            run_id = self.start_query(
+                stored_query or query,
+                scope,
+                workspace_id=workspace_id,
+                actor_user_id=actor_user_id,
+            )
             hits = search["hits"]
             citations = []
             for hit in hits:
@@ -4674,11 +4681,22 @@ class EnterpriseStore:
         query: str,
         scope: dict[str, Any] | None = None,
         workspace_id: str | None = None,
+        actor_user_id: str | None = None,
     ) -> str:
         run_id = f"run_{uuid.uuid4().hex}"
         self.conn.execute(
-            "INSERT INTO query_runs (id, workspace_id, query, scope_json, created_at) VALUES (?, ?, ?, ?, ?)",
-            (run_id, workspace_id, query, json.dumps(scope or {}, sort_keys=True), _now()),
+            """
+            INSERT INTO query_runs (id, workspace_id, actor_user_id, query, scope_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                workspace_id,
+                actor_user_id.strip() if actor_user_id else None,
+                query,
+                json.dumps(scope or {}, sort_keys=True),
+                _now(),
+            ),
         )
         self._commit()
         return run_id
@@ -4773,7 +4791,7 @@ class EnterpriseStore:
         limit = max(1, min(int(limit), 200))
         rows = self.conn.execute(
             """
-            SELECT q.id, q.workspace_id, q.query, q.scope_json, q.created_at, q.completed_at,
+            SELECT q.id, q.workspace_id, q.actor_user_id, q.query, q.scope_json, q.created_at, q.completed_at,
                    COUNT(DISTINCT e.id) AS evidence_count,
                    COUNT(DISTINCT c.id) AS citation_count
             FROM query_runs q
@@ -4813,6 +4831,7 @@ class EnterpriseStore:
                 [
                     "id",
                     "workspace_id",
+                    "actor_user_id",
                     "query",
                     "created_at",
                     "completed_at",
@@ -4826,6 +4845,7 @@ class EnterpriseStore:
                     [
                         run["id"],
                         run["workspace_id"],
+                        run["actor_user_id"] or "",
                         run["query"],
                         run["created_at"],
                         run["completed_at"] or "",

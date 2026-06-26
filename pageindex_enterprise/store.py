@@ -55,6 +55,37 @@ WORKSPACE_EXPORT_TABLES = (
     "provider_config",
     "audit_events",
 )
+WORKSPACE_IMPORT_INSERT_ORDER = (
+    "workspace",
+    "workspace_members",
+    "workspace_invitations",
+    "workspace_groups",
+    "workspace_group_members",
+    "folders",
+    "documents",
+    "folder_access_grants",
+    "folder_group_access_grants",
+    "document_access_grants",
+    "document_group_access_grants",
+    "document_pages",
+    "document_versions",
+    "query_runs",
+    "evidence",
+    "citations",
+    "conversations",
+    "conversation_messages",
+    "virtual_nodes",
+    "api_token_policy",
+    "audit_retention_policy",
+    "provider_config",
+    "audit_events",
+)
+WORKSPACE_IMPORT_DB_TABLES = {
+    "workspace": "workspaces",
+    "api_token_policy": "api_token_policies",
+    "audit_retention_policy": "audit_retention_policies",
+    "provider_config": "workspace_provider_configs",
+}
 WORKSPACE_EXPORT_OMITTED_TABLES = ("api_tokens",)
 WORKSPACE_EXPORT_OMITTED_POLICIES = ("api_tokens", "document filesystem paths")
 _UNSET = object()
@@ -426,6 +457,30 @@ def _read_workspace_import_jsonl(
             errors.append(f"{name}:{line_number} must contain a JSON object")
             continue
         rows.append(row)
+    return rows
+
+
+def _workspace_import_rows_for_insert(table: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if table == "documents":
+        return [
+            {
+                **row,
+                "source_path": row.get("source_path") or f"workspace-import://{row.get('id', 'document')}",
+            }
+            for row in rows
+        ]
+    if table == "api_token_policy":
+        return [row for row in rows if row.get("updated_at")]
+    if table == "audit_retention_policy":
+        return [row for row in rows if row.get("updated_at")]
+    if table == "provider_config":
+        return [
+            row
+            for row in rows
+            if row.get("configured") and row.get("base_url") and row.get("model") and row.get("updated_at") and row.get("updated_by")
+        ]
+    if table == "virtual_nodes":
+        return [row for row in rows if row.get("axis") not in {"kind", "folder"}]
     return rows
 
 
@@ -2471,6 +2526,68 @@ class EnterpriseStore:
 
     def validate_workspace_import_bundle(self, bundle_path: str | Path) -> dict[str, Any]:
         return validate_workspace_import_bundle(bundle_path)
+
+    def import_workspace_bundle(self, bundle_path: str | Path) -> dict[str, Any]:
+        validation = validate_workspace_import_bundle(bundle_path)
+        if not validation["ok"]:
+            raise ValueError("workspace import bundle is invalid: " + "; ".join(validation["errors"]))
+        workspace_id = validation["workspace_id"]
+        if not isinstance(workspace_id, str) or not workspace_id.strip():
+            raise ValueError("workspace import bundle is missing a workspace id")
+        workspace_id = workspace_id.strip()
+        if self._one("SELECT id FROM workspaces WHERE id = ?", (workspace_id,)):
+            raise ValueError(f"Workspace already exists: {workspace_id}")
+        bundle = Path(bundle_path).expanduser()
+        errors: list[str] = []
+        rows_by_table: dict[str, list[dict[str, Any]]] = {}
+        with zipfile.ZipFile(bundle) as archive:
+            for table in WORKSPACE_EXPORT_TABLES:
+                rows = _read_workspace_import_jsonl(archive, f"{table}.jsonl", errors)
+                rows_by_table[table] = _workspace_import_rows_for_insert(table, rows)
+        if errors:
+            raise ValueError("workspace import bundle is invalid: " + "; ".join(errors))
+        workspace_rows = rows_by_table.get("workspace", [])
+        if len(workspace_rows) != 1 or workspace_rows[0].get("id") != workspace_id:
+            raise ValueError("workspace import bundle workspace row does not match manifest")
+        inserted: dict[str, int] = {}
+        try:
+            with self._atomic():
+                for table in WORKSPACE_IMPORT_INSERT_ORDER:
+                    rows = rows_by_table.get(table, [])
+                    if table == "virtual_nodes":
+                        rows = sorted(rows, key=lambda row: (str(row.get("path", "")).count("/"), str(row.get("path", ""))))
+                    db_table = WORKSPACE_IMPORT_DB_TABLES.get(table, table)
+                    inserted[table] = self._insert_workspace_import_rows(db_table, rows)
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"workspace import failed integrity checks: {exc}") from exc
+        self.rebuild_virtual_index()
+        return {
+            "ok": True,
+            "workspace_id": workspace_id,
+            "artifact": validation["artifact"],
+            "table_counts": validation["table_counts"],
+            "inserted": inserted,
+            "omitted": list(WORKSPACE_EXPORT_OMITTED_POLICIES),
+            "warnings": validation["warnings"],
+        }
+
+    def _insert_workspace_import_rows(self, db_table: str, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        columns = [row["name"] for row in self.conn.execute(f"PRAGMA table_info({db_table})")]
+        inserted = 0
+        for row in rows:
+            values = {column: row[column] for column in columns if column in row}
+            if not values:
+                continue
+            names = list(values)
+            placeholders = ", ".join("?" for _ in names)
+            self.conn.execute(
+                f"INSERT INTO {db_table} ({', '.join(names)}) VALUES ({placeholders})",
+                tuple(values[name] for name in names),
+            )
+            inserted += 1
+        return inserted
 
     def _audit_retention_policy(self, workspace_id: str) -> dict[str, Any]:
         self._require_workspace(workspace_id)

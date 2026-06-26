@@ -416,9 +416,17 @@ def main() -> None:
         )
         return
     if args.command == "workspace-import":
-        if not args.dry_run:
-            raise SystemExit("workspace-import currently supports only --dry-run")
-        print(json.dumps(validate_workspace_import_bundle(args.bundle_path), indent=2))
+        if args.dry_run:
+            print(json.dumps(validate_workspace_import_bundle(args.bundle_path), indent=2))
+            return
+        store = EnterpriseStore(args.root)
+        try:
+            try:
+                print(json.dumps(store.import_workspace_bundle(args.bundle_path), indent=2))
+            except (PermissionError, ValueError, FileNotFoundError) as exc:
+                raise SystemExit(str(exc)) from exc
+        finally:
+            store.close()
         return
 
     store = EnterpriseStore(args.root)

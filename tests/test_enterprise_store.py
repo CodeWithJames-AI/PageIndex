@@ -2873,6 +2873,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.ingest_file(source, folder_id=folder_id, workspace_id=workspace_id, actor_user_id="alice", name="Import memo")
             store.create_api_token(workspace_id, "alice", name="secret-token")
             store.query_corpus("dry-run", workspace_id=workspace_id, actor_user_id="alice")
+            store.set_workspace_provider_config(
+                workspace_id,
+                "alice",
+                base_url="http://127.0.0.1:1/v1",
+                model="restore-model",
+                api_key_env_var="PAGEINDEX_RESTORE_PROVIDER_KEY",
+            )
             export_path = tmp_path / "workspace-export.zip"
             store.export_workspace_bundle(workspace_id, "alice", export_path)
 
@@ -2889,6 +2896,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.close()
 
             cli_root = tmp_path / "unused-cli-root"
+            restore_root = tmp_path / "restored-workspace"
             base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(cli_root)]
             cli = subprocess.run(
                 [*base, "workspace-import", "--dry-run", str(export_path)],
@@ -2898,14 +2906,39 @@ class EnterpriseStoreTest(unittest.TestCase):
                 text=True,
                 check=True,
             )
-            refused = subprocess.run(
-                [*base, "workspace-import", str(export_path)],
+            restore_base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(restore_root)]
+            restored = subprocess.run(
+                [*restore_base, "workspace-import", str(export_path)],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            duplicate = subprocess.run(
+                [*restore_base, "workspace-import", str(export_path)],
                 cwd=repo_root,
                 env=env,
                 capture_output=True,
                 text=True,
             )
             cli_report = json.loads(cli.stdout)
+            restored_report = json.loads(restored.stdout)
+            restored_store = EnterpriseStore(restore_root)
+            try:
+                restored_documents = restored_store.list_documents(workspace_id=workspace_id, actor_user_id="alice")
+                restored_pages = restored_store.list_document_pages(
+                    restored_documents[0]["id"],
+                    workspace_id=workspace_id,
+                    actor_user_id="alice",
+                )
+                restored_runs = restored_store.list_query_runs(workspace_id, "alice")
+                restored_provider = restored_store.get_workspace_provider_config(workspace_id, "alice")
+                restored_token_count = int(
+                    restored_store.conn.execute("SELECT COUNT(*) AS count FROM api_tokens").fetchone()["count"]
+                )
+            finally:
+                restored_store.close()
 
             self.assertTrue(report["ok"], report["errors"])
             self.assertEqual(report["format"], "pageindex.workspace-export.v1")
@@ -2916,9 +2949,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(cli_report["ok"], cli_report["errors"])
             self.assertEqual(cli_report["workspace_id"], workspace_id)
             self.assertFalse(cli_root.exists())
-            self.assertNotEqual(refused.returncode, 0)
-            self.assertIn("--dry-run", refused.stderr)
-            self.assertNotIn("Traceback", refused.stderr)
+            self.assertTrue(restored_report["ok"])
+            self.assertEqual(restored_report["workspace_id"], workspace_id)
+            self.assertEqual(restored_report["inserted"]["documents"], 1)
+            self.assertEqual(restored_documents[0]["name"], "Import memo")
+            self.assertEqual(restored_pages["pages"][0]["content"], "Workspace import dry-run content.")
+            self.assertEqual(restored_runs[0]["query"], "dry-run")
+            self.assertEqual(restored_provider["model"], "restore-model")
+            self.assertEqual(restored_provider["api_key_env_var"], "PAGEINDEX_RESTORE_PROVIDER_KEY")
+            self.assertEqual(restored_token_count, 0)
+            self.assertNotEqual(duplicate.returncode, 0)
+            self.assertIn("Workspace already exists", duplicate.stderr)
+            self.assertNotIn("Traceback", duplicate.stderr)
 
     def test_workspace_import_dry_run_reports_invalid_bundles(self):
         with tempfile.TemporaryDirectory() as tmp:

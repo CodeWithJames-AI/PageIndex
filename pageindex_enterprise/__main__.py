@@ -240,6 +240,9 @@ def main() -> None:
     audit_log.add_argument("--since")
     audit_log.add_argument("--until")
     audit_log.add_argument("--action")
+    audit_log.add_argument("--event-user-id")
+    audit_log.add_argument("--target-type")
+    audit_log.add_argument("--target-id")
 
     audit_export = sub.add_parser("audit-export")
     audit_export.add_argument("workspace_id")
@@ -248,6 +251,9 @@ def main() -> None:
     audit_export.add_argument("--since")
     audit_export.add_argument("--until")
     audit_export.add_argument("--action")
+    audit_export.add_argument("--event-user-id")
+    audit_export.add_argument("--target-type")
+    audit_export.add_argument("--target-id")
     audit_export.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
 
     audit_retention = sub.add_parser("audit-retention")
@@ -726,6 +732,9 @@ def main() -> None:
                         since=args.since,
                         until=args.until,
                         action=args.action,
+                        event_user_id=args.event_user_id,
+                        target_type=args.target_type,
+                        target_id=args.target_id,
                     ),
                     indent=2,
                 )
@@ -739,6 +748,9 @@ def main() -> None:
                     since=args.since,
                     until=args.until,
                     action=args.action,
+                    event_user_id=args.event_user_id,
+                    target_type=args.target_type,
+                    target_id=args.target_id,
                     format=args.format,
                 ),
                 end="",

@@ -116,6 +116,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                         since=_str_param(params, "since"),
                         until=_str_param(params, "until"),
                         action=_str_param(params, "action"),
+                        event_user_id=_str_param(params, "event_user_id"),
+                        target_type=_str_param(params, "target_type"),
+                        target_id=_str_param(params, "target_id"),
                         format=export_format,
                     )
                     content_type = "text/csv; charset=utf-8" if export_format_name == "csv" else "application/x-ndjson; charset=utf-8"
@@ -138,6 +141,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                                 since=_str_param(params, "since"),
                                 until=_str_param(params, "until"),
                                 action=_str_param(params, "action"),
+                                event_user_id=_str_param(params, "event_user_id"),
+                                target_type=_str_param(params, "target_type"),
+                                target_id=_str_param(params, "target_id"),
                             )
                         }
                     )

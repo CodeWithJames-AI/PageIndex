@@ -2219,6 +2219,9 @@ class EnterpriseStore:
         since: str | None = None,
         until: str | None = None,
         action: str | None = None,
+        event_user_id: str | None = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
     ) -> list[dict[str, Any]]:
         self.require_workspace_role(workspace_id, user_id, {"owner", "admin"})
         limit = max(1, min(int(limit), 500))
@@ -2227,6 +2230,9 @@ class EnterpriseStore:
         if since and until and since > until:
             raise ValueError("since must be before until")
         action = action.strip() if action else None
+        event_user_id = event_user_id.strip() if event_user_id else None
+        target_type = target_type.strip() if target_type else None
+        target_id = target_id.strip() if target_id else None
         where = ["workspace_id = ?"]
         args: list[Any] = [workspace_id]
         if since:
@@ -2238,6 +2244,15 @@ class EnterpriseStore:
         if action:
             where.append("action = ?")
             args.append(action)
+        if event_user_id:
+            where.append("user_id = ?")
+            args.append(event_user_id)
+        if target_type:
+            where.append("target_type = ?")
+            args.append(target_type)
+        if target_id:
+            where.append("target_id = ?")
+            args.append(target_id)
         args.append(limit)
         rows = self.conn.execute(
             f"""
@@ -2265,6 +2280,9 @@ class EnterpriseStore:
         since: str | None = None,
         until: str | None = None,
         action: str | None = None,
+        event_user_id: str | None = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
         format: str = "jsonl",
     ) -> str:
         events = self.list_audit_events(
@@ -2274,6 +2292,9 @@ class EnterpriseStore:
             since=since,
             until=until,
             action=action,
+            event_user_id=event_user_id,
+            target_type=target_type,
+            target_id=target_id,
         )
         ordered = list(reversed(events))
         export_format = format.strip().casefold()

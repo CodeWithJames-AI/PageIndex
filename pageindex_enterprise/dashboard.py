@@ -527,6 +527,11 @@ DASHBOARD_HTML = """<!doctype html>
             <h2 class="section-title">Audit</h2>
             <div class="stack">
               <input id="auditActionInput" value="" placeholder="action filter" aria-label="Audit action filter">
+              <input id="auditUserFilterInput" value="" placeholder="actor user id" aria-label="Audit user filter">
+              <div class="import-row">
+                <input id="auditTargetTypeInput" value="" placeholder="target type" aria-label="Audit target type filter">
+                <input id="auditTargetIdInput" value="" placeholder="target id" aria-label="Audit target id filter">
+              </div>
               <div class="import-row">
                 <select id="auditFormatInput" aria-label="Audit export format">
                   <option value="jsonl">jsonl</option>
@@ -691,6 +696,9 @@ DASHBOARD_HTML = """<!doctype html>
     const tokenPolicyRotationDueInput = document.getElementById("tokenPolicyRotationDueInput");
     const tokenPolicySummary = document.getElementById("tokenPolicySummary");
     const auditActionInput = document.getElementById("auditActionInput");
+    const auditUserFilterInput = document.getElementById("auditUserFilterInput");
+    const auditTargetTypeInput = document.getElementById("auditTargetTypeInput");
+    const auditTargetIdInput = document.getElementById("auditTargetIdInput");
     const auditFormatInput = document.getElementById("auditFormatInput");
     const auditExportText = document.getElementById("auditExportText");
     const auditRetentionDaysInput = document.getElementById("auditRetentionDaysInput");
@@ -1676,8 +1684,20 @@ DASHBOARD_HTML = """<!doctype html>
     function auditQueryString(options = {}) {
       const params = new URLSearchParams();
       const action = auditActionInput.value.trim();
+      const eventUser = auditUserFilterInput.value.trim();
+      const targetType = auditTargetTypeInput.value.trim();
+      const targetId = auditTargetIdInput.value.trim();
       if (action) {
         params.set("action", action);
+      }
+      if (eventUser) {
+        params.set("event_user_id", eventUser);
+      }
+      if (targetType) {
+        params.set("target_type", targetType);
+      }
+      if (targetId) {
+        params.set("target_id", targetId);
       }
       if (options.format) {
         params.set("format", options.format);

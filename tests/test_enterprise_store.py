@@ -3664,12 +3664,23 @@ class EnterpriseStoreTest(unittest.TestCase):
                 target_id="tok_a",
                 details={"note": "metadata only"},
             )
+            fourth = store.record_audit_event(
+                workspace_id,
+                "bob",
+                "document.delete",
+                target_type="document",
+                target_id="doc_b",
+                details={"name": "Old memo"},
+            )
             store.conn.execute("UPDATE audit_events SET created_at = ? WHERE id = ?", ("2026-01-01T00:00:00+00:00", first))
             store.conn.execute("UPDATE audit_events SET created_at = ? WHERE id = ?", ("2026-02-01T00:00:00+00:00", second))
             store.conn.execute("UPDATE audit_events SET created_at = ? WHERE id = ?", ("2026-03-01T00:00:00+00:00", third))
+            store.conn.execute("UPDATE audit_events SET created_at = ? WHERE id = ?", ("2026-04-01T00:00:00+00:00", fourth))
             store._commit()
 
             action_events = store.list_audit_events(workspace_id, "alice", action="document.ingest")
+            user_events = store.list_audit_events(workspace_id, "alice", event_user_id="bob")
+            target_events = store.list_audit_events(workspace_id, "alice", target_type="api_token", target_id="tok_a")
             ranged_events = store.list_audit_events(
                 workspace_id,
                 "alice",
@@ -3688,6 +3699,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             serialized = json.dumps({"jsonl": jsonl_export, "csv": csv_export}, sort_keys=True)
 
             self.assertEqual([event["id"] for event in action_events], [second])
+            self.assertEqual([event["id"] for event in user_events], [fourth])
+            self.assertEqual([event["id"] for event in target_events], [third, first])
             self.assertEqual([event["id"] for event in ranged_events], [second])
             self.assertEqual(json.loads(jsonl_export)["id"], third)
             self.assertEqual([row["action"] for row in csv_rows], ["document.ingest", "api_token.revoke"])
@@ -3942,10 +3955,32 @@ class EnterpriseStoreTest(unittest.TestCase):
                 text=True,
                 check=True,
             )
+            store = EnterpriseStore(root)
+            try:
+                bob_event = store.record_audit_event(
+                    "ws_cli",
+                    "bob",
+                    "document.delete",
+                    target_type="document",
+                    target_id="doc_cli",
+                    details={"name": "Old CLI memo"},
+                )
+            finally:
+                store.close()
 
             events = json.loads(
                 subprocess.run(
                     [*base, "audit-log", "ws_cli", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            bob_events = json.loads(
+                subprocess.run(
+                    [*base, "audit-log", "ws_cli", "alice", "--event-user-id", "bob"],
                     cwd=repo_root,
                     env=env,
                     capture_output=True,
@@ -3962,7 +3997,18 @@ class EnterpriseStoreTest(unittest.TestCase):
                 check=True,
             ).stdout
             exported_csv = subprocess.run(
-                [*base, "audit-export", "ws_cli", "alice", "--format", "csv", "--action", "api_token.revoke"],
+                [
+                    *base,
+                    "audit-export",
+                    "ws_cli",
+                    "alice",
+                    "--format",
+                    "csv",
+                    "--target-type",
+                    "api_token",
+                    "--target-id",
+                    token["id"],
+                ],
                 cwd=repo_root,
                 env=env,
                 capture_output=True,
@@ -3973,9 +4019,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             exported_event = json.loads(exported)
             csv_rows = list(csv.DictReader(io.StringIO(exported_csv)))
 
-            self.assertEqual([event["action"] for event in events[:2]], ["api_token.revoke", "api_token.create"])
+            self.assertEqual([event["id"] for event in bob_events], [bob_event])
+            self.assertEqual([event["action"] for event in events[:3]], ["document.delete", "api_token.revoke", "api_token.create"])
             self.assertEqual(exported_event["action"], "api_token.revoke")
-            self.assertEqual(csv_rows[0]["action"], "api_token.revoke")
+            self.assertEqual([row["action"] for row in csv_rows], ["api_token.create", "api_token.revoke"])
             self.assertNotIn(token["token"], serialized)
             self.assertNotIn(token["token"], exported)
             self.assertNotIn(token["token"], exported_csv)
@@ -7871,13 +7918,16 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers={"X-PageIndex-Workspace": workspace_id, "X-PageIndex-User": "mallory"},
                 )
                 events = _get_json(f"{base}/audit-events?limit=20", headers=headers)["events"]
-                upload_events = _get_json(f"{base}/audit-events?limit=20&action=document.upload", headers=headers)["events"]
+                upload_events = _get_json(
+                    f"{base}/audit-events?limit=20&action=document.upload&event_user_id=alice&target_type=document",
+                    headers=headers,
+                )["events"]
                 exported, exported_type = _get_text(
-                    f"{base}/audit-events/export?format=jsonl&action=document.upload",
+                    f"{base}/audit-events/export?format=jsonl&action=document.upload&event_user_id=alice",
                     headers=headers,
                 )
                 exported_csv, exported_csv_type = _get_text(
-                    f"{base}/audit-events/export?format=csv&action=document.upload",
+                    f"{base}/audit-events/export?format=csv&action=document.upload&target_type=document",
                     headers=headers,
                 )
                 blocked_export = _get_error(
@@ -7888,6 +7938,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                 exported_event = json.loads(exported)
                 csv_rows = list(csv.DictReader(io.StringIO(exported_csv)))
                 actions = {event["action"] for event in events}
+                upload_target_id = upload_events[0]["target_id"]
+                target_events = _get_json(
+                    f"{base}/audit-events?limit=20&target_id={upload_target_id}",
+                    headers=headers,
+                )["events"]
 
                 self.assertEqual(blocked["status"], 403)
                 self.assertEqual(blocked_export["status"], 403)
@@ -7896,6 +7951,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertIn("document.import_structure", actions)
                 self.assertIn("query.run", actions)
                 self.assertEqual({event["action"] for event in upload_events}, {"document.upload"})
+                self.assertEqual({event["target_id"] for event in target_events}, {upload_target_id})
                 self.assertIn("application/x-ndjson", exported_type)
                 self.assertIn("text/csv", exported_csv_type)
                 self.assertEqual(exported_event["action"], "document.upload")
@@ -8263,6 +8319,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("/audit-events", body)
                     self.assertIn("/audit-events/export", body)
                     self.assertIn("auditActionInput", body)
+                    self.assertIn("auditUserFilterInput", body)
+                    self.assertIn("auditTargetTypeInput", body)
+                    self.assertIn("auditTargetIdInput", body)
                     self.assertIn("auditFormatInput", body)
                     self.assertIn("auditList", body)
                     self.assertIn("auditExportText", body)

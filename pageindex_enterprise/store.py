@@ -22,6 +22,9 @@ from .llm import validate_openai_compatible_config
 
 WORKSPACE_WRITE_ROLES = {"owner", "admin", "member"}
 WORKSPACE_ADMIN_ROLES = {"owner", "admin"}
+WORKSPACE_ROLES = {"owner", "admin", "member", "viewer"}
+WORKSPACE_INVITATION_ROLES = {"admin", "member", "viewer"}
+WORKSPACE_ROLE_RANK = {"viewer": 0, "member": 1, "admin": 2, "owner": 3}
 API_TOKEN_SCOPES = ("read", "write", "audit")
 MAX_CONVERSATION_MESSAGE_CHARS = 4000
 CHAT_TRACE_QUERY = "[conversation message redacted]"
@@ -141,6 +144,21 @@ def _normalize_api_token_scopes(scopes: list[str] | None) -> list[str]:
     if unsupported:
         raise ValueError(f"Unsupported api token scope: {unsupported[0]}")
     return [scope for scope in API_TOKEN_SCOPES if scope in normalized]
+
+
+def _normalize_workspace_role(role: str | None, *, invitation: bool = False) -> str:
+    normalized = (role or "member").strip().casefold() or "member"
+    allowed = WORKSPACE_INVITATION_ROLES if invitation else WORKSPACE_ROLES
+    if normalized not in allowed:
+        raise ValueError(f"Unsupported workspace role: {normalized}")
+    return normalized
+
+
+def _normalize_invitation_email(email: str) -> str:
+    normalized = email.strip().casefold()
+    if not normalized or "@" not in normalized:
+        raise ValueError("Invitation email is required.")
+    return normalized
 
 
 def _decode_api_token_scopes(scopes_json: str | None) -> list[str] | None:
@@ -293,6 +311,20 @@ class EnterpriseStore:
               role TEXT NOT NULL DEFAULT 'member',
               created_at TEXT NOT NULL,
               PRIMARY KEY (workspace_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_invitations (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              email TEXT NOT NULL,
+              role TEXT NOT NULL DEFAULT 'member',
+              invited_by TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              created_at TEXT NOT NULL,
+              expires_at TEXT,
+              accepted_by TEXT,
+              accepted_at TEXT,
+              revoked_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS api_tokens (
@@ -465,6 +497,13 @@ class EnterpriseStore:
             );
             """
         )
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_invitations_pending_email
+            ON workspace_invitations (workspace_id, email)
+            WHERE status = 'pending'
+            """
+        )
         self._ensure_schema_columns()
         self._commit()
 
@@ -612,11 +651,9 @@ class EnterpriseStore:
     ) -> None:
         self._require_workspace(workspace_id)
         user_id = user_id.strip()
-        role = role.strip() or "member"
+        role = _normalize_workspace_role(role)
         if not user_id:
             raise ValueError("User id is required.")
-        if role not in {"owner", "admin", "member", "viewer"}:
-            raise ValueError(f"Unsupported workspace role: {role}")
         if actor_user_id:
             self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         previous_role = self.workspace_role(workspace_id, user_id)
@@ -640,6 +677,171 @@ class EnterpriseStore:
                     target_id=user_id,
                     details={"role": role, "previous_role": previous_role},
                 )
+
+    def create_workspace_invitation(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        email: str,
+        *,
+        role: str = "member",
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        email = _normalize_invitation_email(email)
+        role = _normalize_workspace_role(role, invitation=True)
+        expires_at = _normalize_expires_at(expires_at)
+        if self._one(
+            """
+            SELECT id FROM workspace_invitations
+            WHERE workspace_id = ? AND email = ? AND status = 'pending'
+            """,
+            (workspace_id, email),
+        ):
+            raise ValueError("pending invitation already exists")
+        invitation_id = f"inv_{uuid.uuid4().hex}"
+        created_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO workspace_invitations (
+                    id, workspace_id, email, role, invited_by, status, created_at, expires_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (invitation_id, workspace_id, email, role, actor_user_id, created_at, expires_at),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "workspace_invitation.create",
+                target_type="workspace_invitation",
+                target_id=invitation_id,
+                details={"email": email, "role": role, "expires_at": expires_at},
+            )
+        return self._workspace_invitation(invitation_id)
+
+    def list_workspace_invitations(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        *,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        params: list[Any] = [workspace_id]
+        where = "workspace_id = ?"
+        if status is not None:
+            status = status.strip().casefold()
+            if status not in {"pending", "accepted", "revoked"}:
+                raise ValueError("Unsupported invitation status")
+            where += " AND status = ?"
+            params.append(status)
+        rows = self.conn.execute(
+            f"""
+            SELECT id, workspace_id, email, role, invited_by, status, created_at,
+                   expires_at, accepted_by, accepted_at, revoked_at
+            FROM workspace_invitations
+            WHERE {where}
+            ORDER BY created_at DESC, id
+            """,
+            params,
+        )
+        return [dict(row) for row in rows]
+
+    def accept_workspace_invitation(self, invitation_id: str, user_id: str) -> dict[str, Any]:
+        invitation_id = invitation_id.strip()
+        if not invitation_id:
+            raise ValueError("Invitation id is required.")
+        user_id = _normalize_invitation_email(user_id)
+        invitation = self._workspace_invitation(invitation_id)
+        if invitation is None:
+            raise ValueError("invitation not found")
+        if invitation["status"] != "pending":
+            raise ValueError("invitation is not pending")
+        if _is_expired(invitation["expires_at"]):
+            raise ValueError("invitation expired")
+        if invitation["email"] != user_id:
+            raise PermissionError("invitation does not match user")
+        workspace_id = invitation["workspace_id"]
+        existing_role = self.workspace_role(workspace_id, user_id)
+        role = invitation["role"]
+        if existing_role and WORKSPACE_ROLE_RANK[existing_role] > WORKSPACE_ROLE_RANK[role]:
+            role = existing_role
+        accepted_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(workspace_id, user_id) DO UPDATE SET role = excluded.role
+                """,
+                (workspace_id, user_id, role, accepted_at),
+            )
+            self.conn.execute(
+                """
+                UPDATE workspace_invitations
+                SET status = 'accepted', accepted_by = ?, accepted_at = ?
+                WHERE id = ?
+                """,
+                (user_id, accepted_at, invitation_id),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                user_id,
+                "workspace_invitation.accept",
+                target_type="workspace_invitation",
+                target_id=invitation_id,
+                details={"email": invitation["email"], "role": invitation["role"], "member_role": role},
+            )
+        accepted = self._workspace_invitation(invitation_id)
+        assert accepted is not None
+        return accepted
+
+    def revoke_workspace_invitation(self, workspace_id: str, actor_user_id: str, invitation_id: str) -> bool:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        invitation_id = invitation_id.strip()
+        if not invitation_id:
+            raise ValueError("Invitation id is required.")
+        invitation = self._one(
+            """
+            SELECT id, email, role, status FROM workspace_invitations
+            WHERE workspace_id = ? AND id = ?
+            """,
+            (workspace_id, invitation_id),
+        )
+        if invitation is None or invitation["status"] != "pending":
+            return False
+        with self._atomic():
+            self.conn.execute(
+                """
+                UPDATE workspace_invitations
+                SET status = 'revoked', revoked_at = ?
+                WHERE id = ?
+                """,
+                (_now(), invitation_id),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "workspace_invitation.revoke",
+                target_type="workspace_invitation",
+                target_id=invitation_id,
+                details={"email": invitation["email"], "role": invitation["role"]},
+            )
+        return True
+
+    def _workspace_invitation(self, invitation_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            """
+            SELECT id, workspace_id, email, role, invited_by, status, created_at,
+                   expires_at, accepted_by, accepted_at, revoked_at
+            FROM workspace_invitations
+            WHERE id = ?
+            """,
+            (invitation_id,),
+        )
+        return dict(row) if row else None
 
     def list_workspace_members(self, workspace_id: str, actor_user_id: str) -> list[dict[str, Any]]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
@@ -1352,6 +1554,18 @@ class EnterpriseStore:
                     FROM workspace_members
                     WHERE workspace_id = ?
                     ORDER BY user_id
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "workspace_invitations.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT id, workspace_id, email, role, invited_by, status, created_at,
+                           expires_at, accepted_by, accepted_at, revoked_at
+                    FROM workspace_invitations
+                    WHERE workspace_id = ?
+                    ORDER BY created_at, id
                     """,
                     (workspace_id,),
                 )

@@ -112,6 +112,74 @@ class EnterpriseStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "at least one owner"):
                 store.remove_workspace_member(workspace_id, "alice", "alice")
 
+    def test_workspace_invitations_are_admin_scoped_and_audited(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EnterpriseStore(Path(tmp) / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "ada", "admin", actor_user_id="alice")
+            store.add_workspace_member(workspace_id, "mona", "member", actor_user_id="alice")
+            future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+            past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
+            invitation = store.create_workspace_invitation(
+                workspace_id,
+                "alice",
+                "BOB@Example.COM",
+                role="viewer",
+                expires_at=future,
+            )
+            pending = store.list_workspace_invitations(workspace_id, "ada", status="pending")
+            with self.assertRaisesRegex(ValueError, "pending invitation already exists"):
+                store.create_workspace_invitation(workspace_id, "ada", "bob@example.com", role="member")
+            with self.assertRaisesRegex(ValueError, "Unsupported workspace role"):
+                store.create_workspace_invitation(workspace_id, "alice", "owner@example.com", role="owner")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.create_workspace_invitation(workspace_id, "mona", "nope@example.com", role="viewer")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.list_workspace_invitations(workspace_id, "mona")
+            with self.assertRaisesRegex(PermissionError, "invitation does not match user"):
+                store.accept_workspace_invitation(invitation["id"], "mallory@example.com")
+
+            accepted = store.accept_workspace_invitation(invitation["id"], "bob@example.com")
+            with self.assertRaisesRegex(ValueError, "not pending"):
+                store.accept_workspace_invitation(invitation["id"], "bob@example.com")
+            revoked_invitation = store.create_workspace_invitation(workspace_id, "ada", "carol@example.com", role="member")
+            revoked = store.revoke_workspace_invitation(workspace_id, "alice", revoked_invitation["id"])
+            revoked_again = store.revoke_workspace_invitation(workspace_id, "alice", revoked_invitation["id"])
+            with self.assertRaisesRegex(ValueError, "not pending"):
+                store.accept_workspace_invitation(revoked_invitation["id"], "carol@example.com")
+            expired_invitation = store.create_workspace_invitation(
+                workspace_id,
+                "alice",
+                "dave@example.com",
+                role="member",
+                expires_at=past,
+            )
+            with self.assertRaisesRegex(ValueError, "invitation expired"):
+                store.accept_workspace_invitation(expired_invitation["id"], "dave@example.com")
+            events = store.list_audit_events(workspace_id, "alice", limit=20)
+            actions = [event["action"] for event in events]
+            invitations_by_email = {
+                invitation["email"]: invitation
+                for invitation in store.list_workspace_invitations(workspace_id, "alice")
+            }
+
+            self.assertEqual(invitation["email"], "bob@example.com")
+            self.assertEqual(invitation["status"], "pending")
+            self.assertEqual(pending[0]["email"], "bob@example.com")
+            self.assertEqual(accepted["status"], "accepted")
+            self.assertEqual(accepted["accepted_by"], "bob@example.com")
+            self.assertEqual(store.workspace_role(workspace_id, "bob@example.com"), "viewer")
+            self.assertTrue(store.user_can_access_workspace(workspace_id, "bob@example.com"))
+            self.assertTrue(revoked)
+            self.assertFalse(revoked_again)
+            self.assertEqual(invitations_by_email["carol@example.com"]["status"], "revoked")
+            self.assertEqual(invitations_by_email["dave@example.com"]["status"], "pending")
+            self.assertIn("workspace_invitation.create", actions)
+            self.assertIn("workspace_invitation.accept", actions)
+            self.assertIn("workspace_invitation.revoke", actions)
+
     def test_workspace_member_lifecycle_cli_lists_and_removes_members(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -176,6 +244,131 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotEqual(denied.returncode, 0)
             self.assertIn("workspace access denied", denied.stderr)
             self.assertNotIn("Traceback", denied.stderr)
+
+    def test_workspace_invitation_cli_invites_accepts_and_revokes_without_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run(
+                [*base, "workspace", "Team", "--workspace-id", "ws_invite"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_invite", "alice", "--role", "owner"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            invited = json.loads(
+                subprocess.run(
+                    [
+                        *base,
+                        "invite-member",
+                        "ws_invite",
+                        "alice",
+                        "bob@example.com",
+                        "--role",
+                        "viewer",
+                        "--expires-in-days",
+                        "7",
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            pending = json.loads(
+                subprocess.run(
+                    [*base, "list-invitations", "ws_invite", "alice", "--status", "pending"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            accepted = json.loads(
+                subprocess.run(
+                    [*base, "accept-invitation", invited["id"], "bob@example.com"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            members = json.loads(
+                subprocess.run(
+                    [*base, "list-members", "ws_invite", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            revoked_invitation = json.loads(
+                subprocess.run(
+                    [*base, "invite-member", "ws_invite", "alice", "carol@example.com", "--role", "member"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            revoked = json.loads(
+                subprocess.run(
+                    [*base, "revoke-invitation", "ws_invite", "alice", revoked_invitation["id"]],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            member_denied = subprocess.run(
+                [*base, "invite-member", "ws_invite", "bob@example.com", "erin@example.com", "--role", "viewer"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            wrong_invitee = subprocess.run(
+                [*base, "accept-invitation", revoked_invitation["id"], "mallory@example.com"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(invited["email"], "bob@example.com")
+            self.assertEqual(invited["status"], "pending")
+            self.assertEqual(pending[0]["id"], invited["id"])
+            self.assertEqual(accepted["status"], "accepted")
+            self.assertEqual(
+                {member["user_id"]: member["role"] for member in members},
+                {"alice": "owner", "bob@example.com": "viewer"},
+            )
+            self.assertTrue(revoked["revoked"])
+            self.assertNotEqual(member_denied.returncode, 0)
+            self.assertIn("workspace role denied", member_denied.stderr)
+            self.assertNotIn("Traceback", member_denied.stderr)
+            self.assertNotEqual(wrong_invitee.returncode, 0)
+            self.assertIn("invitation is not pending", wrong_invitee.stderr)
+            self.assertNotIn("Traceback", wrong_invitee.stderr)
 
     def test_legacy_global_folder_path_unique_schema_is_migrated(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -100,6 +100,27 @@ def main() -> None:
     remove_member.add_argument("user_id")
     remove_member.add_argument("actor_user_id")
 
+    invite_member = sub.add_parser("invite-member")
+    invite_member.add_argument("workspace_id")
+    invite_member.add_argument("actor_user_id")
+    invite_member.add_argument("email")
+    invite_member.add_argument("--role", default="member")
+    invite_member.add_argument("--expires-in-days", type=_positive_int)
+
+    list_invitations = sub.add_parser("list-invitations")
+    list_invitations.add_argument("workspace_id")
+    list_invitations.add_argument("actor_user_id")
+    list_invitations.add_argument("--status", choices=["pending", "accepted", "revoked"])
+
+    accept_invitation = sub.add_parser("accept-invitation")
+    accept_invitation.add_argument("invitation_id")
+    accept_invitation.add_argument("user_id")
+
+    revoke_invitation = sub.add_parser("revoke-invitation")
+    revoke_invitation.add_argument("workspace_id")
+    revoke_invitation.add_argument("actor_user_id")
+    revoke_invitation.add_argument("invitation_id")
+
     token = sub.add_parser("create-token")
     token.add_argument("workspace_id")
     token.add_argument("user_id")
@@ -352,6 +373,40 @@ def main() -> None:
                     }
                 )
             )
+        elif args.command == "invite-member":
+            invitation = _workspace_member_cli(
+                lambda: store.create_workspace_invitation(
+                    args.workspace_id,
+                    args.actor_user_id,
+                    args.email,
+                    role=args.role,
+                    expires_at=expires_at_from_days(args.expires_in_days),
+                )
+            )
+            print(json.dumps(invitation, indent=2))
+        elif args.command == "list-invitations":
+            invitations = _workspace_member_cli(
+                lambda: store.list_workspace_invitations(
+                    args.workspace_id,
+                    args.actor_user_id,
+                    status=args.status,
+                )
+            )
+            print(json.dumps(invitations, indent=2))
+        elif args.command == "accept-invitation":
+            invitation = _workspace_member_cli(
+                lambda: store.accept_workspace_invitation(args.invitation_id, args.user_id)
+            )
+            print(json.dumps(invitation, indent=2))
+        elif args.command == "revoke-invitation":
+            revoked = _workspace_member_cli(
+                lambda: store.revoke_workspace_invitation(
+                    args.workspace_id,
+                    args.actor_user_id,
+                    args.invitation_id,
+                )
+            )
+            print(json.dumps({"revoked": revoked}))
         elif args.command == "create-token":
             print(
                 json.dumps(

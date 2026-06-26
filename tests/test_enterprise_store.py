@@ -2746,6 +2746,94 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("source_path", serialized_bundle)
             self.assertNotIn(str(source), serialized_bundle)
 
+    def test_http_workspace_import_preview_requires_admin_bearer_and_validates_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "http-import-preview-source.txt"
+            source.write_text("HTTP workspace import preview content.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team", workspace_id="ws_import_preview_http")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="HTTP import preview memo")
+            export_path = tmp_path / "workspace-export.zip"
+            store.export_workspace_bundle(workspace_id, "alice", export_path)
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store._commit()
+            member_token = member_token_record["token"]
+            before_events = len(store.list_audit_events(workspace_id, "alice", limit=100))
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            url = f"{base}/workspace-import/preview"
+            try:
+                missing = _post_json(url, {"path": str(export_path)}, status=403)
+                audit_denied = _post_json(
+                    url,
+                    {"path": str(export_path)},
+                    headers={"Authorization": f"Bearer {audit_token}"},
+                    status=403,
+                )
+                write_denied = _post_json(
+                    url,
+                    {"path": str(export_path)},
+                    headers={"Authorization": f"Bearer {write_token}"},
+                    status=403,
+                )
+                member_denied = _post_json(
+                    url,
+                    {"path": str(export_path)},
+                    headers={"Authorization": f"Bearer {member_token}"},
+                    status=403,
+                )
+                missing_path = _post_json(
+                    url,
+                    {},
+                    headers={"Authorization": f"Bearer {owner_token}"},
+                    status=400,
+                )
+                not_found = _post_json(
+                    url,
+                    {"path": str(tmp_path / "missing.zip")},
+                    headers={"Authorization": f"Bearer {owner_token}"},
+                )
+                preview = _post_json(
+                    url,
+                    {"path": str(export_path)},
+                    headers={"Authorization": f"Bearer {owner_token}"},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+            store = EnterpriseStore(root)
+            try:
+                after_events = len(store.list_audit_events(workspace_id, "alice", limit=100))
+            finally:
+                store.close()
+
+            self.assertEqual(missing["error"], "api token required")
+            self.assertEqual(audit_denied["error"], "api token scope denied")
+            self.assertEqual(write_denied["error"], "api token scope denied")
+            self.assertEqual(member_denied["error"], "workspace role denied")
+            self.assertEqual(missing_path["error"], "path is required")
+            self.assertFalse(not_found["ok"])
+            self.assertTrue(any("bundle not found" in error for error in not_found["errors"]))
+            self.assertTrue(preview["ok"], preview["errors"])
+            self.assertEqual(preview["workspace_id"], workspace_id)
+            self.assertEqual(preview["table_counts"]["documents"], 1)
+            self.assertEqual(after_events, before_events)
+
     def test_token_lifecycle_cli_lists_and_revokes_without_leaking_hashes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -6428,6 +6516,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("workspaceExportSummary", body)
                     self.assertIn("workspaceExportLink", body)
                     self.assertIn("exportWorkspaceBundle", body)
+                    self.assertIn("/workspace-import/preview", body)
+                    self.assertIn("workspaceImportPathInput", body)
+                    self.assertIn("previewWorkspaceImportButton", body)
+                    self.assertIn("workspaceImportSummary", body)
+                    self.assertIn("workspaceImportReportText", body)
+                    self.assertIn("previewWorkspaceImport", body)
                     self.assertIn("/audit-retention", body)
                     self.assertIn("/audit-retention/purge", body)
                     self.assertIn("auditRetentionDaysInput", body)
@@ -6489,6 +6583,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Playwright memo")
             store.rebuild_virtual_index()
             token = store.create_api_token(workspace_id, "alice", name="browser")["token"]
+            export_path = tmp_path / "dashboard-workspace-export.zip"
+            store.export_workspace_bundle(workspace_id, "alice", export_path)
             old_event_id = store.record_audit_event(
                 workspace_id,
                 "alice",
@@ -6518,6 +6614,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                         "PAGEINDEX_DASHBOARD_EXPECTED_DOCUMENT": "Playwright memo",
                         "PAGEINDEX_DASHBOARD_EXPECTED_ANSWER": "Found relevant evidence in Playwright memo",
                         "PAGEINDEX_DASHBOARD_QUERY": "browser evidence",
+                        "PAGEINDEX_DASHBOARD_IMPORT_PREVIEW_PATH": str(export_path),
                         "PAGEINDEX_DASHBOARD_SCREENSHOT": str(screenshot_path),
                     },
                     capture_output=True,
@@ -6545,6 +6642,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["tokenPolicyExercised"], True)
             self.assertEqual(smoke["auditExercised"], True)
             self.assertEqual(smoke["workspaceExportExercised"], True)
+            self.assertEqual(smoke["workspaceImportPreviewExercised"], True)
             self.assertEqual(smoke["retentionExercised"], True)
             self.assertEqual(smoke["readinessExercised"], True)
             self.assertEqual(smoke["providerExercised"], True)

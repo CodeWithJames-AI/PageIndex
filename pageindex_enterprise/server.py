@@ -306,6 +306,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/import-structure":
                 self._import_structure(payload)
                 return
+            if parsed.path == "/workspace-import/preview":
+                self._workspace_import_preview(payload)
+                return
             if parsed.path == "/workspace-members":
                 self._upsert_workspace_member(payload)
                 return
@@ -691,6 +694,22 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         finally:
             if output is not None:
                 output.unlink(missing_ok=True)
+            store.close()
+
+    def _workspace_import_preview(self, payload: dict[str, Any]) -> None:
+        path = payload.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("path is required")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope=("audit", "write"),
+                require_api_token=True,
+            )
+            store.require_workspace_role(workspace_id, user_id, WORKSPACE_ADMIN_ROLES)
+            self._json(store.validate_workspace_import_bundle(path))
+        finally:
             store.close()
 
     def _get_document_access(self, doc_id: str) -> None:

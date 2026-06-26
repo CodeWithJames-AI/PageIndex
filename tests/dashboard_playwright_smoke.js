@@ -37,6 +37,7 @@ async function waitForAnyText(page, selector, expectedValues) {
   const expectedDocument = requiredEnv("PAGEINDEX_DASHBOARD_EXPECTED_DOCUMENT");
   const expectedAnswer = process.env.PAGEINDEX_DASHBOARD_EXPECTED_ANSWER || `Found relevant evidence in ${expectedDocument}`;
   const query = process.env.PAGEINDEX_DASHBOARD_QUERY || "browser evidence";
+  const importPreviewPath = requiredEnv("PAGEINDEX_DASHBOARD_IMPORT_PREVIEW_PATH");
   const screenshotPath = process.env.PAGEINDEX_DASHBOARD_SCREENSHOT;
   const failures = [];
 
@@ -299,6 +300,19 @@ async function waitForAnyText(page, selector, expectedValues) {
     assert(!workspaceExportSummary.includes("(0 bytes)"), "workspace export summary reported zero bytes");
     assert(workspaceExportDownload && workspaceExportDownload.includes("workspace-export.zip"), "workspace export download filename was not set");
 
+    await page.fill("#workspaceImportPathInput", importPreviewPath);
+    const workspaceImportPreviewResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/workspace-import/preview") && response.request().method() === "POST"
+    );
+    await page.click("#previewWorkspaceImportButton");
+    await workspaceImportPreviewResponse;
+    await waitForText(page, "#status", "Import preview passed.");
+    await waitForText(page, "#workspaceImportSummary", "Preview ok");
+    const workspaceImportReport = JSON.parse((await page.textContent("#workspaceImportReportText")) || "{}");
+    assert(workspaceImportReport.ok === true, "workspace import preview did not pass");
+    assert(workspaceImportReport.table_counts?.documents === 1, "workspace import preview did not count documents");
+    assert(!JSON.stringify(workspaceImportReport).includes("pit_"), "workspace import preview leaked token marker");
+
     await waitForText(page, "#auditRetentionSummary", "Retention not set.");
     await page.fill("#auditRetentionDaysInput", "1");
     const saveRetentionResponse = page.waitForResponse(
@@ -424,6 +438,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       tokenPolicyExercised: true,
       auditExercised: true,
       workspaceExportExercised: true,
+      workspaceImportPreviewExercised: true,
       retentionExercised: true,
       readinessExercised: true,
       providerExercised: true,

@@ -262,6 +262,31 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            group_members_id = _workspace_group_members_path(parsed.path)
+            if group_members_id:
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+                    self._json(
+                        {
+                            "members": store.list_workspace_group_members(
+                                workspace_id,
+                                user_id,
+                                group_members_id,
+                            )
+                        }
+                    )
+                finally:
+                    store.close()
+                return
+            if parsed.path == "/workspace-groups":
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+                    self._json({"groups": store.list_workspace_groups(workspace_id, user_id)})
+                finally:
+                    store.close()
+                return
             if parsed.path == "/workspace-members":
                 store = EnterpriseStore(self.server.root)
                 try:
@@ -314,6 +339,13 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/workspace-invitations":
                 self._create_workspace_invitation(payload)
+                return
+            if parsed.path == "/workspace-groups":
+                self._create_workspace_group(payload)
+                return
+            group_members_id = _workspace_group_members_path(parsed.path)
+            if group_members_id:
+                self._add_workspace_group_member(group_members_id, payload)
                 return
             if parsed.path == "/audit-retention":
                 self._set_audit_retention(payload)
@@ -386,6 +418,21 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     )
                     revoked = store.revoke_workspace_invitation(workspace_id, user_id, invitation_id)
                     self._json({"revoked": revoked})
+                finally:
+                    store.close()
+                return
+            group_member = _workspace_group_member_path(parsed.path)
+            if group_member:
+                group_id, group_user_id = group_member
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(
+                        store,
+                        required_scope=("audit", "write"),
+                        require_api_token=True,
+                    )
+                    removed = store.remove_workspace_group_member(workspace_id, user_id, group_id, group_user_id)
+                    self._json({"removed": removed})
                 finally:
                     store.close()
                 return
@@ -668,6 +715,38 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         finally:
             store.close()
 
+    def _create_workspace_group(self, payload: dict[str, Any]) -> None:
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name is required")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope=("audit", "write"),
+                require_api_token=True,
+            )
+            group = store.create_workspace_group(workspace_id, user_id, name)
+            self._json({"group": group}, HTTPStatus.CREATED)
+        finally:
+            store.close()
+
+    def _add_workspace_group_member(self, group_id: str, payload: dict[str, Any]) -> None:
+        target_user_id = payload.get("user_id")
+        if not isinstance(target_user_id, str) or not target_user_id.strip():
+            raise ValueError("user_id is required")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope=("audit", "write"),
+                require_api_token=True,
+            )
+            group = store.add_workspace_group_member(workspace_id, user_id, group_id, target_user_id)
+            self._json({"group": group})
+        finally:
+            store.close()
+
     def _workspace_export(self) -> None:
         store = EnterpriseStore(self.server.root)
         output: Path | None = None
@@ -727,7 +806,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
     def _set_document_access(self, doc_id: str, payload: dict[str, Any]) -> None:
         actions = [
             key
-            for key in ("access_mode", "grant_user_id", "revoke_user_id")
+            for key in ("access_mode", "grant_user_id", "revoke_user_id", "grant_group_id", "revoke_group_id")
             if key in payload and payload[key] is not None
         ]
         if len(actions) != 1:
@@ -769,6 +848,38 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)
                     return
                 self._json({"access": access})
+                return
+            if action == "grant_group_id":
+                grant_group_id = payload.get("grant_group_id")
+                if not isinstance(grant_group_id, str):
+                    raise ValueError("grant_group_id must be a string")
+                access = store.grant_document_group_access(
+                    doc_id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                    group_id=grant_group_id,
+                )
+                if access is None:
+                    self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                self._json({"access": access})
+                return
+            if action == "revoke_group_id":
+                revoke_group_id = payload.get("revoke_group_id")
+                if not isinstance(revoke_group_id, str):
+                    raise ValueError("revoke_group_id must be a string")
+                access = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id=user_id)
+                if access is None:
+                    self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                revoked = store.revoke_document_group_access(
+                    doc_id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                    group_id=revoke_group_id,
+                )
+                access = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id=user_id)
+                self._json({"revoked": revoked, "access": access})
                 return
             revoke_user_id = payload.get("revoke_user_id")
             if not isinstance(revoke_user_id, str):
@@ -1475,6 +1586,20 @@ def _workspace_invitation_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "workspace-invitations":
         return unquote(parts[1])
+    return None
+
+
+def _workspace_group_members_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "workspace-groups" and parts[2] == "members":
+        return unquote(parts[1])
+    return None
+
+
+def _workspace_group_member_path(path: str) -> tuple[str, str] | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 4 and parts[0] == "workspace-groups" and parts[2] == "members":
+        return unquote(parts[1]), unquote(parts[3])
     return None
 
 

@@ -122,6 +122,59 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#status", "Document access revoked.");
     await waitForText(page, "#documentAccessPanel", "No direct grants.");
 
+    await waitForText(page, "#groupList", "No groups loaded.");
+    await page.fill("#groupNameInput", "Browser reviewers");
+    const createGroupResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/workspace-groups") && response.request().method() === "POST"
+    );
+    await page.click("#createGroupButton");
+    await createGroupResponse;
+    await waitForText(page, "#status", "Group created.");
+    await waitForText(page, "#groupList", "Browser reviewers");
+    const groupCard = page.locator('[data-group-id]').filter({ hasText: "Browser reviewers" }).first();
+    const groupId = await groupCard.getAttribute("data-group-id");
+    assert(groupId, "created group id was not rendered");
+
+    await page.fill("#groupMemberUserInput", "alice");
+    const addGroupMemberResponse = page.waitForResponse(
+      (response) => response.url().includes(`/workspace-groups/${groupId}/members`) && response.request().method() === "POST"
+    );
+    await page.locator(`[data-group-id="${groupId}"] [data-add-group-member-id]`).click();
+    await addGroupMemberResponse;
+    await waitForText(page, "#status", "Group member added.");
+    await waitForText(page, "#groupList", "alice");
+
+    await page.fill("#documentAccessGroupInput", groupId);
+    const grantGroupAccessResponse = page.waitForResponse(
+      (response) => response.url().includes("/documents/")
+        && response.url().endsWith("/access")
+        && response.request().method() === "POST"
+        && (response.request().postData() || "").includes("grant_group_id")
+    );
+    await page.click("#grantDocumentGroupAccessButton");
+    await grantGroupAccessResponse;
+    await waitForText(page, "#status", "Document group access granted.");
+    await waitForText(page, "#documentAccessPanel", "Browser reviewers");
+
+    const revokeGroupAccessResponse = page.waitForResponse(
+      (response) => response.url().includes("/documents/")
+        && response.url().endsWith("/access")
+        && response.request().method() === "POST"
+        && (response.request().postData() || "").includes("revoke_group_id")
+    );
+    await page.locator(`[data-revoke-access-group-id="${groupId}"]`).click();
+    await revokeGroupAccessResponse;
+    await waitForText(page, "#status", "Document group access revoked.");
+    await waitForText(page, "#documentAccessPanel", "No group grants.");
+
+    const removeGroupMemberResponse = page.waitForResponse(
+      (response) => response.url().includes(`/workspace-groups/${groupId}/members/alice`) && response.request().method() === "DELETE"
+    );
+    await page.locator(`[data-group-id="${groupId}"] [data-remove-group-member-user-id="alice"]`).click();
+    await removeGroupMemberResponse;
+    await waitForText(page, "#status", "Group member removed.");
+    await waitForText(page, "#groupList", "No group members.");
+
     await waitForText(page, "#folderList", "No folders loaded.");
 
     await page.fill("#folderNameInput", "Browser");
@@ -430,6 +483,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       versionExercised: true,
       pagePreviewExercised: true,
       accessExercised: true,
+      groupExercised: true,
       folderExercised: true,
       virtualNodeExercised: true,
       invitationExercised: true,

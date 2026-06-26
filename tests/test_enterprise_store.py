@@ -6103,6 +6103,133 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(revoked["access"]["grants"], [])
             self.assertFalse(revoked_again["revoked"])
 
+    def test_http_workspace_group_routes_grant_document_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "group-http.txt"
+            source.write_text("HTTP group diligence evidence.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(workspace_id, "carol", "member", actor_user_id="alice")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Group HTTP memo")
+            store.set_document_access_mode(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store.conn.commit()
+            member_token = member_token_record["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            group_url = f"{base}/workspace-groups"
+            access_url = f"{base}/documents/{doc_id}/access"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            audit_headers = {"Authorization": f"Bearer {audit_token}"}
+            write_headers = {"Authorization": f"Bearer {write_token}"}
+            member_headers = {"Authorization": f"Bearer {member_token}"}
+            try:
+                missing = _get_error(group_url)
+                write_get = _get_error(group_url, headers=write_headers)
+                member_get = _get_error(group_url, headers=member_headers)
+                initial = _get_json(group_url, headers=audit_headers)
+                audit_create = _post_json(group_url, {"name": "Legal"}, status=403, headers=audit_headers)
+                write_create = _post_json(group_url, {"name": "Legal"}, status=403, headers=write_headers)
+                created = _post_json(group_url, {"name": "Legal"}, status=201, headers=owner_headers)
+                group_id = created["group"]["id"]
+                listed = _get_json(group_url, headers=owner_headers)
+                empty_members = _get_json(f"{group_url}/{group_id}/members", headers=owner_headers)
+                member_add_denied = _post_json(
+                    f"{group_url}/{group_id}/members",
+                    {"user_id": "carol"},
+                    status=403,
+                    headers=member_headers,
+                )
+                added = _post_json(
+                    f"{group_url}/{group_id}/members",
+                    {"user_id": "bob"},
+                    headers=owner_headers,
+                )
+                members = _get_json(f"{group_url}/{group_id}/members", headers=owner_headers)
+                bob_docs_before = _get_json(f"{base}/documents", headers=member_headers)["documents"]
+                bob_query_before = _post_json(
+                    f"{base}/query",
+                    {"query": "diligence evidence"},
+                    headers=member_headers,
+                )
+                group_granted = _post_json(access_url, {"grant_group_id": group_id}, headers=owner_headers)
+                bob_docs_after_grant = _get_json(f"{base}/documents", headers=member_headers)["documents"]
+                bob_query_after_grant = _post_json(
+                    f"{base}/query",
+                    {"query": "diligence evidence"},
+                    headers=member_headers,
+                )
+                bob_pages_after_grant = _get_json(f"{base}/documents/{doc_id}/pages", headers=member_headers)
+                removed = _delete_json(f"{group_url}/{group_id}/members/bob", headers=owner_headers)
+                bob_docs_after_remove = _get_json(f"{base}/documents", headers=member_headers)["documents"]
+                bob_query_after_remove = _post_json(
+                    f"{base}/query",
+                    {"query": "diligence evidence"},
+                    headers=member_headers,
+                )
+                revoke_group = _post_json(access_url, {"revoke_group_id": group_id}, headers=owner_headers)
+                remove_again = _delete_json(f"{group_url}/{group_id}/members/bob", headers=owner_headers)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            store = EnterpriseStore(root)
+            try:
+                actions = [event["action"] for event in store.list_audit_events(workspace_id, "alice", limit=100)]
+            finally:
+                store.close()
+
+            self.assertEqual(missing["error"], "api token required")
+            self.assertEqual(write_get["error"], "api token scope denied")
+            self.assertEqual(member_get["error"], "workspace role denied")
+            self.assertEqual(initial["groups"], [])
+            self.assertEqual(audit_create["error"], "api token scope denied")
+            self.assertEqual(write_create["error"], "api token scope denied")
+            self.assertEqual(created["group"]["name"], "Legal")
+            self.assertEqual(listed["groups"][0]["id"], group_id)
+            self.assertEqual(empty_members["members"], [])
+            self.assertEqual(member_add_denied["error"], "workspace role denied")
+            self.assertEqual(added["group"]["member_count"], 1)
+            self.assertEqual([member["user_id"] for member in members["members"]], ["bob"])
+            self.assertEqual(bob_docs_before, [])
+            self.assertEqual(bob_query_before["citations"], [])
+            self.assertEqual(group_granted["access"]["group_grants"][0]["group_id"], group_id)
+            self.assertEqual(group_granted["access"]["group_grants"][0]["group_name"], "Legal")
+            self.assertEqual([doc["id"] for doc in bob_docs_after_grant], [doc_id])
+            self.assertEqual(bob_query_after_grant["citations"][0]["doc_id"], doc_id)
+            self.assertEqual(bob_pages_after_grant["pages"][0]["content"], "HTTP group diligence evidence.")
+            self.assertTrue(removed["removed"])
+            self.assertEqual(bob_docs_after_remove, [])
+            self.assertEqual(bob_query_after_remove["citations"], [])
+            self.assertTrue(revoke_group["revoked"])
+            self.assertEqual(revoke_group["access"]["group_grants"], [])
+            self.assertFalse(remove_again["removed"])
+            self.assertIn("workspace_group.create", actions)
+            self.assertIn("workspace_group_member.add", actions)
+            self.assertIn("workspace_group_member.remove", actions)
+            self.assertIn("document.group_access_grant", actions)
+            self.assertIn("document.group_access_revoke", actions)
+
     def test_http_strict_document_reindex_requires_write_role(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -6642,6 +6769,17 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("memberList", body)
                     self.assertIn("saveMember", body)
                     self.assertIn("removeMember", body)
+                    self.assertIn("/workspace-groups", body)
+                    self.assertIn("groupNameInput", body)
+                    self.assertIn("groupMemberUserInput", body)
+                    self.assertIn("groupList", body)
+                    self.assertIn("refreshGroups", body)
+                    self.assertIn("createGroup", body)
+                    self.assertIn("addGroupMember", body)
+                    self.assertIn("removeGroupMember", body)
+                    self.assertIn("documentAccessGroupInput", body)
+                    self.assertIn("grantDocumentGroupAccess", body)
+                    self.assertIn("revokeDocumentGroupAccess", body)
                     self.assertIn("/workspace-invitations", body)
                     self.assertIn("invitationEmailInput", body)
                     self.assertIn("invitationList", body)
@@ -6798,6 +6936,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["versionExercised"], True)
             self.assertEqual(smoke["pagePreviewExercised"], True)
             self.assertEqual(smoke["accessExercised"], True)
+            self.assertEqual(smoke["groupExercised"], True)
             self.assertEqual(smoke["folderExercised"], True)
             self.assertEqual(smoke["virtualNodeExercised"], True)
             self.assertEqual(smoke["invitationExercised"], True)

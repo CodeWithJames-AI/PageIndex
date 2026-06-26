@@ -188,6 +188,7 @@ DASHBOARD_HTML = """<!doctype html>
     .citations,
     .conversation-list,
     .member-list,
+    .group-list,
     .token-list,
     .audit-list,
     .version-list,
@@ -441,6 +442,18 @@ DASHBOARD_HTML = """<!doctype html>
             </div>
           </section>
           <section>
+            <h2 class="section-title">Groups</h2>
+            <div class="stack">
+              <div class="import-row">
+                <input id="groupNameInput" value="" placeholder="group name" aria-label="Group name">
+                <button id="createGroupButton" type="button">Create</button>
+              </div>
+              <input id="groupMemberUserInput" value="" placeholder="member user id" aria-label="Group member user id">
+              <button id="refreshGroupsButton" class="secondary" type="button">Refresh groups</button>
+              <div id="groupList" class="group-list muted">No groups loaded.</div>
+            </div>
+          </section>
+          <section>
             <h2 class="section-title">Invitations</h2>
             <div class="stack">
               <input id="invitationEmailInput" value="" placeholder="email" aria-label="Invitation email">
@@ -610,6 +623,8 @@ DASHBOARD_HTML = """<!doctype html>
     const conversationExportText = document.getElementById("conversationExportText");
     const memberUserInput = document.getElementById("memberUserInput");
     const memberRoleInput = document.getElementById("memberRoleInput");
+    const groupNameInput = document.getElementById("groupNameInput");
+    const groupMemberUserInput = document.getElementById("groupMemberUserInput");
     const invitationEmailInput = document.getElementById("invitationEmailInput");
     const invitationExpiresInDaysInput = document.getElementById("invitationExpiresInDaysInput");
     const invitationRoleInput = document.getElementById("invitationRoleInput");
@@ -652,6 +667,7 @@ DASHBOARD_HTML = """<!doctype html>
     const virtualNodeList = document.getElementById("virtualNodeList");
     const conversationList = document.getElementById("conversationList");
     const memberList = document.getElementById("memberList");
+    const groupList = document.getElementById("groupList");
     const invitationList = document.getElementById("invitationList");
     const tokenList = document.getElementById("tokenList");
     const auditList = document.getElementById("auditList");
@@ -752,6 +768,7 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       const grants = access.grants || [];
+      const groupGrants = access.group_grants || [];
       const grantsHtml = grants.length
         ? grants.map((grant) => `
           <article class="member">
@@ -765,6 +782,19 @@ DASHBOARD_HTML = """<!doctype html>
           </article>
         `).join("")
         : `<div class="muted">No direct grants.</div>`;
+      const groupGrantsHtml = groupGrants.length
+        ? groupGrants.map((grant) => `
+          <article class="member">
+            <div class="member-row">
+              <div>
+                <strong>${escapeHtml(grant.group_name || grant.group_id)}</strong>
+                <div class="muted">${escapeHtml(grant.group_id)} | ${escapeHtml(grant.role || "read")} | granted by ${escapeHtml(grant.granted_by || "unknown")}</div>
+              </div>
+              <button class="secondary" type="button" data-revoke-group-access-doc-id="${escapeHtml(docId)}" data-revoke-access-group-id="${escapeHtml(grant.group_id)}">Revoke</button>
+            </div>
+          </article>
+        `).join("")
+        : `<div class="muted">No group grants.</div>`;
       documentAccessPanel.className = "stack";
       documentAccessPanel.innerHTML = `
         <article class="doc">
@@ -782,14 +812,31 @@ DASHBOARD_HTML = """<!doctype html>
             <button id="grantDocumentAccessButton" type="button">Grant</button>
             <button id="revokeDocumentAccessButton" class="secondary" type="button">Revoke</button>
           </div>
+          <div class="access-actions">
+            <input id="documentAccessGroupInput" value="" placeholder="group id" aria-label="Document access group id">
+            <button id="grantDocumentGroupAccessButton" type="button">Grant group</button>
+            <button id="revokeDocumentGroupAccessButton" class="secondary" type="button">Revoke group</button>
+          </div>
         </article>
-        <div class="member-list">${grantsHtml}</div>
+        <div class="member-list">
+          <strong>Direct grants</strong>
+          ${grantsHtml}
+        </div>
+        <div class="member-list">
+          <strong>Group grants</strong>
+          ${groupGrantsHtml}
+        </div>
       `;
       document.getElementById("saveDocumentAccessModeButton").addEventListener("click", () => saveDocumentAccessMode(docId).catch((error) => setStatus(error.message, "error")));
       document.getElementById("grantDocumentAccessButton").addEventListener("click", () => grantDocumentAccess(docId).catch((error) => setStatus(error.message, "error")));
       document.getElementById("revokeDocumentAccessButton").addEventListener("click", () => revokeDocumentAccess(docId).catch((error) => setStatus(error.message, "error")));
+      document.getElementById("grantDocumentGroupAccessButton").addEventListener("click", () => grantDocumentGroupAccess(docId).catch((error) => setStatus(error.message, "error")));
+      document.getElementById("revokeDocumentGroupAccessButton").addEventListener("click", () => revokeDocumentGroupAccess(docId).catch((error) => setStatus(error.message, "error")));
       documentAccessPanel.querySelectorAll("[data-revoke-access-doc-id]").forEach((button) => {
         button.addEventListener("click", () => revokeDocumentAccess(button.dataset.revokeAccessDocId, button.dataset.revokeAccessUserId).catch((error) => setStatus(error.message, "error")));
+      });
+      documentAccessPanel.querySelectorAll("[data-revoke-group-access-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => revokeDocumentGroupAccess(button.dataset.revokeGroupAccessDocId, button.dataset.revokeAccessGroupId).catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -928,6 +975,50 @@ DASHBOARD_HTML = """<!doctype html>
       `).join("");
       memberList.querySelectorAll("[data-remove-member-user-id]").forEach((button) => {
         button.addEventListener("click", () => removeMember(button.dataset.removeMemberUserId).catch((error) => setStatus(error.message, "error")));
+      });
+    }
+
+    function renderGroups(groups, membersByGroup = {}) {
+      if (!groups.length) {
+        groupList.className = "group-list muted";
+        groupList.textContent = "No groups loaded.";
+        return;
+      }
+      groupList.className = "group-list";
+      groupList.innerHTML = groups.map((group) => {
+        const members = membersByGroup[group.id] || [];
+        const memberRows = members.length
+          ? members.map((member) => `
+            <div class="member-row">
+              <div>
+                <strong>${escapeHtml(member.user_id)}</strong>
+                <div class="muted">${escapeHtml(member.created_at || "member")}</div>
+              </div>
+              <button class="secondary" type="button" data-remove-group-member-id="${escapeHtml(group.id)}" data-remove-group-member-user-id="${escapeHtml(member.user_id)}">Remove</button>
+            </div>
+          `).join("")
+          : `<div class="muted">No group members.</div>`;
+        return `
+          <article class="member" data-group-id="${escapeHtml(group.id)}">
+            <strong>${escapeHtml(group.name)}</strong>
+            <div class="muted">${escapeHtml(group.id)} | ${escapeHtml(group.member_count || 0)} members</div>
+            <div class="provider-actions" style="margin-top:8px">
+              <button class="secondary" type="button" data-add-group-member-id="${escapeHtml(group.id)}">Add</button>
+              <button class="secondary" type="button" data-refresh-group-members-id="${escapeHtml(group.id)}">Members</button>
+              <span></span>
+            </div>
+            <div class="stack" style="margin-top:8px">${memberRows}</div>
+          </article>
+        `;
+      }).join("");
+      groupList.querySelectorAll("[data-add-group-member-id]").forEach((button) => {
+        button.addEventListener("click", () => addGroupMember(button.dataset.addGroupMemberId).catch((error) => setStatus(error.message, "error")));
+      });
+      groupList.querySelectorAll("[data-refresh-group-members-id]").forEach((button) => {
+        button.addEventListener("click", () => refreshGroups().catch((error) => setStatus(error.message, "error")));
+      });
+      groupList.querySelectorAll("[data-remove-group-member-id]").forEach((button) => {
+        button.addEventListener("click", () => removeGroupMember(button.dataset.removeGroupMemberId, button.dataset.removeGroupMemberUserId).catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -1161,6 +1252,26 @@ DASHBOARD_HTML = """<!doctype html>
       await updateDocumentAccess(docId, { revoke_user_id: targetUserId }, "Document access revoked.");
     }
 
+    async function grantDocumentGroupAccess(docId, groupId = "") {
+      const input = document.getElementById("documentAccessGroupInput");
+      const targetGroupId = (groupId || (input ? input.value : "")).trim();
+      if (!targetGroupId) {
+        setStatus("Enter a group id.", "warn");
+        return;
+      }
+      await updateDocumentAccess(docId, { grant_group_id: targetGroupId }, "Document group access granted.");
+    }
+
+    async function revokeDocumentGroupAccess(docId, groupId = "") {
+      const input = document.getElementById("documentAccessGroupInput");
+      const targetGroupId = (groupId || (input ? input.value : "")).trim();
+      if (!targetGroupId) {
+        setStatus("Enter a group id.", "warn");
+        return;
+      }
+      await updateDocumentAccess(docId, { revoke_group_id: targetGroupId }, "Document group access revoked.");
+    }
+
     async function refreshFolders(options = {}) {
       if (!options.quiet) {
         setStatus("Refreshing folders...");
@@ -1213,6 +1324,22 @@ DASHBOARD_HTML = """<!doctype html>
       const payload = await api("/workspace-members");
       renderMembers(payload.members || []);
       setStatus("Team refreshed.", "ok");
+    }
+
+    async function refreshGroups(options = {}) {
+      if (!options.quiet) {
+        setStatus("Refreshing groups...");
+      }
+      const payload = await api("/workspace-groups");
+      const groups = payload.groups || [];
+      const entries = await Promise.all(groups.map(async (group) => {
+        const memberPayload = await api(`/workspace-groups/${encodeURIComponent(group.id)}/members`);
+        return [group.id, memberPayload.members || []];
+      }));
+      renderGroups(groups, Object.fromEntries(entries));
+      if (!options.quiet) {
+        setStatus("Groups refreshed.", "ok");
+      }
     }
 
     async function refreshInvitations(options = {}) {
@@ -1324,6 +1451,12 @@ DASHBOARD_HTML = """<!doctype html>
         memberList.className = "member-list muted";
         memberList.textContent = "Team unavailable.";
         setStatus("Documents and chats refreshed.", "ok");
+      }
+      try {
+        await refreshGroups({ quiet: true });
+      } catch (error) {
+        groupList.className = "group-list muted";
+        groupList.textContent = "Groups unavailable.";
       }
       try {
         await refreshInvitations({ quiet: true });
@@ -1469,6 +1602,55 @@ DASHBOARD_HTML = """<!doctype html>
       });
       await refreshMembers();
       setStatus(payload.removed ? "Member removed." : "Member not found.", payload.removed ? "ok" : "warn");
+    }
+
+    async function createGroup() {
+      const name = groupNameInput.value.trim();
+      if (!name) {
+        setStatus("Enter a group name.", "warn");
+        return;
+      }
+      setStatus("Creating group...");
+      await api("/workspace-groups", {
+        method: "POST",
+        body: JSON.stringify({ name })
+      });
+      groupNameInput.value = "";
+      await refreshGroups({ quiet: true });
+      setStatus("Group created.", "ok");
+    }
+
+    async function addGroupMember(groupId) {
+      const userId = groupMemberUserInput.value.trim();
+      if (!groupId) {
+        setStatus("Group not found.", "warn");
+        return;
+      }
+      if (!userId) {
+        setStatus("Enter a group member user id.", "warn");
+        return;
+      }
+      setStatus("Adding group member...");
+      await api(`/workspace-groups/${encodeURIComponent(groupId)}/members`, {
+        method: "POST",
+        body: JSON.stringify({ user_id: userId })
+      });
+      groupMemberUserInput.value = "";
+      await refreshGroups({ quiet: true });
+      setStatus("Group member added.", "ok");
+    }
+
+    async function removeGroupMember(groupId, userId) {
+      if (!groupId || !userId) {
+        setStatus("Group member not found.", "warn");
+        return;
+      }
+      setStatus("Removing group member...");
+      const payload = await api(`/workspace-groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}`, {
+        method: "DELETE"
+      });
+      await refreshGroups({ quiet: true });
+      setStatus(payload.removed ? "Group member removed." : "Group member not found.", payload.removed ? "ok" : "warn");
     }
 
     function invitationExpiresInDays() {
@@ -1974,6 +2156,8 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("refreshConversationsButton").addEventListener("click", () => refreshConversations().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveMemberButton").addEventListener("click", () => saveMember().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshMembersButton").addEventListener("click", () => refreshMembers().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("createGroupButton").addEventListener("click", () => createGroup().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("refreshGroupsButton").addEventListener("click", () => refreshGroups().catch((error) => setStatus(error.message, "error")));
     document.getElementById("createInvitationButton").addEventListener("click", () => createInvitation().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshInvitationsButton").addEventListener("click", () => refreshInvitations().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshTokensButton").addEventListener("click", () => refreshApiTokens().catch((error) => setStatus(error.message, "error")));

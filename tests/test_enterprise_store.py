@@ -5483,6 +5483,80 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(member_pages["pages"], [])
             self.assertEqual(owner_pages["pages"][0]["content"], "Secret customer acquisition evidence.")
 
+    def test_http_document_access_management_requires_admin_bearer_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "access.txt"
+            source.write_text("Document access route evidence.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            other_workspace = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(other_workspace, "mallory", "owner")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Access memo")
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store.conn.commit()
+            member_token = member_token_record["token"]
+            other_token = store.create_api_token(other_workspace, "mallory", name="other")["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            access_url = f"{base}/documents/{doc_id}/access"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            audit_headers = {"Authorization": f"Bearer {audit_token}"}
+            write_headers = {"Authorization": f"Bearer {write_token}"}
+            member_headers = {"Authorization": f"Bearer {member_token}"}
+            other_headers = {"Authorization": f"Bearer {other_token}"}
+            try:
+                missing_token = _get_error(access_url)
+                write_get = _get_error(access_url, headers=write_headers)
+                audit_read = _get_json(access_url, headers=audit_headers)
+                bad_action = _post_json(
+                    access_url,
+                    {"access_mode": "restricted", "grant_user_id": "bob"},
+                    status=400,
+                    headers=owner_headers,
+                )
+                member_write = _post_json(
+                    access_url,
+                    {"access_mode": "restricted"},
+                    status=403,
+                    headers=member_headers,
+                )
+                foreign_get = _get_error(access_url, headers=other_headers)
+                restricted = _post_json(access_url, {"access_mode": "restricted"}, headers=owner_headers)
+                granted = _post_json(access_url, {"grant_user_id": "bob"}, headers=owner_headers)
+                revoked = _post_json(access_url, {"revoke_user_id": "bob"}, headers=owner_headers)
+                revoked_again = _post_json(access_url, {"revoke_user_id": "bob"}, headers=owner_headers)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(missing_token["error"], "api token required")
+            self.assertEqual(write_get["error"], "api token scope denied")
+            self.assertEqual(audit_read["access"]["access_mode"], "workspace")
+            self.assertEqual(audit_read["access"]["grants"], [])
+            self.assertEqual(bad_action["error"], "choose exactly one document access update")
+            self.assertEqual(member_write["error"], "workspace role denied")
+            self.assertEqual(foreign_get["error"], "document not found")
+            self.assertEqual(restricted["access"]["access_mode"], "restricted")
+            self.assertEqual([grant["user_id"] for grant in granted["access"]["grants"]], ["bob"])
+            self.assertTrue(revoked["revoked"])
+            self.assertEqual(revoked["access"]["grants"], [])
+            self.assertFalse(revoked_again["revoked"])
+
     def test_http_strict_document_reindex_requires_write_role(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -5996,6 +6070,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("pagePreviewList", body)
                     self.assertIn("data-pages-doc-id", body)
                     self.assertIn("data-reindex-doc-id", body)
+                    self.assertIn("/access", body)
+                    self.assertIn("documentAccessPanel", body)
+                    self.assertIn("loadDocumentAccess", body)
+                    self.assertIn("data-access-doc-id", body)
+                    self.assertIn("grantDocumentAccess", body)
+                    self.assertIn("revokeDocumentAccess", body)
                     self.assertIn("/versions", body)
                     self.assertIn("versionList", body)
                     self.assertIn("loadDocumentVersions", body)
@@ -6151,6 +6231,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertGreater(smoke["evidenceCount"], 0)
             self.assertEqual(smoke["versionExercised"], True)
             self.assertEqual(smoke["pagePreviewExercised"], True)
+            self.assertEqual(smoke["accessExercised"], True)
             self.assertEqual(smoke["folderExercised"], True)
             self.assertEqual(smoke["virtualNodeExercised"], True)
             self.assertEqual(smoke["conversationExportExercised"], True)

@@ -196,6 +196,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            document_access_id = _document_access_path(parsed.path)
+            if document_access_id:
+                self._get_document_access(document_access_id)
+                return
             document_pages_id = _document_pages_path(parsed.path)
             if document_pages_id:
                 params = parse_qs(parsed.query)
@@ -302,6 +306,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/query":
                 self._query(payload)
+                return
+            document_access_id = _document_access_path(parsed.path)
+            if document_access_id:
+                self._set_document_access(document_access_id, payload)
                 return
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except PermissionError as exc:
@@ -590,6 +598,82 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 self._json({"updated": False})
                 return
             self._json({"updated": True, "document": document})
+        finally:
+            store.close()
+
+    def _get_document_access(self, doc_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+            access = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id=user_id)
+            if access is None:
+                self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._json({"access": access})
+        finally:
+            store.close()
+
+    def _set_document_access(self, doc_id: str, payload: dict[str, Any]) -> None:
+        actions = [
+            key
+            for key in ("access_mode", "grant_user_id", "revoke_user_id")
+            if key in payload and payload[key] is not None
+        ]
+        if len(actions) != 1:
+            raise ValueError("choose exactly one document access update")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope=("audit", "write"),
+                require_api_token=True,
+            )
+            action = actions[0]
+            if action == "access_mode":
+                access_mode = payload.get("access_mode")
+                if not isinstance(access_mode, str):
+                    raise ValueError("access_mode must be a string")
+                access = store.set_document_access_mode(
+                    doc_id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                    access_mode=access_mode,
+                )
+                if access is None:
+                    self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                self._json({"access": access})
+                return
+            if action == "grant_user_id":
+                grant_user_id = payload.get("grant_user_id")
+                if not isinstance(grant_user_id, str):
+                    raise ValueError("grant_user_id must be a string")
+                access = store.grant_document_access(
+                    doc_id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                    user_id=grant_user_id,
+                )
+                if access is None:
+                    self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                self._json({"access": access})
+                return
+            revoke_user_id = payload.get("revoke_user_id")
+            if not isinstance(revoke_user_id, str):
+                raise ValueError("revoke_user_id must be a string")
+            access = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id=user_id)
+            if access is None:
+                self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)
+                return
+            revoked = store.revoke_document_access(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+                user_id=revoke_user_id,
+            )
+            access = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id=user_id)
+            self._json({"revoked": revoked, "access": access})
         finally:
             store.close()
 
@@ -1228,6 +1312,13 @@ def _conversation_export_path(path: str) -> str | None:
 def _document_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "documents":
+        return parts[1]
+    return None
+
+
+def _document_access_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "documents" and parts[2] == "access":
         return parts[1]
     return None
 

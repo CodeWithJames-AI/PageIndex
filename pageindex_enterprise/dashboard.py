@@ -248,7 +248,13 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .doc-actions {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .access-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
       gap: 8px;
       margin-top: 8px;
     }
@@ -515,6 +521,7 @@ DASHBOARD_HTML = """<!doctype html>
           <section>
             <h2 class="section-title">Documents</h2>
             <div id="documentList" class="doc-list muted">No documents loaded.</div>
+            <div id="documentAccessPanel" class="muted" style="margin-top:12px">No document access loaded.</div>
             <div id="versionList" class="version-list muted" style="margin-top:12px">No versions loaded.</div>
             <div id="pagePreviewList" class="page-list muted" style="margin-top:12px">No pages loaded.</div>
           </section>
@@ -593,6 +600,7 @@ DASHBOARD_HTML = """<!doctype html>
     const chatInput = document.getElementById("chatInput");
     const statusEl = document.getElementById("status");
     const documentList = document.getElementById("documentList");
+    const documentAccessPanel = document.getElementById("documentAccessPanel");
     const versionList = document.getElementById("versionList");
     const pagePreviewList = document.getElementById("pagePreviewList");
     const folderList = document.getElementById("folderList");
@@ -671,6 +679,7 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="doc-actions">
             <button class="secondary" type="button" data-pages-doc-id="${escapeHtml(doc.id)}">Preview</button>
             <button class="secondary" type="button" data-versions-doc-id="${escapeHtml(doc.id)}">Versions</button>
+            <button class="secondary" type="button" data-access-doc-id="${escapeHtml(doc.id)}">Access</button>
             <button class="secondary" type="button" data-reindex-doc-id="${escapeHtml(doc.id)}">Reindex</button>
           </div>
         </article>
@@ -681,8 +690,59 @@ DASHBOARD_HTML = """<!doctype html>
       documentList.querySelectorAll("[data-versions-doc-id]").forEach((button) => {
         button.addEventListener("click", () => loadDocumentVersions(button.dataset.versionsDocId).catch((error) => setStatus(error.message, "error")));
       });
+      documentList.querySelectorAll("[data-access-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => loadDocumentAccess(button.dataset.accessDocId).catch((error) => setStatus(error.message, "error")));
+      });
       documentList.querySelectorAll("[data-reindex-doc-id]").forEach((button) => {
         button.addEventListener("click", () => reindexDocument(button.dataset.reindexDocId).catch((error) => setStatus(error.message, "error")));
+      });
+    }
+
+    function renderDocumentAccess(docId, access) {
+      if (!access) {
+        documentAccessPanel.className = "muted";
+        documentAccessPanel.textContent = "No document access loaded.";
+        return;
+      }
+      const grants = access.grants || [];
+      const grantsHtml = grants.length
+        ? grants.map((grant) => `
+          <article class="member">
+            <div class="member-row">
+              <div>
+                <strong>${escapeHtml(grant.user_id)}</strong>
+                <div class="muted">${escapeHtml(grant.role || "read")} | granted by ${escapeHtml(grant.granted_by || "unknown")}</div>
+              </div>
+              <button class="secondary" type="button" data-revoke-access-doc-id="${escapeHtml(docId)}" data-revoke-access-user-id="${escapeHtml(grant.user_id)}">Revoke</button>
+            </div>
+          </article>
+        `).join("")
+        : `<div class="muted">No direct grants.</div>`;
+      documentAccessPanel.className = "stack";
+      documentAccessPanel.innerHTML = `
+        <article class="doc">
+          <strong>${escapeHtml(docId)} access</strong>
+          <div class="muted">mode ${escapeHtml(access.access_mode || "workspace")}</div>
+          <div class="import-row" style="margin-top:8px">
+            <select id="documentAccessModeInput" aria-label="Document access mode">
+              <option value="workspace" ${access.access_mode === "workspace" ? "selected" : ""}>workspace</option>
+              <option value="restricted" ${access.access_mode === "restricted" ? "selected" : ""}>restricted</option>
+            </select>
+            <button id="saveDocumentAccessModeButton" type="button">Save</button>
+          </div>
+          <div class="access-actions">
+            <input id="documentAccessUserInput" value="" placeholder="user id" aria-label="Document access user id">
+            <button id="grantDocumentAccessButton" type="button">Grant</button>
+            <button id="revokeDocumentAccessButton" class="secondary" type="button">Revoke</button>
+          </div>
+        </article>
+        <div class="member-list">${grantsHtml}</div>
+      `;
+      document.getElementById("saveDocumentAccessModeButton").addEventListener("click", () => saveDocumentAccessMode(docId).catch((error) => setStatus(error.message, "error")));
+      document.getElementById("grantDocumentAccessButton").addEventListener("click", () => grantDocumentAccess(docId).catch((error) => setStatus(error.message, "error")));
+      document.getElementById("revokeDocumentAccessButton").addEventListener("click", () => revokeDocumentAccess(docId).catch((error) => setStatus(error.message, "error")));
+      documentAccessPanel.querySelectorAll("[data-revoke-access-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => revokeDocumentAccess(button.dataset.revokeAccessDocId, button.dataset.revokeAccessUserId).catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -973,6 +1033,51 @@ DASHBOARD_HTML = """<!doctype html>
       const payload = await api(`/documents/${encodeURIComponent(docId)}/pages?limit=5&max_chars=2000`);
       renderDocumentPages(docId, payload);
       setStatus("Pages refreshed.", "ok");
+    }
+
+    async function loadDocumentAccess(docId) {
+      if (!docId) {
+        setStatus("Document not found.", "warn");
+        return;
+      }
+      setStatus("Loading access...");
+      const payload = await api(`/documents/${encodeURIComponent(docId)}/access`);
+      renderDocumentAccess(docId, payload.access);
+      setStatus("Access refreshed.", "ok");
+    }
+
+    async function updateDocumentAccess(docId, payload, message) {
+      const updated = await api(`/documents/${encodeURIComponent(docId)}/access`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      renderDocumentAccess(docId, updated.access);
+      setStatus(message, "ok");
+    }
+
+    async function saveDocumentAccessMode(docId) {
+      const input = document.getElementById("documentAccessModeInput");
+      await updateDocumentAccess(docId, { access_mode: input.value }, "Access mode saved.");
+    }
+
+    async function grantDocumentAccess(docId) {
+      const input = document.getElementById("documentAccessUserInput");
+      const userId = input.value.trim();
+      if (!userId) {
+        setStatus("Enter a user id.", "warn");
+        return;
+      }
+      await updateDocumentAccess(docId, { grant_user_id: userId }, "Document access granted.");
+    }
+
+    async function revokeDocumentAccess(docId, userId = "") {
+      const input = document.getElementById("documentAccessUserInput");
+      const targetUserId = (userId || (input ? input.value : "")).trim();
+      if (!targetUserId) {
+        setStatus("Enter a user id.", "warn");
+        return;
+      }
+      await updateDocumentAccess(docId, { revoke_user_id: targetUserId }, "Document access revoked.");
     }
 
     async function refreshFolders(options = {}) {

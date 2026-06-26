@@ -78,6 +78,49 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#status", "Pages refreshed.");
     await waitForText(page, "#pagePreviewList", "Playwright browser evidence");
 
+    const accessResponse = page.waitForResponse(
+      (response) => response.url().includes("/documents/") && response.url().endsWith("/access") && response.request().method() === "GET"
+    );
+    await page.locator("[data-access-doc-id]").first().click();
+    await accessResponse;
+    await waitForText(page, "#status", "Access refreshed.");
+    await waitForText(page, "#documentAccessPanel", "mode workspace");
+
+    await page.selectOption("#documentAccessModeInput", "restricted");
+    const saveAccessModeResponse = page.waitForResponse(
+      (response) => response.url().includes("/documents/")
+        && response.url().endsWith("/access")
+        && response.request().method() === "POST"
+        && (response.request().postData() || "").includes("access_mode")
+    );
+    await page.click("#saveDocumentAccessModeButton");
+    await saveAccessModeResponse;
+    await waitForText(page, "#status", "Access mode saved.");
+    await waitForText(page, "#documentAccessPanel", "mode restricted");
+
+    await page.fill("#documentAccessUserInput", "alice");
+    const grantAccessResponse = page.waitForResponse(
+      (response) => response.url().includes("/documents/")
+        && response.url().endsWith("/access")
+        && response.request().method() === "POST"
+        && (response.request().postData() || "").includes("grant_user_id")
+    );
+    await page.click("#grantDocumentAccessButton");
+    await grantAccessResponse;
+    await waitForText(page, "#status", "Document access granted.");
+    await waitForText(page, "#documentAccessPanel", "alice");
+
+    const revokeAccessResponse = page.waitForResponse(
+      (response) => response.url().includes("/documents/")
+        && response.url().endsWith("/access")
+        && response.request().method() === "POST"
+        && (response.request().postData() || "").includes("revoke_user_id")
+    );
+    await page.locator("[data-revoke-access-user-id='alice']").click();
+    await revokeAccessResponse;
+    await waitForText(page, "#status", "Document access revoked.");
+    await waitForText(page, "#documentAccessPanel", "No direct grants.");
+
     await waitForText(page, "#folderList", "No folders loaded.");
 
     await page.fill("#folderNameInput", "Browser");
@@ -337,6 +380,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       evidenceCount: trace.evidence.length,
       versionExercised: true,
       pagePreviewExercised: true,
+      accessExercised: true,
       folderExercised: true,
       virtualNodeExercised: true,
       conversationExportExercised: true,

@@ -25,6 +25,7 @@ WORKSPACE_ADMIN_ROLES = {"owner", "admin"}
 WORKSPACE_ROLES = {"owner", "admin", "member", "viewer"}
 WORKSPACE_INVITATION_ROLES = {"admin", "member", "viewer"}
 WORKSPACE_ROLE_RANK = {"viewer": 0, "member": 1, "admin": 2, "owner": 3}
+DOCUMENT_ACCESS_MODES = {"workspace", "restricted"}
 API_TOKEN_SCOPES = ("read", "write", "audit")
 MAX_CONVERSATION_MESSAGE_CHARS = 4000
 CHAT_TRACE_QUERY = "[conversation message redacted]"
@@ -158,6 +159,13 @@ def _normalize_invitation_email(email: str) -> str:
     normalized = email.strip().casefold()
     if not normalized or "@" not in normalized:
         raise ValueError("Invitation email is required.")
+    return normalized
+
+
+def _normalize_document_access_mode(mode: str | None) -> str:
+    normalized = (mode or "workspace").strip().casefold() or "workspace"
+    if normalized not in DOCUMENT_ACCESS_MODES:
+        raise ValueError(f"Unsupported document access mode: {normalized}")
     return normalized
 
 
@@ -392,10 +400,21 @@ class EnterpriseStore:
               description TEXT NOT NULL DEFAULT '',
               source_path TEXT NOT NULL,
               kind TEXT NOT NULL,
+              access_mode TEXT NOT NULL DEFAULT 'workspace',
               page_count INTEGER,
               line_count INTEGER,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS document_access_grants (
+              doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              user_id TEXT NOT NULL,
+              role TEXT NOT NULL DEFAULT 'read',
+              granted_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (doc_id, user_id)
             );
 
             CREATE TABLE IF NOT EXISTS document_pages (
@@ -538,6 +557,7 @@ class EnterpriseStore:
             },
             "documents": {
                 "workspace_id": "TEXT",
+                "access_mode": "TEXT NOT NULL DEFAULT 'workspace'",
             },
             "query_runs": {
                 "workspace_id": "TEXT",
@@ -578,6 +598,9 @@ class EnterpriseStore:
         self.conn.execute(
             "UPDATE api_tokens SET scopes_json = ? WHERE scopes_json IS NULL OR scopes_json = ''",
             (json.dumps(list(API_TOKEN_SCOPES)),),
+        )
+        self.conn.execute(
+            "UPDATE documents SET access_mode = 'workspace' WHERE access_mode IS NULL OR access_mode = ''"
         )
         self._ensure_folder_workspace_path_index()
 
@@ -921,6 +944,45 @@ class EnterpriseStore:
         if not actor_user_id:
             raise PermissionError("actor_user_id is required for workspace writes")
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_WRITE_ROLES)
+
+    def _document_read_condition(self, alias: str, actor_user_id: str | None) -> tuple[str, list[Any]]:
+        if not actor_user_id:
+            return "1 = 1", []
+        actor_user_id = actor_user_id.strip()
+        return (
+            f"""
+            (
+              {alias}.access_mode = 'workspace'
+              OR EXISTS (
+                SELECT 1 FROM workspace_members wm
+                WHERE wm.workspace_id = {alias}.workspace_id
+                  AND wm.user_id = ?
+                  AND wm.role IN ('owner', 'admin')
+              )
+              OR EXISTS (
+                SELECT 1 FROM document_access_grants dag
+                WHERE dag.doc_id = {alias}.id
+                  AND dag.user_id = ?
+              )
+            )
+            """,
+            [actor_user_id, actor_user_id],
+        )
+
+    def _can_read_document(self, document: dict[str, Any], actor_user_id: str | None) -> bool:
+        if not document.get("workspace_id") or document.get("access_mode", "workspace") == "workspace":
+            return True
+        if not actor_user_id:
+            return False
+        actor_user_id = actor_user_id.strip()
+        if self.workspace_role(document["workspace_id"], actor_user_id) in WORKSPACE_ADMIN_ROLES:
+            return True
+        return bool(
+            self._one(
+                "SELECT 1 FROM document_access_grants WHERE doc_id = ? AND user_id = ?",
+                (document["id"], actor_user_id),
+            )
+        )
 
     def create_api_token(
         self,
@@ -1538,7 +1600,7 @@ class EnterpriseStore:
         documents = _rows(self.conn.execute(
             """
             SELECT id, workspace_id, folder_id, name, description, kind,
-                   page_count, line_count, created_at, updated_at
+                   access_mode, page_count, line_count, created_at, updated_at
             FROM documents
             WHERE workspace_id = ?
             ORDER BY created_at, id
@@ -1582,6 +1644,17 @@ class EnterpriseStore:
                 )
             ),
             "documents.jsonl": documents,
+            "document_access_grants.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT doc_id, workspace_id, user_id, role, granted_by, created_at
+                    FROM document_access_grants
+                    WHERE workspace_id = ?
+                    ORDER BY doc_id, user_id
+                    """,
+                    (workspace_id,),
+                )
+            ),
             "document_pages.jsonl": _rows(
                 self.conn.execute(
                     """
@@ -2089,6 +2162,8 @@ class EnterpriseStore:
             if not actor_user_id:
                 raise PermissionError("workspace access denied")
             self.require_workspace_access(document["workspace_id"], actor_user_id)
+            if not self._can_read_document(document, actor_user_id):
+                return []
         rows = self.conn.execute(
             """
             SELECT id, doc_id, workspace_id, version, action, actor_user_id, name,
@@ -2124,6 +2199,8 @@ class EnterpriseStore:
             if not actor_user_id:
                 raise PermissionError("workspace access denied")
             self.require_workspace_access(document["workspace_id"], actor_user_id)
+            if not self._can_read_document(document, actor_user_id):
+                return {"doc_id": doc_id, "pages": [], "total_pages": 0}
         limit = max(1, min(int(limit), 100))
         offset = max(0, int(offset))
         max_chars = max(200, min(int(max_chars), 20000))
@@ -2218,32 +2295,172 @@ class EnterpriseStore:
         workspace_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        actor_user_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        read_condition, read_args = self._document_read_condition("d", actor_user_id)
         if folder_id and workspace_id:
             rows = self.conn.execute(
-                """
-                SELECT * FROM documents
-                WHERE folder_id = ? AND workspace_id = ?
+                f"""
+                SELECT d.* FROM documents d
+                WHERE d.folder_id = ? AND d.workspace_id = ? AND {read_condition}
                 ORDER BY created_at DESC LIMIT ? OFFSET ?
                 """,
-                (folder_id, workspace_id, limit, offset),
+                (folder_id, workspace_id, *read_args, limit, offset),
             )
         elif folder_id:
             rows = self.conn.execute(
-                "SELECT * FROM documents WHERE folder_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (folder_id, limit, offset),
+                f"""
+                SELECT d.* FROM documents d
+                WHERE d.folder_id = ? AND {read_condition}
+                ORDER BY d.created_at DESC LIMIT ? OFFSET ?
+                """,
+                (folder_id, *read_args, limit, offset),
             )
         elif workspace_id:
             rows = self.conn.execute(
-                "SELECT * FROM documents WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (workspace_id, limit, offset),
+                f"""
+                SELECT d.* FROM documents d
+                WHERE d.workspace_id = ? AND {read_condition}
+                ORDER BY d.created_at DESC LIMIT ? OFFSET ?
+                """,
+                (workspace_id, *read_args, limit, offset),
             )
         else:
             rows = self.conn.execute(
-                "SELECT * FROM documents ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
+                f"""
+                SELECT d.* FROM documents d
+                WHERE {read_condition}
+                ORDER BY d.created_at DESC LIMIT ? OFFSET ?
+                """,
+                (*read_args, limit, offset),
             )
         return [dict(row) for row in rows]
+
+    def list_document_access(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+    ) -> dict[str, Any] | None:
+        document = self.get_document(doc_id.strip())
+        if not document or document["workspace_id"] != workspace_id:
+            return None
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        rows = self.conn.execute(
+            """
+            SELECT doc_id, workspace_id, user_id, role, granted_by, created_at
+            FROM document_access_grants
+            WHERE doc_id = ?
+            ORDER BY user_id
+            """,
+            (document["id"],),
+        )
+        return {
+            "doc_id": document["id"],
+            "workspace_id": workspace_id,
+            "access_mode": document.get("access_mode", "workspace"),
+            "grants": [dict(row) for row in rows],
+        }
+
+    def set_document_access_mode(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        access_mode: str,
+    ) -> dict[str, Any] | None:
+        document = self.get_document(doc_id.strip())
+        if not document or document["workspace_id"] != workspace_id:
+            return None
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        access_mode = _normalize_document_access_mode(access_mode)
+        with self._atomic():
+            self.conn.execute(
+                "UPDATE documents SET access_mode = ?, updated_at = ? WHERE id = ?",
+                (access_mode, _now(), document["id"]),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "document.access_mode",
+                target_type="document",
+                target_id=document["id"],
+                details={"access_mode": access_mode, "previous_access_mode": document.get("access_mode", "workspace")},
+            )
+        return self.list_document_access(document["id"], workspace_id=workspace_id, actor_user_id=actor_user_id)
+
+    def grant_document_access(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        document = self.get_document(doc_id.strip())
+        if not document or document["workspace_id"] != workspace_id:
+            return None
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        user_id = user_id.strip()
+        if not user_id:
+            raise ValueError("User id is required.")
+        self.require_workspace_access(workspace_id, user_id)
+        now = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO document_access_grants (doc_id, workspace_id, user_id, role, granted_by, created_at)
+                VALUES (?, ?, ?, 'read', ?, ?)
+                ON CONFLICT(doc_id, user_id) DO UPDATE SET
+                  role = excluded.role,
+                  granted_by = excluded.granted_by,
+                  created_at = excluded.created_at
+                """,
+                (document["id"], workspace_id, user_id, actor_user_id, now),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "document.access_grant",
+                target_type="document",
+                target_id=document["id"],
+                details={"user_id": user_id, "role": "read"},
+            )
+        return self.list_document_access(document["id"], workspace_id=workspace_id, actor_user_id=actor_user_id)
+
+    def revoke_document_access(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        user_id: str,
+    ) -> bool:
+        document = self.get_document(doc_id.strip())
+        if not document or document["workspace_id"] != workspace_id:
+            return False
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        user_id = user_id.strip()
+        if not user_id:
+            raise ValueError("User id is required.")
+        with self._atomic():
+            cursor = self.conn.execute(
+                "DELETE FROM document_access_grants WHERE doc_id = ? AND user_id = ?",
+                (document["id"], user_id),
+            )
+            revoked = cursor.rowcount > 0
+            if revoked:
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "document.access_revoke",
+                    target_type="document",
+                    target_id=document["id"],
+                    details={"user_id": user_id, "role": "read"},
+                )
+        return revoked
 
     def delete_document(
         self,
@@ -2520,18 +2737,27 @@ class EnterpriseStore:
             "result": result,
         }
 
-    def search_documents(self, query: str, limit: int = 20, workspace_id: str | None = None) -> list[dict[str, Any]]:
+    def search_documents(
+        self,
+        query: str,
+        limit: int = 20,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         terms = [t.casefold() for t in query.split() if t.strip()]
         if not terms:
             return []
-        haystack_sql = "lower(name || ' ' || description || ' ' || source_path)"
+        haystack_sql = "lower(d.name || ' ' || d.description || ' ' || d.source_path)"
         where = " AND ".join([f"{haystack_sql} LIKE ? ESCAPE '\\'" for _ in terms])
         patterns = [f"%{_escape_like(term)}%" for term in terms]
+        read_condition, read_args = self._document_read_condition("d", actor_user_id)
+        where = f"({where}) AND {read_condition}"
+        patterns.extend(read_args)
         if workspace_id:
-            where = f"workspace_id = ? AND {where}"
+            where = f"d.workspace_id = ? AND {where}"
             patterns.insert(0, workspace_id)
         rows = self.conn.execute(
-            f"SELECT * FROM documents WHERE {where}",
+            f"SELECT d.* FROM documents d WHERE {where}",
             patterns,
         )
         scored = []
@@ -2550,6 +2776,7 @@ class EnterpriseStore:
         doc_ids: list[str] | None = None,
         expert_hints: list[str] | None = None,
         workspace_id: str | None = None,
+        actor_user_id: str | None = None,
         limit: int = 8,
     ) -> list[dict[str, Any]]:
         terms = _terms_for(query, expert_hints)
@@ -2565,6 +2792,9 @@ class EnterpriseStore:
         if workspace_id:
             where_parts.append("d.workspace_id = ?")
             args.append(workspace_id)
+        read_condition, read_args = self._document_read_condition("d", actor_user_id)
+        where_parts.append(read_condition)
+        args.extend(read_args)
         rows = self.conn.execute(
             f"""
             SELECT d.id AS doc_id, d.name AS doc_name, d.page_count, p.page, p.content
@@ -2604,6 +2834,7 @@ class EnterpriseStore:
             doc_ids=doc_ids,
             expert_hints=expert_hints,
             workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
             limit=limit,
         )
         with self._atomic():
@@ -2802,6 +3033,7 @@ class EnterpriseStore:
         doc_ids: list[str] | None = None,
         expert_hints: list[str] | None = None,
         workspace_id: str | None = None,
+        actor_user_id: str | None = None,
         limit: int = 8,
     ) -> list[dict[str, Any]]:
         terms = _terms_for(query, expert_hints)
@@ -2824,6 +3056,9 @@ class EnterpriseStore:
         if workspace_id:
             where_parts.append("d.workspace_id = ?")
             args.append(workspace_id)
+        read_condition, read_args = self._document_read_condition("d", actor_user_id)
+        where_parts.append(read_condition)
+        args.extend(read_args)
         rows = self.conn.execute(
             f"""
             SELECT
@@ -2863,6 +3098,7 @@ class EnterpriseStore:
         doc_ids: list[str] | None = None,
         expert_hints: list[str] | None = None,
         workspace_id: str | None = None,
+        actor_user_id: str | None = None,
         limit: int = 8,
     ) -> dict[str, Any]:
         hint_safety = _prepare_hints(expert_hints)
@@ -2888,6 +3124,7 @@ class EnterpriseStore:
             doc_ids=doc_ids,
             expert_hints=hints,
             workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
             limit=limit,
         ):
             doc = ensure_doc(hit["doc_id"], hit["doc_name"], hit["score"])
@@ -2905,6 +3142,7 @@ class EnterpriseStore:
             doc_ids=doc_ids,
             expert_hints=hints,
             workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
             limit=limit,
         ):
             doc = ensure_doc(hit["doc_id"], hit["doc_name"], hit["score"])
@@ -2939,6 +3177,7 @@ class EnterpriseStore:
         doc_ids: list[str] | None = None,
         expert_hints: list[str] | None = None,
         workspace_id: str | None = None,
+        actor_user_id: str | None = None,
         limit: int = 8,
     ) -> dict[str, Any]:
         hint_safety = _prepare_hints(expert_hints)
@@ -2948,6 +3187,7 @@ class EnterpriseStore:
             doc_ids=doc_ids,
             expert_hints=hints,
             workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
             limit=limit,
         )
         hits = []
@@ -2957,6 +3197,7 @@ class EnterpriseStore:
             doc_ids=doc_ids,
             expert_hints=hints,
             workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
             limit=limit,
         ):
             hit = dict(hit)
@@ -2974,6 +3215,7 @@ class EnterpriseStore:
             doc_ids=doc_ids,
             expert_hints=hints,
             workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
             limit=limit,
         ):
             if len(hits) >= limit:

@@ -3340,6 +3340,168 @@ class EnterpriseStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.list_audit_events(workspace_id, "alice")
 
+    def test_document_access_controls_filter_reads_and_queries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            public = tmp_path / "public.txt"
+            restricted = tmp_path / "restricted.txt"
+            public.write_text("Public roadmap renewal evidence.", encoding="utf-8")
+            restricted.write_text("Secret merger diligence evidence.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(workspace_id, "vera", "viewer", actor_user_id="alice")
+            public_id = store.ingest_file(public, workspace_id=workspace_id, actor_user_id="alice", name="Public memo")
+            restricted_id = store.ingest_file(restricted, workspace_id=workspace_id, actor_user_id="alice", name="Secret memo")
+
+            restricted_access = store.set_document_access_mode(
+                restricted_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+            bob_documents = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
+            bob_query = store.query_corpus("secret merger", workspace_id=workspace_id, actor_user_id="bob")
+            bob_pages = store.list_document_pages(restricted_id, workspace_id=workspace_id, actor_user_id="bob")
+            owner_query = store.query_corpus("secret merger", workspace_id=workspace_id, actor_user_id="alice")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.grant_document_access(
+                    restricted_id,
+                    workspace_id=workspace_id,
+                    actor_user_id="bob",
+                    user_id="vera",
+                )
+
+            granted_access = store.grant_document_access(
+                restricted_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="bob",
+            )
+            bob_documents_after_grant = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
+            bob_query_after_grant = store.query_corpus("secret merger", workspace_id=workspace_id, actor_user_id="bob")
+            bob_pages_after_grant = store.list_document_pages(restricted_id, workspace_id=workspace_id, actor_user_id="bob")
+            revoked = store.revoke_document_access(
+                restricted_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="bob",
+            )
+            bob_query_after_revoke = store.query_corpus("secret merger", workspace_id=workspace_id, actor_user_id="bob")
+            events = store.list_audit_events(workspace_id, "alice", limit=20)
+            actions = [event["action"] for event in events]
+
+            self.assertEqual(restricted_access["access_mode"], "restricted")
+            self.assertEqual([doc["id"] for doc in bob_documents], [public_id])
+            self.assertEqual(bob_query["citations"], [])
+            self.assertEqual(bob_pages["pages"], [])
+            self.assertEqual(owner_query["citations"][0]["doc_id"], restricted_id)
+            self.assertEqual(granted_access["grants"][0]["user_id"], "bob")
+            self.assertEqual({doc["id"] for doc in bob_documents_after_grant}, {public_id, restricted_id})
+            self.assertEqual(bob_query_after_grant["citations"][0]["doc_id"], restricted_id)
+            self.assertEqual(bob_pages_after_grant["pages"][0]["content"], "Secret merger diligence evidence.")
+            self.assertTrue(revoked)
+            self.assertEqual(bob_query_after_revoke["citations"], [])
+            self.assertIn("document.access_mode", actions)
+            self.assertIn("document.access_grant", actions)
+            self.assertIn("document.access_revoke", actions)
+
+    def test_document_access_cli_filters_search_without_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            public = tmp_path / "public.txt"
+            restricted = tmp_path / "restricted.txt"
+            public.write_text("Public launch checklist.", encoding="utf-8")
+            restricted.write_text("Secret acquisition checklist.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run(
+                [*base, "workspace", "Team", "--workspace-id", "ws_acl"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run([*base, "add-member", "ws_acl", "alice", "--role", "owner"], cwd=repo_root, env=env, capture_output=True, text=True, check=True)
+            subprocess.run([*base, "add-member", "ws_acl", "bob", "--role", "member", "--actor-user-id", "alice"], cwd=repo_root, env=env, capture_output=True, text=True, check=True)
+            public_id = subprocess.run(
+                [*base, "ingest-file", str(public), "--workspace-id", "ws_acl", "--user-id", "alice", "--name", "Public"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            restricted_id = subprocess.run(
+                [*base, "ingest-file", str(restricted), "--workspace-id", "ws_acl", "--user-id", "alice", "--name", "Secret"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            restricted_access = json.loads(
+                subprocess.run(
+                    [*base, "document-access", restricted_id, "ws_acl", "alice", "--mode", "restricted"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            bob_hidden = json.loads(
+                subprocess.run(
+                    [*base, "search", "secret", "--workspace-id", "ws_acl", "--user-id", "bob"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            member_denied = subprocess.run(
+                [*base, "document-access", restricted_id, "ws_acl", "bob", "--mode", "workspace"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            granted = json.loads(
+                subprocess.run(
+                    [*base, "document-access", restricted_id, "ws_acl", "alice", "--grant-user", "bob"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            bob_visible = json.loads(
+                subprocess.run(
+                    [*base, "search", "secret", "--workspace-id", "ws_acl", "--user-id", "bob"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+
+            self.assertEqual(restricted_access["access_mode"], "restricted")
+            self.assertEqual(bob_hidden, [])
+            self.assertNotEqual(member_denied.returncode, 0)
+            self.assertIn("workspace role denied", member_denied.stderr)
+            self.assertNotIn("Traceback", member_denied.stderr)
+            self.assertEqual(granted["grants"][0]["user_id"], "bob")
+            self.assertEqual(public_id.startswith("doc_"), True)
+            self.assertEqual(bob_visible[0]["id"], restricted_id)
+
     def test_http_adapter_imports_and_queries_structure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -5274,6 +5436,52 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(foreign, {"doc_id": doc_id, "pages": [], "total_pages": 0})
             self.assertNotIn(str(source), serialized)
             self.assertNotIn("source_path", serialized)
+
+    def test_http_document_access_filters_documents_query_and_pages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            public = tmp_path / "public.txt"
+            restricted = tmp_path / "restricted.txt"
+            public.write_text("Public customer renewal evidence.", encoding="utf-8")
+            restricted.write_text("Secret customer acquisition evidence.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            public_id = store.ingest_file(public, workspace_id=workspace_id, actor_user_id="alice", name="Public")
+            restricted_id = store.ingest_file(restricted, workspace_id=workspace_id, actor_user_id="alice", name="Secret")
+            store.set_document_access_mode(
+                restricted_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner", scopes=["read"])["token"]
+            member_token = store.create_api_token(workspace_id, "bob", name="member", scopes=["read"])["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            member_headers = {"Authorization": f"Bearer {member_token}"}
+            try:
+                owner_docs = _get_json(f"{base}/documents", headers=owner_headers)["documents"]
+                member_docs = _get_json(f"{base}/documents", headers=member_headers)["documents"]
+                member_query = _post_json(f"{base}/query", {"query": "secret acquisition"}, headers=member_headers)
+                member_pages = _get_json(f"{base}/documents/{restricted_id}/pages", headers=member_headers)
+                owner_pages = _get_json(f"{base}/documents/{restricted_id}/pages", headers=owner_headers)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual({doc["id"] for doc in owner_docs}, {public_id, restricted_id})
+            self.assertEqual([doc["id"] for doc in member_docs], [public_id])
+            self.assertEqual(member_query["citations"], [])
+            self.assertEqual(member_pages["pages"], [])
+            self.assertEqual(owner_pages["pages"][0]["content"], "Secret customer acquisition evidence.")
 
     def test_http_strict_document_reindex_requires_write_role(self):
         with tempfile.TemporaryDirectory() as tmp:

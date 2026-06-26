@@ -191,8 +191,8 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 limit = _int_param(params, "limit", 50)
                 store = EnterpriseStore(self.server.root)
                 try:
-                    workspace_id, _user_id = self._workspace_context(store, required_scope="read")
-                    self._json({"documents": store.list_documents(workspace_id=workspace_id, limit=limit)})
+                    workspace_id, user_id = self._workspace_context(store, required_scope="read")
+                    self._json({"documents": store.list_documents(workspace_id=workspace_id, limit=limit, actor_user_id=user_id)})
                 finally:
                     store.close()
                 return

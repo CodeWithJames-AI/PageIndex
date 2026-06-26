@@ -250,6 +250,14 @@ def main() -> None:
     doc_versions.add_argument("--user-id")
     doc_versions.add_argument("--limit", type=int, default=100)
 
+    document_access = sub.add_parser("document-access")
+    document_access.add_argument("doc_id")
+    document_access.add_argument("workspace_id")
+    document_access.add_argument("actor_user_id")
+    document_access.add_argument("--mode", choices=["workspace", "restricted"])
+    document_access.add_argument("--grant-user")
+    document_access.add_argument("--revoke-user")
+
     ingest = sub.add_parser("ingest-file")
     ingest.add_argument("path")
     ingest.add_argument("--name")
@@ -267,6 +275,7 @@ def main() -> None:
     search = sub.add_parser("search")
     search.add_argument("query")
     search.add_argument("--workspace-id")
+    search.add_argument("--user-id")
     search.add_argument("--limit", type=int, default=20)
 
     query = sub.add_parser("query")
@@ -282,6 +291,7 @@ def main() -> None:
     query_tree.add_argument("--doc-id", action="append", dest="doc_ids")
     query_tree.add_argument("--hint", action="append", dest="expert_hints")
     query_tree.add_argument("--workspace-id")
+    query_tree.add_argument("--user-id")
     query_tree.add_argument("--limit", type=int, default=8)
 
     hybrid = sub.add_parser("hybrid-search")
@@ -289,6 +299,7 @@ def main() -> None:
     hybrid.add_argument("--doc-id", action="append", dest="doc_ids")
     hybrid.add_argument("--hint", action="append", dest="expert_hints")
     hybrid.add_argument("--workspace-id")
+    hybrid.add_argument("--user-id")
     hybrid.add_argument("--limit", type=int, default=8)
 
     trace = sub.add_parser("verify-trace")
@@ -646,6 +657,50 @@ def main() -> None:
                     indent=2,
                 )
             )
+        elif args.command == "document-access":
+            actions = [args.mode is not None, args.grant_user is not None, args.revoke_user is not None]
+            if sum(actions) > 1:
+                raise SystemExit("choose only one document access action")
+            if args.mode is not None:
+                access = _workspace_member_cli(
+                    lambda: store.set_document_access_mode(
+                        args.doc_id,
+                        workspace_id=args.workspace_id,
+                        actor_user_id=args.actor_user_id,
+                        access_mode=args.mode,
+                    )
+                )
+            elif args.grant_user is not None:
+                access = _workspace_member_cli(
+                    lambda: store.grant_document_access(
+                        args.doc_id,
+                        workspace_id=args.workspace_id,
+                        actor_user_id=args.actor_user_id,
+                        user_id=args.grant_user,
+                    )
+                )
+            elif args.revoke_user is not None:
+                access = {
+                    "revoked": _workspace_member_cli(
+                        lambda: store.revoke_document_access(
+                            args.doc_id,
+                            workspace_id=args.workspace_id,
+                            actor_user_id=args.actor_user_id,
+                            user_id=args.revoke_user,
+                        )
+                    )
+                }
+            else:
+                access = _workspace_member_cli(
+                    lambda: store.list_document_access(
+                        args.doc_id,
+                        workspace_id=args.workspace_id,
+                        actor_user_id=args.actor_user_id,
+                    )
+                )
+            if access is None:
+                raise SystemExit("document not found")
+            print(json.dumps(access, indent=2))
         elif args.command == "ingest-file":
             print(
                 store.ingest_file(
@@ -667,7 +722,17 @@ def main() -> None:
                 )
             )
         elif args.command == "search":
-            print(json.dumps(store.search_documents(args.query, args.limit, workspace_id=args.workspace_id), indent=2))
+            print(
+                json.dumps(
+                    store.search_documents(
+                        args.query,
+                        args.limit,
+                        workspace_id=args.workspace_id,
+                        actor_user_id=args.user_id,
+                    ),
+                    indent=2,
+                )
+            )
         elif args.command == "query":
             print(
                 json.dumps(
@@ -690,6 +755,7 @@ def main() -> None:
                         doc_ids=args.doc_ids,
                         expert_hints=args.expert_hints,
                         workspace_id=args.workspace_id,
+                        actor_user_id=args.user_id,
                         limit=args.limit,
                     ),
                     indent=2,
@@ -703,6 +769,7 @@ def main() -> None:
                         doc_ids=args.doc_ids,
                         expert_hints=args.expert_hints,
                         workspace_id=args.workspace_id,
+                        actor_user_id=args.user_id,
                         limit=args.limit,
                     ),
                     indent=2,

@@ -12447,7 +12447,11 @@ class EnterpriseStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             source = tmp_path / "folder-secret.txt"
+            write_source = tmp_path / "folder-write.txt"
+            group_write_source = tmp_path / "folder-group-write.txt"
             source.write_text("Inherited folder access evidence.", encoding="utf-8")
+            write_source.write_text("Inherited folder access evidence after user write.", encoding="utf-8")
+            group_write_source.write_text("Inherited folder access evidence after group write.", encoding="utf-8")
             store = EnterpriseStore(tmp_path / "workspace")
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
@@ -12469,6 +12473,23 @@ class EnterpriseStoreTest(unittest.TestCase):
             after_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
             after_pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="bob")
             after_query = store.query_corpus("inherited folder access", workspace_id=workspace_id, actor_user_id="bob")
+            with self.assertRaisesRegex(PermissionError, "document write access denied"):
+                store.reindex_document_file(doc_id, write_source, workspace_id=workspace_id, actor_user_id="bob")
+            write_granted = store.grant_folder_access(
+                parent,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="bob",
+                role="write",
+            )
+            written = store.reindex_document_file(
+                doc_id,
+                write_source,
+                workspace_id=workspace_id,
+                actor_user_id="bob",
+                name="Folder write memo",
+            )
+            written_pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="bob")
             revoked = store.revoke_folder_access(parent, workspace_id=workspace_id, actor_user_id="alice", user_id="bob")
             revoked_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
             group = store.create_workspace_group(workspace_id, "alice", "Reviewers")
@@ -12481,6 +12502,23 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             group_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="carol")
             group_query = store.query_corpus("inherited folder access", workspace_id=workspace_id, actor_user_id="carol")
+            with self.assertRaisesRegex(PermissionError, "document write access denied"):
+                store.reindex_document_file(doc_id, group_write_source, workspace_id=workspace_id, actor_user_id="carol")
+            group_write_granted = store.grant_folder_group_access(
+                parent,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                group_id=group["id"],
+                role="write",
+            )
+            group_written = store.reindex_document_file(
+                doc_id,
+                group_write_source,
+                workspace_id=workspace_id,
+                actor_user_id="carol",
+                name="Folder group write memo",
+            )
+            group_written_pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="carol")
             group_revoked = store.revoke_folder_group_access(
                 parent,
                 workspace_id=workspace_id,
@@ -12492,14 +12530,25 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(before_docs, [])
             self.assertEqual(before_pages["pages"], [])
             self.assertEqual([grant["user_id"] for grant in granted["grants"]], ["bob"])
+            self.assertEqual(granted["grants"][0]["role"], "read")
             self.assertEqual([doc["id"] for doc in after_docs], [doc_id])
             self.assertEqual(after_pages["pages"][0]["content"], "Inherited folder access evidence.")
             self.assertEqual([citation["doc_id"] for citation in after_query["citations"]], [doc_id])
+            self.assertEqual(write_granted["grants"][0]["role"], "write")
+            self.assertEqual(written["name"], "Folder write memo")
+            self.assertEqual(written_pages["pages"][0]["content"], "Inherited folder access evidence after user write.")
             self.assertTrue(revoked)
             self.assertEqual(revoked_docs, [])
             self.assertEqual([grant["group_id"] for grant in group_granted["group_grants"]], [group["id"]])
+            self.assertEqual(group_granted["group_grants"][0]["role"], "read")
             self.assertEqual([doc["id"] for doc in group_docs], [doc_id])
             self.assertEqual([citation["doc_id"] for citation in group_query["citations"]], [doc_id])
+            self.assertEqual(group_write_granted["group_grants"][0]["role"], "write")
+            self.assertEqual(group_written["name"], "Folder group write memo")
+            self.assertEqual(
+                group_written_pages["pages"][0]["content"],
+                "Inherited folder access evidence after group write.",
+            )
             self.assertTrue(group_revoked)
             self.assertEqual(group_revoked_docs, [])
 
@@ -12602,7 +12651,11 @@ class EnterpriseStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             source = tmp_path / "folder-access.txt"
+            write_source = tmp_path / "folder-access-write.txt"
+            group_write_source = tmp_path / "folder-access-group-write.txt"
             source.write_text("HTTP inherited folder access evidence.", encoding="utf-8")
+            write_source.write_text("HTTP inherited folder access evidence after user write.", encoding="utf-8")
+            group_write_source.write_text("HTTP inherited folder access evidence after group write.", encoding="utf-8")
             root = tmp_path / "workspace"
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Team")
@@ -12666,11 +12719,45 @@ class EnterpriseStoreTest(unittest.TestCase):
                 foreign_get = _get_error(access_url, headers=other_headers)
                 before_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=member_headers)
                 granted = _post_json(access_url, {"grant_user_id": "bob"}, headers=owner_headers)
+                read_reindex = _put_json(
+                    f"{base}/documents/{doc_id}",
+                    {"path": str(write_source), "name": "Folder write denied"},
+                    headers=member_headers,
+                    status=403,
+                )
                 after_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=member_headers)
+                write_granted = _post_json(
+                    access_url,
+                    {"grant_user_id": "bob", "grant_role": "write"},
+                    headers=owner_headers,
+                )
+                write_reindex = _put_json(
+                    f"{base}/documents/{doc_id}",
+                    {"path": str(write_source), "name": "Folder write memo"},
+                    headers=member_headers,
+                )
+                member_pages_after_write = _get_json(f"{base}/documents/{doc_id}/pages", headers=member_headers)
                 revoked = _post_json(access_url, {"revoke_user_id": "bob"}, headers=owner_headers)
                 after_revoke_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=member_headers)
                 group_granted = _post_json(access_url, {"grant_group_id": group["id"]}, headers=owner_headers)
+                group_read_reindex = _put_json(
+                    f"{base}/documents/{doc_id}",
+                    {"path": str(group_write_source), "name": "Folder group write denied"},
+                    headers=carol_headers,
+                    status=403,
+                )
                 group_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=carol_headers)
+                group_write_granted = _post_json(
+                    access_url,
+                    {"grant_group_id": group["id"], "grant_role": "write"},
+                    headers=owner_headers,
+                )
+                group_write_reindex = _put_json(
+                    f"{base}/documents/{doc_id}",
+                    {"path": str(group_write_source), "name": "Folder group write memo"},
+                    headers=carol_headers,
+                )
+                carol_pages_after_write = _get_json(f"{base}/documents/{doc_id}/pages", headers=carol_headers)
                 group_revoked = _post_json(access_url, {"revoke_group_id": group["id"]}, headers=owner_headers)
                 after_group_revoke_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=carol_headers)
             finally:
@@ -12687,11 +12774,29 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(foreign_get["error"], "folder not found")
             self.assertEqual(before_query["citations"], [])
             self.assertEqual([grant["user_id"] for grant in granted["access"]["grants"]], ["bob"])
+            self.assertEqual(granted["access"]["grants"][0]["role"], "read")
+            self.assertEqual(read_reindex["error"], "document write access denied")
             self.assertEqual([citation["doc_id"] for citation in after_query["citations"]], [doc_id])
+            self.assertEqual(write_granted["access"]["grants"][0]["role"], "write")
+            self.assertTrue(write_reindex["updated"])
+            self.assertEqual(write_reindex["document"]["name"], "Folder write memo")
+            self.assertEqual(
+                member_pages_after_write["pages"][0]["content"],
+                "HTTP inherited folder access evidence after user write.",
+            )
             self.assertTrue(revoked["revoked"])
             self.assertEqual(after_revoke_query["citations"], [])
             self.assertEqual([grant["group_id"] for grant in group_granted["access"]["group_grants"]], [group["id"]])
+            self.assertEqual(group_granted["access"]["group_grants"][0]["role"], "read")
+            self.assertEqual(group_read_reindex["error"], "document write access denied")
             self.assertEqual([citation["doc_id"] for citation in group_query["citations"]], [doc_id])
+            self.assertEqual(group_write_granted["access"]["group_grants"][0]["role"], "write")
+            self.assertTrue(group_write_reindex["updated"])
+            self.assertEqual(group_write_reindex["document"]["name"], "Folder group write memo")
+            self.assertEqual(
+                carol_pages_after_write["pages"][0]["content"],
+                "HTTP inherited folder access evidence after group write.",
+            )
             self.assertTrue(group_revoked["revoked"])
             self.assertEqual(after_group_revoke_query["citations"], [])
 

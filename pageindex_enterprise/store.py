@@ -2494,6 +2494,40 @@ class EnterpriseStore:
                 """,
                 (document["id"], document["workspace_id"], actor_user_id),
             )
+            or self._one(
+                """
+                SELECT 1
+                FROM folder_access_grants fag
+                JOIN folders granted_folder ON granted_folder.id = fag.folder_id
+                JOIN folders document_folder ON document_folder.id = ?
+                WHERE fag.workspace_id = ?
+                  AND fag.user_id = ?
+                  AND fag.role = 'write'
+                  AND (
+                    document_folder.path = granted_folder.path
+                    OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                  )
+                """,
+                (document["folder_id"], document["workspace_id"], actor_user_id),
+            )
+            or self._one(
+                """
+                SELECT 1
+                FROM folder_group_access_grants fgag
+                JOIN folders granted_folder ON granted_folder.id = fgag.folder_id
+                JOIN folders document_folder ON document_folder.id = ?
+                JOIN workspace_group_members wgm ON wgm.group_id = fgag.group_id
+                WHERE fgag.workspace_id = ?
+                  AND wgm.workspace_id = ?
+                  AND wgm.user_id = ?
+                  AND fgag.role = 'write'
+                  AND (
+                    document_folder.path = granted_folder.path
+                    OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                  )
+                """,
+                (document["folder_id"], document["workspace_id"], document["workspace_id"], actor_user_id),
+            )
         )
 
     def _require_document_write(self, document: dict[str, Any], actor_user_id: str | None) -> None:
@@ -4375,6 +4409,7 @@ class EnterpriseStore:
         workspace_id: str,
         actor_user_id: str,
         user_id: str,
+        role: str = "read",
     ) -> dict[str, Any] | None:
         folder = self._one("SELECT * FROM folders WHERE id = ?", (folder_id.strip(),))
         if not folder or folder["workspace_id"] != workspace_id:
@@ -4384,18 +4419,21 @@ class EnterpriseStore:
         if not user_id:
             raise ValueError("User id is required.")
         self.require_workspace_access(workspace_id, user_id)
+        role = _normalize_document_access_role(role)
+        if role == "write" and self.workspace_role(workspace_id, user_id) not in WORKSPACE_WRITE_ROLES:
+            raise PermissionError("folder write grant requires workspace write role")
         now = _now()
         with self._atomic():
             self.conn.execute(
                 """
                 INSERT INTO folder_access_grants (folder_id, workspace_id, user_id, role, granted_by, created_at)
-                VALUES (?, ?, ?, 'read', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(folder_id, user_id) DO UPDATE SET
                   role = excluded.role,
                   granted_by = excluded.granted_by,
                   created_at = excluded.created_at
                 """,
-                (folder["id"], workspace_id, user_id, actor_user_id, now),
+                (folder["id"], workspace_id, user_id, role, actor_user_id, now),
             )
             self._insert_audit_event(
                 workspace_id,
@@ -4403,7 +4441,7 @@ class EnterpriseStore:
                 "folder.access_grant",
                 target_type="folder",
                 target_id=folder["id"],
-                details={"user_id": user_id, "role": "read", "path": folder["path"]},
+                details={"user_id": user_id, "role": role, "path": folder["path"]},
             )
         return self.list_folder_access(folder["id"], workspace_id=workspace_id, actor_user_id=actor_user_id)
 
@@ -4414,24 +4452,26 @@ class EnterpriseStore:
         workspace_id: str,
         actor_user_id: str,
         group_id: str,
+        role: str = "read",
     ) -> dict[str, Any] | None:
         folder = self._one("SELECT * FROM folders WHERE id = ?", (folder_id.strip(),))
         if not folder or folder["workspace_id"] != workspace_id:
             return None
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         group = self._require_workspace_group(workspace_id, group_id)
+        role = _normalize_document_access_role(role)
         now = _now()
         with self._atomic():
             self.conn.execute(
                 """
                 INSERT INTO folder_group_access_grants (folder_id, workspace_id, group_id, role, granted_by, created_at)
-                VALUES (?, ?, ?, 'read', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(folder_id, group_id) DO UPDATE SET
                   role = excluded.role,
                   granted_by = excluded.granted_by,
                   created_at = excluded.created_at
                 """,
-                (folder["id"], workspace_id, group["id"], actor_user_id, now),
+                (folder["id"], workspace_id, group["id"], role, actor_user_id, now),
             )
             self._insert_audit_event(
                 workspace_id,
@@ -4439,7 +4479,7 @@ class EnterpriseStore:
                 "folder.group_access_grant",
                 target_type="folder",
                 target_id=folder["id"],
-                details={"group_id": group["id"], "group_name": group["name"], "role": "read", "path": folder["path"]},
+                details={"group_id": group["id"], "group_name": group["name"], "role": role, "path": folder["path"]},
             )
         return self.list_folder_access(folder["id"], workspace_id=workspace_id, actor_user_id=actor_user_id)
 
@@ -4458,6 +4498,10 @@ class EnterpriseStore:
         user_id = user_id.strip()
         if not user_id:
             raise ValueError("User id is required.")
+        existing = self._one(
+            "SELECT role FROM folder_access_grants WHERE folder_id = ? AND user_id = ?",
+            (folder["id"], user_id),
+        )
         with self._atomic():
             cursor = self.conn.execute(
                 "DELETE FROM folder_access_grants WHERE folder_id = ? AND user_id = ?",
@@ -4471,7 +4515,7 @@ class EnterpriseStore:
                     "folder.access_revoke",
                     target_type="folder",
                     target_id=folder["id"],
-                    details={"user_id": user_id, "role": "read", "path": folder["path"]},
+                    details={"user_id": user_id, "role": existing["role"] if existing else "read", "path": folder["path"]},
                 )
         return revoked
 
@@ -4488,6 +4532,10 @@ class EnterpriseStore:
             return False
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         group = self._require_workspace_group(workspace_id, group_id)
+        existing = self._one(
+            "SELECT role FROM folder_group_access_grants WHERE folder_id = ? AND group_id = ?",
+            (folder["id"], group["id"]),
+        )
         with self._atomic():
             cursor = self.conn.execute(
                 "DELETE FROM folder_group_access_grants WHERE folder_id = ? AND group_id = ?",
@@ -4501,7 +4549,12 @@ class EnterpriseStore:
                     "folder.group_access_revoke",
                     target_type="folder",
                     target_id=folder["id"],
-                    details={"group_id": group["id"], "group_name": group["name"], "path": folder["path"]},
+                    details={
+                        "group_id": group["id"],
+                        "group_name": group["name"],
+                        "role": existing["role"] if existing else "read",
+                        "path": folder["path"],
+                    },
                 )
         return revoked
 

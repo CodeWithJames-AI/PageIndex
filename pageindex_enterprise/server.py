@@ -1193,6 +1193,11 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         ]
         if len(actions) != 1:
             raise ValueError("choose exactly one folder access update")
+        grant_role = payload.get("grant_role", "read")
+        if "grant_role" in payload and not isinstance(grant_role, str):
+            raise ValueError("grant_role must be a string")
+        if "grant_role" in payload and actions[0] not in {"grant_user_id", "grant_group_id"}:
+            raise ValueError("grant_role only applies to grant updates")
         store = EnterpriseStore(self.server.root)
         try:
             workspace_id, user_id = self._workspace_context(
@@ -1210,6 +1215,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     workspace_id=workspace_id,
                     actor_user_id=user_id,
                     user_id=grant_user_id,
+                    role=grant_role,
                 )
                 if access is None:
                     self._json({"error": "folder not found"}, HTTPStatus.NOT_FOUND)
@@ -1225,6 +1231,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     workspace_id=workspace_id,
                     actor_user_id=user_id,
                     group_id=grant_group_id,
+                    role=grant_role,
                 )
                 if access is None:
                     self._json({"error": "folder not found"}, HTTPStatus.NOT_FOUND)

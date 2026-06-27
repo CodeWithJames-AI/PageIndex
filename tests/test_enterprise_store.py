@@ -983,6 +983,69 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIsNone(cleared["max_members"])
             self.assertEqual(cleared["usage"], {"documents": 1, "pages": 1, "members": 2})
 
+    def test_legacy_query_source_set_share_link_schema_is_migrated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir()
+            db_path = root / "enterprise.sqlite3"
+            source = Path(tmp) / "legacy-source-set-share.txt"
+            source.write_text("Legacy source-set share migration evidence.", encoding="utf-8")
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE query_source_set_share_links (
+                      id TEXT PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      source_set_id TEXT NOT NULL,
+                      created_by TEXT NOT NULL,
+                      token_hash TEXT NOT NULL UNIQUE,
+                      created_at TEXT NOT NULL,
+                      expires_at TEXT
+                    );
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            store = EnterpriseStore(root)
+            try:
+                columns = {row["name"] for row in store.conn.execute("PRAGMA table_info(query_source_set_share_links)")}
+                workspace_id = store.create_workspace("Team")
+                store.add_workspace_member(workspace_id, "alice", "owner")
+                doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice")
+                source_set = store.create_query_source_set(workspace_id, "alice", "Legacy source set", [doc_id])
+                share_link = store.create_query_source_set_share_link(
+                    workspace_id,
+                    "alice",
+                    source_set["id"],
+                    password="legacy-share-password",
+                    redact_content=True,
+                    max_views=2,
+                )
+                listed = store.list_query_source_set_share_links(workspace_id, "alice", source_set["id"])
+            finally:
+                store.close()
+
+            self.assertTrue(
+                {
+                    "revoked_at",
+                    "redact_content",
+                    "max_views",
+                    "password_salt",
+                    "password_hash",
+                    "view_count",
+                    "last_viewed_at",
+                }.issubset(columns)
+            )
+            self.assertTrue(share_link["token"].startswith("pss_"))
+            self.assertTrue(share_link["redact_content"])
+            self.assertEqual(share_link["max_views"], 2)
+            self.assertEqual(share_link["view_count"], 0)
+            self.assertTrue(share_link["password_protected"])
+            self.assertTrue(listed[0]["active"])
+
     def test_legacy_global_folder_path_unique_schema_is_migrated(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"

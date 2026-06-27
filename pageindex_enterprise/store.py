@@ -1393,6 +1393,15 @@ class EnterpriseStore:
                 "view_count": "INTEGER NOT NULL DEFAULT 0",
                 "last_viewed_at": "TEXT",
             },
+            "query_source_set_share_links": {
+                "revoked_at": "TEXT",
+                "redact_content": "INTEGER NOT NULL DEFAULT 0",
+                "max_views": "INTEGER",
+                "password_salt": "TEXT",
+                "password_hash": "TEXT",
+                "view_count": "INTEGER NOT NULL DEFAULT 0",
+                "last_viewed_at": "TEXT",
+            },
         }
         for table, table_additions in additions.items():
             columns = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}

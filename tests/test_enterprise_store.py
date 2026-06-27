@@ -2983,6 +2983,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(any(message["content"] == "backup question" for message in messages))
             self.assertEqual(provider[0]["api_key_env_var"], "PAGEINDEX_EXPORT_PROVIDER_KEY")
             self.assertIn("api_token.create", [event["action"] for event in audit_events])
+            self.assertTrue(any(event.get("integrity_hash") for event in audit_events))
             self.assertNotEqual(member_denied.returncode, 0)
             self.assertIn("workspace role denied", member_denied.stderr)
             self.assertNotIn("Traceback", member_denied.stderr)
@@ -3071,6 +3072,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 restored_runs = restored_store.list_query_runs(workspace_id, "alice")
                 restored_query_retention = restored_store.get_query_retention_policy(workspace_id, "alice")
                 restored_provider = restored_store.get_workspace_provider_config(workspace_id, "alice")
+                restored_audit_events = restored_store.list_audit_events(workspace_id, "alice")
+                restored_integrity = restored_store.verify_audit_integrity(workspace_id, "alice")
                 restored_token_count = int(
                     restored_store.conn.execute("SELECT COUNT(*) AS count FROM api_tokens").fetchone()["count"]
                 )
@@ -3096,6 +3099,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(restored_query_retention["retention_days"], 45)
             self.assertEqual(restored_provider["model"], "restore-model")
             self.assertEqual(restored_provider["api_key_env_var"], "PAGEINDEX_RESTORE_PROVIDER_KEY")
+            self.assertTrue(any(event.get("integrity_hash") for event in restored_audit_events))
+            self.assertTrue(restored_integrity["ok"], restored_integrity["failures"])
+            self.assertGreater(restored_integrity["checked"], 0)
             self.assertEqual(restored_token_count, 0)
             self.assertNotEqual(duplicate.returncode, 0)
             self.assertIn("Workspace already exists", duplicate.stderr)
@@ -3712,6 +3718,38 @@ class EnterpriseStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "since must be before until"):
                 store.list_audit_events(workspace_id, "alice", since="2026-04-01T00:00:00Z", until="2026-03-01T00:00:00Z")
 
+    def test_audit_integrity_verifies_hash_chain_and_detects_tamper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EnterpriseStore(Path(tmp) / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+
+            token = store.create_api_token(workspace_id, "alice", name="ci")
+            store.revoke_api_token(workspace_id, "alice", token["id"])
+
+            report = store.verify_audit_integrity(workspace_id, "alice")
+            events = store.list_audit_events(workspace_id, "alice", limit=10)
+            revoke_event = next(event for event in events if event["action"] == "api_token.revoke")
+            create_event = next(event for event in events if event["action"] == "api_token.create")
+
+            self.assertTrue(report["ok"])
+            self.assertGreaterEqual(report["checked"], 2)
+            self.assertEqual(report["legacy"], 0)
+            self.assertEqual(report["failure_count"], 0)
+            self.assertTrue(report["latest_integrity_hash"])
+            self.assertTrue(all(event["integrity_hash"] for event in events))
+            self.assertEqual(revoke_event["previous_integrity_hash"], create_event["integrity_hash"])
+            with self.assertRaises(PermissionError):
+                store.verify_audit_integrity(workspace_id, "mallory")
+
+            store.conn.execute("UPDATE audit_events SET action = ? WHERE id = ?", ("api_token.tampered", revoke_event["id"]))
+            store._commit()
+            broken = store.verify_audit_integrity(workspace_id, "alice")
+
+            self.assertFalse(broken["ok"])
+            self.assertGreaterEqual(broken["failure_count"], 1)
+            self.assertIn("integrity_hash_mismatch", {failure["kind"] for failure in broken["failures"]})
+
     def test_audit_jsonl_sink_writes_after_commit_and_redacts_secret_fields(self):
         old_sink = os.environ.get("PAGEINDEX_AUDIT_SINK_JSONL")
         try:
@@ -4015,6 +4053,23 @@ class EnterpriseStoreTest(unittest.TestCase):
                 text=True,
                 check=True,
             ).stdout
+            integrity = json.loads(
+                subprocess.run(
+                    [*base, "audit-integrity", "ws_cli", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            denied_integrity = subprocess.run(
+                [*base, "audit-integrity", "ws_cli", "bob"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
             serialized = json.dumps(events, sort_keys=True)
             exported_event = json.loads(exported)
             csv_rows = list(csv.DictReader(io.StringIO(exported_csv)))
@@ -4023,6 +4078,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual([event["action"] for event in events[:3]], ["document.delete", "api_token.revoke", "api_token.create"])
             self.assertEqual(exported_event["action"], "api_token.revoke")
             self.assertEqual([row["action"] for row in csv_rows], ["api_token.create", "api_token.revoke"])
+            self.assertTrue(integrity["ok"])
+            self.assertGreaterEqual(integrity["checked"], 3)
+            self.assertTrue(integrity["latest_integrity_hash"])
+            self.assertNotEqual(denied_integrity.returncode, 0)
+            self.assertIn("workspace access denied", denied_integrity.stderr)
+            self.assertNotIn("Traceback", denied_integrity.stderr)
             self.assertNotIn(token["token"], serialized)
             self.assertNotIn(token["token"], exported)
             self.assertNotIn(token["token"], exported_csv)
@@ -5330,6 +5391,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )
                 audit_blocked = _get_error(f"{base}/audit-events", headers=read_headers)
                 audit_allowed = _get_json(f"{base}/audit-events", headers=audit_headers)
+                integrity_blocked = _get_error(f"{base}/audit-integrity", headers=read_headers)
+                integrity_allowed = _get_json(f"{base}/audit-integrity", headers=audit_headers)
                 docs_blocked = _get_error(f"{base}/documents", headers=audit_headers)
 
                 self.assertEqual(docs["documents"][0]["id"], doc_id)
@@ -5339,6 +5402,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(audit_blocked["status"], 403)
                 self.assertEqual(audit_blocked["error"], "api token scope denied")
                 self.assertTrue(audit_allowed["events"])
+                self.assertEqual(integrity_blocked["status"], 403)
+                self.assertEqual(integrity_blocked["error"], "api token scope denied")
+                self.assertTrue(integrity_allowed["ok"])
                 self.assertEqual(docs_blocked["status"], 403)
                 self.assertEqual(docs_blocked["error"], "api token scope denied")
             finally:
@@ -7934,6 +8000,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     f"{base}/audit-events/export?format=jsonl",
                     headers={"X-PageIndex-Workspace": workspace_id, "X-PageIndex-User": "mallory"},
                 )
+                integrity = _get_json(f"{base}/audit-integrity", headers=headers)
+                blocked_integrity = _get_error(
+                    f"{base}/audit-integrity",
+                    headers={"X-PageIndex-Workspace": workspace_id, "X-PageIndex-User": "mallory"},
+                )
                 serialized = json.dumps(events, sort_keys=True)
                 exported_event = json.loads(exported)
                 csv_rows = list(csv.DictReader(io.StringIO(exported_csv)))
@@ -7946,12 +8017,16 @@ class EnterpriseStoreTest(unittest.TestCase):
 
                 self.assertEqual(blocked["status"], 403)
                 self.assertEqual(blocked_export["status"], 403)
+                self.assertEqual(blocked_integrity["status"], 403)
                 self.assertIn("document.ingest", actions)
                 self.assertIn("document.upload", actions)
                 self.assertIn("document.import_structure", actions)
                 self.assertIn("query.run", actions)
                 self.assertEqual({event["action"] for event in upload_events}, {"document.upload"})
                 self.assertEqual({event["target_id"] for event in target_events}, {upload_target_id})
+                self.assertTrue(integrity["ok"])
+                self.assertGreaterEqual(integrity["checked"], 4)
+                self.assertTrue(integrity["latest_integrity_hash"])
                 self.assertIn("application/x-ndjson", exported_type)
                 self.assertIn("text/csv", exported_csv_type)
                 self.assertEqual(exported_event["action"], "document.upload")
@@ -8318,6 +8393,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("clearApiTokenPolicy", body)
                     self.assertIn("/audit-events", body)
                     self.assertIn("/audit-events/export", body)
+                    self.assertIn("/audit-integrity", body)
                     self.assertIn("auditActionInput", body)
                     self.assertIn("auditUserFilterInput", body)
                     self.assertIn("auditTargetTypeInput", body)
@@ -8325,8 +8401,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("auditFormatInput", body)
                     self.assertIn("auditList", body)
                     self.assertIn("auditExportText", body)
+                    self.assertIn("verifyAuditIntegrityButton", body)
+                    self.assertIn("auditIntegritySummary", body)
+                    self.assertIn("auditIntegrityReportText", body)
                     self.assertIn("refreshAuditEvents", body)
                     self.assertIn("exportAuditEvents", body)
+                    self.assertIn("verifyAuditIntegrity", body)
                     self.assertIn("/workspace-export", body)
                     self.assertIn("exportWorkspaceButton", body)
                     self.assertIn("workspaceExportSummary", body)
@@ -8429,7 +8509,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                 target_id="old",
             )
             store.conn.execute(
-                "UPDATE audit_events SET created_at = ? WHERE id = ?",
+                """
+                UPDATE audit_events
+                SET created_at = ?, previous_integrity_hash = NULL, integrity_hash = NULL
+                WHERE id = ?
+                """,
                 ("2000-01-01T00:00:00+00:00", old_event_id),
             )
             store.conn.commit()

@@ -441,6 +441,17 @@ async function waitForAnyText(page, selector, expectedValues) {
     assert(!auditExport.includes(createdSecret), "audit export leaked created token secret");
     assert(!auditExport.includes(rotatedSecret), "audit export leaked rotated token secret");
 
+    const verifyAuditResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/audit-integrity") && response.request().method() === "GET"
+    );
+    await page.click("#verifyAuditIntegrityButton");
+    await verifyAuditResponse;
+    await waitForText(page, "#status", "Audit ledger verified.");
+    await waitForText(page, "#auditIntegritySummary", "Ledger verified");
+    const auditIntegrityReport = JSON.parse((await page.textContent("#auditIntegrityReportText")) || "{}");
+    assert(auditIntegrityReport.ok === true, "audit integrity report did not pass");
+    assert(auditIntegrityReport.checked > 0, "audit integrity report did not check events");
+
     const workspaceExportResponsePromise = page.waitForResponse(
       (response) => response.url().endsWith("/workspace-export") && response.request().method() === "GET"
     );

@@ -256,6 +256,10 @@ def main() -> None:
     audit_export.add_argument("--target-id")
     audit_export.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
 
+    audit_integrity = sub.add_parser("audit-integrity")
+    audit_integrity.add_argument("workspace_id")
+    audit_integrity.add_argument("user_id")
+
     audit_retention = sub.add_parser("audit-retention")
     audit_retention.add_argument("workspace_id")
     audit_retention.add_argument("user_id")
@@ -755,6 +759,9 @@ def main() -> None:
                 ),
                 end="",
             )
+        elif args.command == "audit-integrity":
+            report = _workspace_member_cli(lambda: store.verify_audit_integrity(args.workspace_id, args.user_id))
+            print(json.dumps(report, indent=2))
         elif args.command == "audit-retention":
             if args.retention_days is not None and args.clear:
                 raise SystemExit("choose --retention-days or --clear")

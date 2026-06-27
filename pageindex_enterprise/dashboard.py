@@ -540,6 +540,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <button id="refreshAuditButton" class="secondary" type="button">Refresh</button>
               </div>
               <button id="exportAuditButton" class="secondary" type="button">Export audit</button>
+              <button id="verifyAuditIntegrityButton" class="secondary" type="button">Verify ledger</button>
               <div class="import-row">
                 <input id="auditRetentionDaysInput" value="" placeholder="retention days" aria-label="Audit retention days">
                 <button id="saveAuditRetentionButton" type="button">Save</button>
@@ -551,6 +552,8 @@ DASHBOARD_HTML = """<!doctype html>
               </div>
               <button id="clearAuditRetentionButton" class="secondary" type="button">Clear retention</button>
               <div id="auditRetentionSummary" class="muted">Retention not loaded.</div>
+              <div id="auditIntegritySummary" class="muted">Integrity not checked.</div>
+              <pre id="auditIntegrityReportText">{}</pre>
               <div id="auditList" class="audit-list muted">No audit events loaded.</div>
               <textarea id="auditExportText" readonly placeholder="audit export output" aria-label="Audit export output"></textarea>
             </div>
@@ -703,6 +706,8 @@ DASHBOARD_HTML = """<!doctype html>
     const auditExportText = document.getElementById("auditExportText");
     const auditRetentionDaysInput = document.getElementById("auditRetentionDaysInput");
     const auditRetentionSummary = document.getElementById("auditRetentionSummary");
+    const auditIntegritySummary = document.getElementById("auditIntegritySummary");
+    const auditIntegrityReportText = document.getElementById("auditIntegrityReportText");
     const workspaceExportLink = document.getElementById("workspaceExportLink");
     const workspaceExportSummary = document.getElementById("workspaceExportSummary");
     const workspaceImportPathInput = document.getElementById("workspaceImportPathInput");
@@ -1341,6 +1346,20 @@ DASHBOARD_HTML = """<!doctype html>
       auditRetentionSummary.textContent = `${action}: matched ${result.matched}, purged ${result.purged}`;
     }
 
+    function renderAuditIntegrity(report) {
+      const checked = report && Number.isFinite(Number(report.checked)) ? Number(report.checked) : 0;
+      const legacy = report && Number.isFinite(Number(report.legacy)) ? Number(report.legacy) : 0;
+      const failures = report && Number.isFinite(Number(report.failure_count)) ? Number(report.failure_count) : 0;
+      if (report && report.ok) {
+        auditIntegritySummary.className = "status ok";
+        auditIntegritySummary.textContent = `Ledger verified: ${checked} hashed events, ${legacy} legacy, ${failures} failures.`;
+      } else {
+        auditIntegritySummary.className = "status error";
+        auditIntegritySummary.textContent = `Ledger check failed: ${checked} hashed events, ${legacy} legacy, ${failures} failures.`;
+      }
+      auditIntegrityReportText.textContent = JSON.stringify(report || {}, null, 2);
+    }
+
     function renderWorkspaceImportPreview(report) {
       const errors = Array.isArray(report.errors) ? report.errors.length : 0;
       const warnings = Array.isArray(report.warnings) ? report.warnings.length : 0;
@@ -1730,6 +1749,17 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function verifyAuditIntegrity(options = {}) {
+      if (!options.quiet) {
+        setStatus("Verifying audit ledger...");
+      }
+      const report = await api("/audit-integrity");
+      renderAuditIntegrity(report);
+      if (!options.quiet) {
+        setStatus(report.ok ? "Audit ledger verified." : "Audit ledger failed.", report.ok ? "ok" : "error");
+      }
+    }
+
     function readinessQueryString() {
       const params = new URLSearchParams();
       if (readinessCheckProviderInput.checked) {
@@ -1812,6 +1842,12 @@ DASHBOARD_HTML = """<!doctype html>
       } catch (error) {
         auditRetentionSummary.className = "muted";
         auditRetentionSummary.textContent = "Retention unavailable.";
+      }
+      try {
+        await verifyAuditIntegrity({ quiet: true });
+      } catch (error) {
+        auditIntegritySummary.className = "muted";
+        auditIntegritySummary.textContent = "Integrity unavailable.";
       }
       try {
         await refreshQueryRetention({ quiet: true });
@@ -2757,6 +2793,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("clearTokenPolicyButton").addEventListener("click", () => clearApiTokenPolicy().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshAuditButton").addEventListener("click", () => refreshAuditEvents().catch((error) => setStatus(error.message, "error")));
     document.getElementById("exportAuditButton").addEventListener("click", () => exportAuditEvents().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("verifyAuditIntegrityButton").addEventListener("click", () => verifyAuditIntegrity().catch((error) => setStatus(error.message, "error")));
     document.getElementById("exportWorkspaceButton").addEventListener("click", () => exportWorkspaceBundle().catch((error) => setStatus(error.message, "error")));
     document.getElementById("previewWorkspaceImportButton").addEventListener("click", () => previewWorkspaceImport().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshAuditRetentionButton").addEventListener("click", () => refreshAuditRetention().catch((error) => setStatus(error.message, "error")));

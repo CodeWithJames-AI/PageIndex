@@ -150,6 +150,14 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            if parsed.path == "/audit-integrity":
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(store, required_scope="audit")
+                    self._json(store.verify_audit_integrity(workspace_id, user_id))
+                finally:
+                    store.close()
+                return
             if parsed.path == "/query-runs/export":
                 params = parse_qs(parsed.query)
                 limit = _int_param(params, "limit", 500)

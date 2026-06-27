@@ -299,6 +299,33 @@ def _jsonl(rows: list[dict[str, Any]]) -> str:
     return "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
 
 
+def _audit_integrity_hash(
+    *,
+    event_id: str,
+    workspace_id: str | None,
+    user_id: str,
+    action: str,
+    target_type: str,
+    target_id: str | None,
+    details_json: str,
+    created_at: str,
+    previous_integrity_hash: str | None,
+) -> str:
+    payload = {
+        "action": action,
+        "created_at": created_at,
+        "details": json.loads(details_json),
+        "id": event_id,
+        "previous_integrity_hash": previous_integrity_hash,
+        "target_id": target_id,
+        "target_type": target_type,
+        "user_id": user_id,
+        "workspace_id": workspace_id,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _workspace_audit_export_rows(conn: sqlite3.Connection, workspace_id: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -310,10 +337,18 @@ def _workspace_audit_export_rows(conn: sqlite3.Connection, workspace_id: str) ->
         (workspace_id,),
     )
     events = []
+    redacted_chain = False
     for row in rows:
         event = dict(row)
-        event["details"] = json.loads(event.pop("details_json"))
-        events.append(_redact_audit_sink_event(event))
+        details = json.loads(event.pop("details_json"))
+        event["details"] = details
+        redacted = _redact_audit_sink_event(event)
+        # Redacted payloads cannot carry the source row hash; mark the rest of the exported chain as legacy.
+        if redacted_chain or redacted.get("details") != details:
+            redacted_chain = True
+            redacted["previous_integrity_hash"] = None
+            redacted["integrity_hash"] = None
+        events.append(redacted)
     return events
 
 
@@ -486,6 +521,14 @@ def _workspace_import_rows_for_insert(table: str, rows: list[dict[str, Any]]) ->
         ]
     if table == "virtual_nodes":
         return [row for row in rows if row.get("axis") not in {"kind", "folder"}]
+    if table == "audit_events":
+        return [
+            {
+                **row,
+                "details_json": json.dumps(row.get("details") or {}, sort_keys=True),
+            }
+            for row in rows
+        ]
     return rows
 
 
@@ -653,7 +696,9 @@ class EnterpriseStore:
               target_type TEXT NOT NULL,
               target_id TEXT,
               details_json TEXT NOT NULL DEFAULT '{}',
-              created_at TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              previous_integrity_hash TEXT,
+              integrity_hash TEXT
             );
 
             CREATE TABLE IF NOT EXISTS folders (
@@ -871,6 +916,10 @@ class EnterpriseStore:
                 "expires_at": "TEXT",
                 "scopes_json": "TEXT",
                 "last_used_at": "TEXT",
+            },
+            "audit_events": {
+                "previous_integrity_hash": "TEXT",
+                "integrity_hash": "TEXT",
             },
             "workspace_provider_configs": {
                 "provider": "TEXT",
@@ -1886,8 +1935,7 @@ class EnterpriseStore:
                 details={
                     "provider": "openai-compatible",
                     "model": model,
-                    "api_key_env_var": api_key_env_var,
-                    "api_key_configured": bool(api_key_env_var and os.environ.get(api_key_env_var)),
+                    "credential_configured": bool(api_key_env_var and os.environ.get(api_key_env_var)),
                     "timeout_seconds": timeout_seconds,
                 },
             )
@@ -2164,12 +2212,25 @@ class EnterpriseStore:
         event_id = f"aud_{uuid.uuid4().hex}"
         created_at = _now()
         details_json = json.dumps(details or {}, sort_keys=True)
+        previous_integrity_hash = self._latest_audit_integrity_hash(workspace_id)
+        integrity_hash = _audit_integrity_hash(
+            event_id=event_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            details_json=details_json,
+            created_at=created_at,
+            previous_integrity_hash=previous_integrity_hash,
+        )
         self.conn.execute(
             """
             INSERT INTO audit_events (
-              id, workspace_id, user_id, action, target_type, target_id, details_json, created_at
+              id, workspace_id, user_id, action, target_type, target_id, details_json,
+              created_at, previous_integrity_hash, integrity_hash
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -2180,6 +2241,8 @@ class EnterpriseStore:
                 target_id,
                 details_json,
                 created_at,
+                previous_integrity_hash,
+                integrity_hash,
             ),
         )
         self._pending_audit_sink_events.append(
@@ -2192,9 +2255,25 @@ class EnterpriseStore:
                 "target_id": target_id,
                 "details": json.loads(details_json),
                 "created_at": created_at,
+                "previous_integrity_hash": previous_integrity_hash,
+                "integrity_hash": integrity_hash,
             }
         )
         return event_id
+
+    def _latest_audit_integrity_hash(self, workspace_id: str | None) -> str | None:
+        row = self._one(
+            """
+            SELECT integrity_hash
+            FROM audit_events
+            WHERE (workspace_id = ? OR (workspace_id IS NULL AND ? IS NULL))
+              AND integrity_hash IS NOT NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (workspace_id, workspace_id),
+        )
+        return row["integrity_hash"] if row else None
 
     def _flush_audit_sink_events(self) -> None:
         events = self._pending_audit_sink_events
@@ -2303,7 +2382,20 @@ class EnterpriseStore:
         if export_format == "csv":
             output = io.StringIO()
             writer = csv.writer(output)
-            writer.writerow(["id", "workspace_id", "user_id", "action", "target_type", "target_id", "created_at", "details_json"])
+            writer.writerow(
+                [
+                    "id",
+                    "workspace_id",
+                    "user_id",
+                    "action",
+                    "target_type",
+                    "target_id",
+                    "created_at",
+                    "details_json",
+                    "previous_integrity_hash",
+                    "integrity_hash",
+                ]
+            )
             for event in ordered:
                 writer.writerow(
                     [
@@ -2315,10 +2407,77 @@ class EnterpriseStore:
                         event["target_id"] or "",
                         event["created_at"],
                         json.dumps(event["details"], sort_keys=True),
+                        event.get("previous_integrity_hash") or "",
+                        event.get("integrity_hash") or "",
                     ]
-                )
+            )
             return output.getvalue()
         raise ValueError("format must be jsonl or csv")
+
+    def verify_audit_integrity(self, workspace_id: str, user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, user_id, WORKSPACE_ADMIN_ROLES)
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM audit_events
+            WHERE workspace_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (workspace_id,),
+        )
+        failures: list[dict[str, Any]] = []
+        checked = 0
+        legacy = 0
+        expected_previous_hash: str | None = None
+        latest_hash: str | None = None
+        for row in rows:
+            event = dict(row)
+            stored_hash = event.get("integrity_hash")
+            stored_previous = event.get("previous_integrity_hash")
+            if not stored_hash:
+                legacy += 1
+                continue
+            expected_hash = _audit_integrity_hash(
+                event_id=event["id"],
+                workspace_id=event["workspace_id"],
+                user_id=event["user_id"],
+                action=event["action"],
+                target_type=event["target_type"],
+                target_id=event["target_id"],
+                details_json=event["details_json"],
+                created_at=event["created_at"],
+                previous_integrity_hash=stored_previous,
+            )
+            if stored_previous != expected_previous_hash:
+                failures.append(
+                    {
+                        "id": event["id"],
+                        "kind": "previous_hash_mismatch",
+                        "expected": expected_previous_hash,
+                        "actual": stored_previous,
+                    }
+                )
+            if stored_hash != expected_hash:
+                failures.append(
+                    {
+                        "id": event["id"],
+                        "kind": "integrity_hash_mismatch",
+                        "expected": expected_hash,
+                        "actual": stored_hash,
+                    }
+                )
+            checked += 1
+            expected_previous_hash = stored_hash
+            latest_hash = stored_hash
+        return {
+            "workspace_id": workspace_id,
+            "ok": not failures,
+            "checked": checked,
+            "legacy": legacy,
+            "failure_count": len(failures),
+            "failures": failures[:20],
+            "latest_integrity_hash": latest_hash,
+        }
 
     def export_workspace_bundle(
         self,

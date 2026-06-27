@@ -15731,10 +15731,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["configured_count"], 1)
             self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["healthy_count"], 1)
             self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["delivered_count"], 1)
+            self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["caught_up_count"], 1)
             self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["format_counts"]["siem-jsonl"], 1)
             self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["sink_reports"][0]["relative_path"], "audit/deploy.jsonl")
             self.assertGreaterEqual(ready_report["checks"]["audit_sink_delivery"]["sink_reports"][0]["line_count"], 1)
             self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["sink_reports"][0]["last_event"]["action"], "audit_sink.config_update")
+            self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["sink_reports"][0]["caught_up"], True)
             self.assertEqual(ready_report["checks"]["active_api_token"]["active_token_count"], 1)
             self.assertEqual(ready_report["checks"]["provider_config"]["ok"], True)
             self.assertEqual(ready_report["checks"]["provider_config"]["api_key_configured"], True)
@@ -15900,6 +15902,49 @@ class EnterpriseStoreTest(unittest.TestCase):
                 bad_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]["checks"]["target_not_directory"],
                 False,
             )
+
+    def test_deployment_check_reports_lagging_audit_sink_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "deployment-root"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Production")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.create_api_token(workspace_id, "alice", name="deploy", scopes=["read", "write", "audit"])
+            store.set_workspace_audit_jsonl_sink_config(
+                workspace_id,
+                "alice",
+                relative_path="audit/lag.jsonl",
+                format="siem-jsonl",
+            )
+            ready_report = run_deployment_check(root, require_api_token=True)
+            sink_path = root / "audit" / "lag.jsonl"
+            preserved_lines = sink_path.read_text(encoding="utf-8")
+            sink_path.unlink()
+            sink_path.mkdir()
+            store.record_audit_event(
+                workspace_id,
+                "alice",
+                "custom.after_sink_blocked",
+                target_type="probe",
+                target_id="lag_probe",
+                details={"safe": "kept"},
+            )
+            sink_path.rmdir()
+            sink_path.write_text(preserved_lines, encoding="utf-8")
+            lag_report = run_deployment_check(root, require_api_token=True)
+            store.close()
+
+            self.assertEqual(ready_report["ok"], True, ready_report)
+            self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["caught_up_count"], 1)
+            self.assertEqual(lag_report["ok"], False)
+            self.assertEqual(lag_report["checks"]["audit_sink_delivery"]["delivered_count"], 1)
+            self.assertEqual(lag_report["checks"]["audit_sink_delivery"]["caught_up_count"], 0)
+            failure = lag_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]
+            self.assertEqual(failure["workspace_id"], workspace_id)
+            self.assertEqual(failure["reason"], "delivery_lag")
+            self.assertEqual(failure["last_event"]["action"], "audit_sink.config_update")
+            self.assertEqual(failure["latest_event"]["action"], "custom.after_sink_blocked")
+            self.assertEqual(lag_report["checks"]["audit_sink_delivery"]["sink_reports"][0]["caught_up"], False)
 
     def test_http_deployment_check_requires_admin_audit_token_and_reports_readiness(self):
         with tempfile.TemporaryDirectory() as tmp:

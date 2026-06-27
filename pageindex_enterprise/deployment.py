@@ -241,6 +241,7 @@ def _unavailable_audit_sink_delivery_check(
         enabled_count=0,
         healthy_count=0,
         delivered_count=0,
+        caught_up_count=0,
         disabled_count=0,
         unconfigured_count=0,
         matching_format_count=0,
@@ -267,6 +268,7 @@ def _audit_sink_delivery_check(
             enabled_count=0,
             healthy_count=0,
             delivered_count=0,
+            caught_up_count=0,
             disabled_count=0,
             unconfigured_count=0,
             matching_format_count=0,
@@ -280,6 +282,7 @@ def _audit_sink_delivery_check(
     enabled_count = 0
     healthy_count = 0
     delivered_count = 0
+    caught_up_count = 0
     disabled_count = 0
     matching_format_count = 0
     format_counts = {"jsonl": 0, "siem-jsonl": 0}
@@ -326,16 +329,37 @@ def _audit_sink_delivery_check(
             )
             continue
         enabled_count += 1
+        latest_event = _latest_audit_event_summary(store, workspace_id)
         report = store.get_workspace_audit_jsonl_sink_status(workspace_id, user_id)
         delivered = (
             bool(report.get("sink_exists"))
             and int(report.get("line_count") or 0) > 0
             and report.get("last_line_valid") is True
         )
+        caught_up = delivered and (
+            latest_event is None
+            or (
+                isinstance(report.get("last_event"), dict)
+                and report["last_event"].get("id") == latest_event.get("id")
+            )
+        )
         if report.get("ok"):
             healthy_count += 1
             if delivered:
                 delivered_count += 1
+                if caught_up:
+                    caught_up_count += 1
+                else:
+                    failures.append(
+                        {
+                            "workspace_id": workspace_id,
+                            "reason": "delivery_lag",
+                            "relative_path": report.get("relative_path"),
+                            "format": report.get("format"),
+                            "last_event": report.get("last_event"),
+                            "latest_event": latest_event,
+                        }
+                    )
             else:
                 failures.append(
                     {
@@ -383,7 +407,9 @@ def _audit_sink_delivery_check(
                 "line_count": report.get("line_count"),
                 "last_line_valid": report.get("last_line_valid"),
                 "last_event": report.get("last_event"),
+                "latest_event": latest_event,
                 "delivered": delivered,
+                "caught_up": caught_up,
             }
         )
     if missing_operators:
@@ -405,6 +431,7 @@ def _audit_sink_delivery_check(
         enabled_count=enabled_count,
         healthy_count=healthy_count,
         delivered_count=delivered_count,
+        caught_up_count=caught_up_count,
         disabled_count=disabled_count,
         unconfigured_count=len(unconfigured),
         matching_format_count=matching_format_count,
@@ -414,6 +441,20 @@ def _audit_sink_delivery_check(
         unconfigured_workspace_ids=unconfigured[:10],
         failing_workspaces=failures[:10],
     )
+
+
+def _latest_audit_event_summary(store: EnterpriseStore, workspace_id: str) -> dict[str, Any] | None:
+    row = store.conn.execute(
+        """
+        SELECT id, action, user_id, target_type, created_at, integrity_hash
+        FROM audit_events
+        WHERE workspace_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (workspace_id,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def _admin_actor_by_workspace(store: EnterpriseStore) -> dict[str, str]:

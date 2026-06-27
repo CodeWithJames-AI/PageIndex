@@ -6481,7 +6481,22 @@ class EnterpriseStore:
         source_set = self._query_source_set_row(workspace_id, source_set_id)
         if not source_set:
             return False
+        now = _now()
         with self._atomic():
+            scoped_conversation_count = int(
+                self._one(
+                    "SELECT COUNT(*) AS count FROM conversations WHERE workspace_id = ? AND source_set_id = ?",
+                    (workspace_id, source_set["id"]),
+                )["count"]
+            )
+            self.conn.execute(
+                """
+                UPDATE conversations
+                SET source_set_id = NULL, updated_at = ?
+                WHERE workspace_id = ? AND source_set_id = ?
+                """,
+                (now, workspace_id, source_set["id"]),
+            )
             self.conn.execute("DELETE FROM query_source_sets WHERE id = ? AND workspace_id = ?", (source_set["id"], workspace_id))
             self._insert_audit_event(
                 workspace_id,
@@ -6489,7 +6504,7 @@ class EnterpriseStore:
                 "query_source_set.delete",
                 target_type="query_source_set",
                 target_id=source_set["id"],
-                details={"name": source_set["name"]},
+                details={"name": source_set["name"], "scoped_conversation_count": scoped_conversation_count},
             )
         return True
 

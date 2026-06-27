@@ -1807,6 +1807,30 @@ class EnterpriseStore:
             self.require_workspace_role(workspace_id, actor_user_id, {"owner"})
         if previous_role == "owner" and self._workspace_owner_count(workspace_id) <= 1:
             raise ValueError("workspace must keep at least one owner")
+        group_membership_count = int(
+            self._one(
+                "SELECT COUNT(*) AS count FROM workspace_group_members WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, user_id),
+            )["count"]
+        )
+        api_token_count = int(
+            self._one(
+                "SELECT COUNT(*) AS count FROM api_tokens WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, user_id),
+            )["count"]
+        )
+        document_access_grant_count = int(
+            self._one(
+                "SELECT COUNT(*) AS count FROM document_access_grants WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, user_id),
+            )["count"]
+        )
+        folder_access_grant_count = int(
+            self._one(
+                "SELECT COUNT(*) AS count FROM folder_access_grants WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, user_id),
+            )["count"]
+        )
         with self._atomic():
             cursor = self.conn.execute(
                 "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
@@ -1818,13 +1842,31 @@ class EnterpriseStore:
                     "DELETE FROM workspace_group_members WHERE workspace_id = ? AND user_id = ?",
                     (workspace_id, user_id),
                 )
+                self.conn.execute(
+                    "DELETE FROM api_tokens WHERE workspace_id = ? AND user_id = ?",
+                    (workspace_id, user_id),
+                )
+                self.conn.execute(
+                    "DELETE FROM document_access_grants WHERE workspace_id = ? AND user_id = ?",
+                    (workspace_id, user_id),
+                )
+                self.conn.execute(
+                    "DELETE FROM folder_access_grants WHERE workspace_id = ? AND user_id = ?",
+                    (workspace_id, user_id),
+                )
                 self._insert_audit_event(
                     workspace_id,
                     actor_user_id,
                     "workspace_member.remove",
                     target_type="workspace_member",
                     target_id=user_id,
-                    details={"previous_role": previous_role},
+                    details={
+                        "previous_role": previous_role,
+                        "group_membership_count": group_membership_count,
+                        "api_token_count": api_token_count,
+                        "document_access_grant_count": document_access_grant_count,
+                        "folder_access_grant_count": folder_access_grant_count,
+                    },
                 )
         return removed
 

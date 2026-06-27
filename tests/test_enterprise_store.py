@@ -346,23 +346,71 @@ class EnterpriseStoreTest(unittest.TestCase):
 
     def test_workspace_member_lifecycle_is_owner_admin_audited_and_invalidates_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = EnterpriseStore(Path(tmp) / "workspace")
+            tmp_path = Path(tmp)
+            source = tmp_path / "member-remove-secret.txt"
+            source.write_text("Member removal stale grant evidence.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
             store.add_workspace_member(workspace_id, "carol", "admin", actor_user_id="alice")
+            folder_id = store.create_folder("Member removal folder", workspace_id=workspace_id, actor_user_id="alice")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Member removal memo")
+            store.set_document_access_mode(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+            group = store.create_workspace_group(workspace_id, "alice", "Temporary reviewers")
+            store.add_workspace_group_member(workspace_id, "alice", group["id"], "bob")
+            store.grant_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice", user_id="bob")
+            store.grant_folder_access(folder_id, workspace_id=workspace_id, actor_user_id="alice", user_id="bob")
             bob_token = store.create_api_token(workspace_id, "bob", name="bob")
 
             members = store.list_workspace_members(workspace_id, "alice")
             carol_removed = store.remove_workspace_member(workspace_id, "bob", "carol")
+            remaining_bob_group_memberships = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM workspace_group_members WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, "bob"),
+            ).fetchone()["count"]
+            remaining_bob_tokens = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM api_tokens WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, "bob"),
+            ).fetchone()["count"]
+            remaining_bob_document_grants = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM document_access_grants WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, "bob"),
+            ).fetchone()["count"]
+            remaining_bob_folder_grants = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM folder_access_grants WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, "bob"),
+            ).fetchone()["count"]
             events = store.list_audit_events(workspace_id, "alice")
             actions = [event["action"] for event in events]
+            remove_event = next(event for event in events if event["action"] == "workspace_member.remove")
+            serialized_events = json.dumps(events, sort_keys=True)
 
             self.assertEqual([member["user_id"] for member in members], ["alice", "bob", "carol"])
             self.assertEqual({member["user_id"]: member["role"] for member in members}, {"alice": "owner", "bob": "member", "carol": "admin"})
             self.assertTrue(carol_removed)
             self.assertFalse(store.user_can_access_workspace(workspace_id, "bob"))
             self.assertIsNone(store.verify_api_token(bob_token["token"]))
+            self.assertEqual(remaining_bob_group_memberships, 0)
+            self.assertEqual(remaining_bob_tokens, 0)
+            self.assertEqual(remaining_bob_document_grants, 0)
+            self.assertEqual(remaining_bob_folder_grants, 0)
+            self.assertEqual(
+                remove_event["details"],
+                {
+                    "previous_role": "member",
+                    "group_membership_count": 1,
+                    "api_token_count": 1,
+                    "document_access_grant_count": 1,
+                    "folder_access_grant_count": 1,
+                },
+            )
+            self.assertNotIn(bob_token["token"], serialized_events)
             self.assertIn("workspace_member.upsert", actions)
             self.assertIn("workspace_member.remove", actions)
             self.assertFalse(store.remove_workspace_member(workspace_id, "missing", "alice"))

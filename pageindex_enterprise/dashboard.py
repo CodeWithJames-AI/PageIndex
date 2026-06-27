@@ -255,6 +255,9 @@ DASHBOARD_HTML = """<!doctype html>
       gap: 8px;
       margin-top: 8px;
     }
+    .conversation .doc-actions {
+      grid-template-columns: 1fr;
+    }
     .access-actions {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
@@ -1170,13 +1173,21 @@ DASHBOARD_HTML = """<!doctype html>
       }
       conversationList.className = "conversation-list";
       conversationList.innerHTML = conversations.map((conversation) => `
-        <button class="conversation ${conversation.id === activeConversationId ? "active" : "secondary"}" type="button" data-conversation-id="${escapeHtml(conversation.id)}">
-          <strong>${escapeHtml(conversation.title)}</strong>
-          <div class="muted">${escapeHtml(conversation.message_count || 0)} messages</div>
-        </button>
+        <article class="conversation ${conversation.id === activeConversationId ? "active" : ""}">
+          <button class="secondary" type="button" data-conversation-id="${escapeHtml(conversation.id)}">
+            <strong>${escapeHtml(conversation.title)}</strong>
+            <div class="muted">${escapeHtml(conversation.message_count || 0)} messages</div>
+          </button>
+          <div class="doc-actions">
+            <button class="secondary" type="button" data-archive-conversation-id="${escapeHtml(conversation.id)}">Archive</button>
+          </div>
+        </article>
       `).join("");
       conversationList.querySelectorAll("[data-conversation-id]").forEach((button) => {
         button.addEventListener("click", () => selectConversation(button.dataset.conversationId));
+      });
+      conversationList.querySelectorAll("[data-archive-conversation-id]").forEach((button) => {
+        button.addEventListener("click", () => archiveConversation(button.dataset.archiveConversationId).catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -2045,6 +2056,24 @@ DASHBOARD_HTML = """<!doctype html>
       }
       conversationExportText.value = text;
       setStatus("Conversation exported.", "ok");
+    }
+
+    async function archiveConversation(conversationId) {
+      if (!window.confirm("Archive this conversation?")) {
+        setStatus("Archive cancelled.", "warn");
+        return;
+      }
+      setStatus("Archiving conversation...");
+      await api(`/conversations/${encodeURIComponent(conversationId)}/archive`, {
+        method: "POST",
+        body: JSON.stringify({ archived: true })
+      });
+      if (activeConversationId === conversationId) {
+        activeConversationId = "";
+        renderMessages([]);
+      }
+      await refreshConversations();
+      setStatus("Conversation archived.", "ok");
     }
 
     async function saveMember() {

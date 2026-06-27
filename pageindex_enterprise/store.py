@@ -858,7 +858,8 @@ class EnterpriseStore:
               created_by TEXT NOT NULL,
               title TEXT NOT NULL,
               created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              archived_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS conversation_messages (
@@ -998,6 +999,9 @@ class EnterpriseStore:
                 "source_name": "TEXT",
                 "page_count": "INTEGER",
                 "line_count": "INTEGER",
+            },
+            "conversations": {
+                "archived_at": "TEXT",
             },
             "virtual_nodes": {
                 "doc_id": "TEXT REFERENCES documents(id) ON DELETE CASCADE",
@@ -2726,7 +2730,7 @@ class EnterpriseStore:
             "conversations.jsonl": _rows(
                 self.conn.execute(
                     """
-                    SELECT id, workspace_id, created_by, title, created_at, updated_at
+                    SELECT id, workspace_id, created_by, title, created_at, updated_at, archived_at
                     FROM conversations
                     WHERE workspace_id = ?
                     ORDER BY created_at, id
@@ -3211,6 +3215,7 @@ class EnterpriseStore:
         actor_user_id: str,
         *,
         expected_workspace_id: str | None = None,
+        allow_archived: bool = False,
     ) -> dict[str, Any]:
         actor_user_id = actor_user_id.strip()
         conversation_id = conversation_id.strip()
@@ -3225,6 +3230,8 @@ class EnterpriseStore:
         self.require_workspace_access(conversation["workspace_id"], actor_user_id)
         if conversation["created_by"] != actor_user_id:
             raise PermissionError("conversation access denied")
+        if conversation.get("archived_at") and not allow_archived:
+            raise PermissionError("conversation archived")
         return conversation
 
     def _require_workspace(self, workspace_id: str | None) -> None:
@@ -4300,9 +4307,17 @@ class EnterpriseStore:
             "title": title,
             "created_at": now,
             "updated_at": now,
+            "archived_at": None,
         }
 
-    def list_conversations(self, workspace_id: str, actor_user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    def list_conversations(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        limit: int = 50,
+        *,
+        include_archived: bool = False,
+    ) -> list[dict[str, Any]]:
         actor_user_id = actor_user_id.strip()
         self.require_workspace_access(workspace_id, actor_user_id)
         limit = max(1, min(int(limit), 100))
@@ -4312,14 +4327,58 @@ class EnterpriseStore:
                    COUNT(m.id) AS message_count
             FROM conversations c
             LEFT JOIN conversation_messages m ON m.conversation_id = c.id
-            WHERE c.workspace_id = ? AND c.created_by = ?
+            WHERE c.workspace_id = ? AND c.created_by = ? AND (? OR c.archived_at IS NULL)
             GROUP BY c.id
             ORDER BY c.updated_at DESC, c.created_at DESC
             LIMIT ?
             """,
-            (workspace_id, actor_user_id, limit),
+            (workspace_id, actor_user_id, int(include_archived), limit),
         )
         return [dict(row) for row in rows]
+
+    def archive_conversation(
+        self,
+        conversation_id: str,
+        actor_user_id: str,
+        *,
+        archived: bool = True,
+        expected_workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(archived, bool):
+            raise ValueError("archived must be a boolean")
+        actor_user_id = actor_user_id.strip()
+        conversation = self._conversation_for_actor(
+            conversation_id,
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+            allow_archived=True,
+        )
+        self.require_workspace_role(conversation["workspace_id"], actor_user_id, WORKSPACE_WRITE_ROLES)
+        now = _now()
+        next_archived_at = now if archived else None
+        with self._atomic():
+            self.conn.execute(
+                """
+                UPDATE conversations
+                SET archived_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (next_archived_at, now, conversation["id"]),
+            )
+            self._insert_audit_event(
+                conversation["workspace_id"],
+                actor_user_id,
+                "conversation.archive" if archived else "conversation.unarchive",
+                target_type="conversation",
+                target_id=conversation["id"],
+                details={"archived": archived},
+            )
+        return self._conversation_for_actor(
+            conversation["id"],
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+            allow_archived=True,
+        )
 
     def list_conversation_messages(
         self,

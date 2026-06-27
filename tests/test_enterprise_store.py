@@ -1145,16 +1145,43 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual({event["details"]["format"] for event in export_events}, {"jsonl", "markdown"})
             self.assertNotIn("renewal", serialized_export_events)
             self.assertNotIn("risk", serialized_export_events)
+            archived = store.archive_conversation(conversation["id"], "alice")
+            hidden_conversations = store.list_conversations(workspace_id, "alice")
+            archived_conversations = store.list_conversations(workspace_id, "alice", include_archived=True)
+            with self.assertRaisesRegex(PermissionError, "conversation archived"):
+                store.list_conversation_messages(conversation["id"], "alice")
+            with self.assertRaisesRegex(PermissionError, "conversation archived"):
+                store.export_conversation_transcript(conversation["id"], "alice")
+            with self.assertRaisesRegex(PermissionError, "conversation archived"):
+                store.chat_message(conversation["id"], "alice", "restore check")
+            restored = store.archive_conversation(conversation["id"], "alice", archived=False)
+            restored_conversations = store.list_conversations(workspace_id, "alice")
+            lifecycle_actions = {
+                event["action"]
+                for event in store.list_audit_events(workspace_id, "alice", limit=30)
+                if event["target_id"] == conversation["id"]
+            }
+            self.assertIsNotNone(archived["archived_at"])
+            self.assertNotIn(conversation["id"], [item["id"] for item in hidden_conversations])
+            self.assertIn(conversation["id"], [item["id"] for item in archived_conversations])
+            self.assertIsNone(restored["archived_at"])
+            self.assertIn(conversation["id"], [item["id"] for item in restored_conversations])
+            self.assertIn("conversation.archive", lifecycle_actions)
+            self.assertIn("conversation.unarchive", lifecycle_actions)
             with self.assertRaisesRegex(PermissionError, "conversation access denied"):
                 store.list_conversation_messages(conversation["id"], "bob")
             with self.assertRaisesRegex(PermissionError, "conversation access denied"):
                 store.export_conversation_transcript(conversation["id"], "bob")
             with self.assertRaisesRegex(PermissionError, "conversation access denied"):
                 store.chat_message(conversation["id"], "bob", "show me alice history")
+            with self.assertRaisesRegex(PermissionError, "conversation access denied"):
+                store.archive_conversation(conversation["id"], "bob")
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.create_conversation(workspace_id, "vivi", title="blocked")
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.chat_message(viewer_conversation["id"], "vivi", "blocked")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.archive_conversation(viewer_conversation["id"], "vivi")
 
     def test_conversation_chat_rolls_back_messages_when_query_audit_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1491,6 +1518,63 @@ class EnterpriseStoreTest(unittest.TestCase):
                 text=True,
                 check=True,
             ).stdout
+            archived = json.loads(
+                subprocess.run(
+                    [*base, "archive-conversation", conversation["id"], "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            hidden_conversations = json.loads(
+                subprocess.run(
+                    [*base, "list-conversations", "ws_cli", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            archived_conversations = json.loads(
+                subprocess.run(
+                    [*base, "list-conversations", "ws_cli", "alice", "--include-archived"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            blocked_messages = subprocess.run(
+                [*base, "conversation-messages", conversation["id"], "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            restored = json.loads(
+                subprocess.run(
+                    [*base, "archive-conversation", conversation["id"], "alice", "--restore"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            restored_conversations = json.loads(
+                subprocess.run(
+                    [*base, "list-conversations", "ws_cli", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
             exported_lines = [json.loads(line) for line in exported_jsonl.splitlines()]
 
             self.assertEqual(conversations[0]["title"], "CLI chat")
@@ -1503,6 +1587,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual([line["message"]["role"] for line in exported_lines[1:]], ["user", "assistant"])
             self.assertIn("# CLI chat", exported_markdown)
             self.assertIn("```text\nrenewal risk\n```", exported_markdown)
+            self.assertIsNotNone(archived["archived_at"])
+            self.assertEqual(hidden_conversations, [])
+            self.assertEqual(archived_conversations[0]["id"], conversation["id"])
+            self.assertNotEqual(blocked_messages.returncode, 0)
+            self.assertIn("conversation archived", blocked_messages.stderr)
+            self.assertNotIn("Traceback", blocked_messages.stderr)
+            self.assertIsNone(restored["archived_at"])
+            self.assertEqual(restored_conversations[0]["id"], conversation["id"])
 
     def test_conversation_cli_errors_do_not_print_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2941,6 +3033,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.query_corpus("backup", workspace_id=workspace_id, actor_user_id="alice")
             conversation = store.create_conversation(workspace_id, "alice", title="Export chat")
             store.chat_message(conversation["id"], "alice", "backup question")
+            archived_conversation = store.archive_conversation(conversation["id"], "alice")
             store.set_workspace_provider_config(
                 workspace_id,
                 "alice",
@@ -3001,6 +3094,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(documents[0]["id"], doc_id)
             self.assertEqual(pages[0]["content"], "Workspace export content for backup.")
             self.assertEqual(conversations[0]["title"], "Export chat")
+            self.assertEqual(conversations[0]["archived_at"], archived_conversation["archived_at"])
             self.assertTrue(any(message["content"] == "backup question" for message in messages))
             self.assertEqual(provider[0]["api_key_env_var"], "PAGEINDEX_EXPORT_PROVIDER_KEY")
             self.assertIn("api_token.create", [event["action"] for event in audit_events])
@@ -7389,6 +7483,36 @@ class EnterpriseStoreTest(unittest.TestCase):
                     f"{base}/conversations/{conversation['id']}/export?format=markdown",
                     headers=alice_headers,
                 )
+                archived = _post_json(
+                    f"{base}/conversations/{conversation['id']}/archive",
+                    {"archived": True},
+                    headers=alice_headers,
+                )["conversation"]
+                hidden_conversations = _get_json(f"{base}/conversations", headers=alice_headers)["conversations"]
+                archived_conversations = _get_json(
+                    f"{base}/conversations?include_archived=true",
+                    headers=alice_headers,
+                )["conversations"]
+                archived_messages = _get_error(
+                    f"{base}/conversations/{conversation['id']}/messages",
+                    headers=alice_headers,
+                )
+                archived_export = _get_error(
+                    f"{base}/conversations/{conversation['id']}/export",
+                    headers=alice_headers,
+                )
+                archived_append = _post_json(
+                    f"{base}/conversations/{conversation['id']}/messages",
+                    {"message": "archived append"},
+                    headers=alice_headers,
+                    status=403,
+                )
+                restored = _post_json(
+                    f"{base}/conversations/{conversation['id']}/archive",
+                    {"archived": False},
+                    headers=alice_headers,
+                )["conversation"]
+                visible_conversations = _get_json(f"{base}/conversations", headers=alice_headers)["conversations"]
                 bob_messages = _get_error(
                     f"{base}/conversations/{conversation['id']}/messages",
                     headers=bob_headers,
@@ -7400,6 +7524,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                 bob_append = _post_json(
                     f"{base}/conversations/{conversation['id']}/messages",
                     {"message": "read alice"},
+                    headers=bob_headers,
+                    status=403,
+                )
+                bob_archive = _post_json(
+                    f"{base}/conversations/{conversation['id']}/archive",
+                    {"archived": True},
                     headers=bob_headers,
                     status=403,
                 )
@@ -7425,11 +7555,20 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(json.loads(exported_jsonl.splitlines()[0])["conversation"]["id"], conversation["id"])
                 self.assertIn("# HTTP chat", exported_markdown)
                 self.assertIn("```text\nrenewal risk\n```", exported_markdown)
+                self.assertIsNotNone(archived["archived_at"])
+                self.assertEqual(hidden_conversations, [])
+                self.assertEqual(archived_conversations[0]["id"], conversation["id"])
+                self.assertEqual(archived_messages["error"], "conversation archived")
+                self.assertEqual(archived_export["error"], "conversation archived")
+                self.assertEqual(archived_append["error"], "conversation archived")
+                self.assertIsNone(restored["archived_at"])
+                self.assertEqual(visible_conversations[0]["id"], conversation["id"])
                 self.assertEqual(bob_messages["status"], 403)
                 self.assertEqual(bob_messages["error"], "conversation access denied")
                 self.assertEqual(bob_export["status"], 403)
                 self.assertEqual(bob_export["error"], "conversation access denied")
                 self.assertEqual(bob_append["error"], "conversation access denied")
+                self.assertEqual(bob_archive["error"], "conversation access denied")
                 self.assertEqual(viewer_create["error"], "workspace role denied")
                 self.assertEqual(viewer_append["error"], "workspace role denied")
                 self.assertTrue(chat["result"]["verification"]["ok"], chat["result"]["verification"]["errors"])
@@ -8811,6 +8950,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("conversationExportFormatInput", body)
                     self.assertIn("conversationExportText", body)
                     self.assertIn("exportConversation", body)
+                    self.assertIn("/archive", body)
+                    self.assertIn("archiveConversation", body)
+                    self.assertIn("data-archive-conversation-id", body)
                     self.assertIn("conversationList", body)
                     self.assertIn("chatInput", body)
                     self.assertIn("chatButton", body)

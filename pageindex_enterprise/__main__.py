@@ -312,6 +312,12 @@ def main() -> None:
     list_conversations.add_argument("workspace_id")
     list_conversations.add_argument("user_id")
     list_conversations.add_argument("--limit", type=int, default=50)
+    list_conversations.add_argument("--include-archived", action="store_true")
+
+    archive_conversation = sub.add_parser("archive-conversation")
+    archive_conversation.add_argument("conversation_id")
+    archive_conversation.add_argument("user_id")
+    archive_conversation.add_argument("--restore", action="store_true")
 
     conversation_messages = sub.add_parser("conversation-messages")
     conversation_messages.add_argument("conversation_id")
@@ -873,7 +879,27 @@ def main() -> None:
         elif args.command == "list-conversations":
             print(
                 json.dumps(
-                    _conversation_cli(lambda: store.list_conversations(args.workspace_id, args.user_id, limit=args.limit)),
+                    _conversation_cli(
+                        lambda: store.list_conversations(
+                            args.workspace_id,
+                            args.user_id,
+                            limit=args.limit,
+                            include_archived=args.include_archived,
+                        )
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.command == "archive-conversation":
+            print(
+                json.dumps(
+                    _conversation_cli(
+                        lambda: store.archive_conversation(
+                            args.conversation_id,
+                            args.user_id,
+                            archived=not args.restore,
+                        )
+                    ),
                     indent=2,
                 )
             )

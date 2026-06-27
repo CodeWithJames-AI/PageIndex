@@ -51,10 +51,20 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/conversations":
                 params = parse_qs(parsed.query)
                 limit = _int_param(params, "limit", 50)
+                include_archived = _bool_param(params, "include_archived", False)
                 store = EnterpriseStore(self.server.root)
                 try:
                     workspace_id, user_id = self._workspace_context(store, required_scope="read")
-                    self._json({"conversations": store.list_conversations(workspace_id, user_id, limit=limit)})
+                    self._json(
+                        {
+                            "conversations": store.list_conversations(
+                                workspace_id,
+                                user_id,
+                                limit=limit,
+                                include_archived=include_archived,
+                            )
+                        }
+                    )
                 finally:
                     store.close()
                 return
@@ -408,6 +418,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/conversations":
                 self._create_conversation(payload)
                 return
+            conversation_archive_id = _conversation_archive_path(parsed.path)
+            if conversation_archive_id:
+                self._archive_conversation(conversation_archive_id, payload)
+                return
             conversation_id = _conversation_messages_path(parsed.path)
             if conversation_id:
                 self._chat_message(conversation_id, payload)
@@ -641,6 +655,24 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     limit=int(payload.get("limit", 8)),
                     expected_workspace_id=workspace_id,
                 )
+            )
+        finally:
+            store.close()
+
+    def _archive_conversation(self, conversation_id: str, payload: dict[str, Any]) -> None:
+        archived = _bool_body_value(payload.get("archived", True), "archived")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            self._json(
+                {
+                    "conversation": store.archive_conversation(
+                        conversation_id,
+                        user_id,
+                        archived=archived,
+                        expected_workspace_id=workspace_id,
+                    )
+                }
             )
         finally:
             store.close()
@@ -1975,6 +2007,13 @@ def _rough_token_count(value: str) -> int:
 def _conversation_messages_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "messages":
+        return parts[1]
+    return None
+
+
+def _conversation_archive_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "archive":
         return parts[1]
     return None
 

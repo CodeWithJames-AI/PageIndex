@@ -833,6 +833,7 @@ DASHBOARD_HTML = """<!doctype html>
             <button class="secondary" type="button" data-versions-doc-id="${escapeHtml(doc.id)}">Versions</button>
             <button class="secondary" type="button" data-access-doc-id="${escapeHtml(doc.id)}">Access</button>
             <button class="secondary" type="button" data-reindex-doc-id="${escapeHtml(doc.id)}">Reindex</button>
+            <button class="secondary" type="button" data-reindex-upload-doc-id="${escapeHtml(doc.id)}">Reindex upload</button>
           </div>
         </article>
       `).join("");
@@ -847,6 +848,9 @@ DASHBOARD_HTML = """<!doctype html>
       });
       documentList.querySelectorAll("[data-reindex-doc-id]").forEach((button) => {
         button.addEventListener("click", () => reindexDocument(button.dataset.reindexDocId).catch((error) => setStatus(error.message, "error")));
+      });
+      documentList.querySelectorAll("[data-reindex-upload-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => reindexDocumentUpload(button.dataset.reindexUploadDocId).catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -2592,6 +2596,38 @@ DASHBOARD_HTML = """<!doctype html>
         method: "PUT",
         body: JSON.stringify(withSelectedFolder({ path, name: name || undefined }))
       });
+      if (!payload.updated) {
+        setStatus("Document not found.", "warn");
+        return;
+      }
+      setStatus(`Reindexed ${payload.document.id}.`, "ok");
+      await refreshDocuments();
+    }
+
+    async function reindexDocumentUpload(docId) {
+      const file = uploadInput.files && uploadInput.files[0];
+      if (!file) {
+        setStatus("Choose a replacement file.", "warn");
+        return;
+      }
+      const name = fileNameInput.value.trim() || file.name;
+      const form = new FormData();
+      form.append("file", file);
+      form.append("name", name);
+      const folderId = selectedFolderId();
+      if (folderId) {
+        form.append("folder_id", folderId);
+      }
+      setStatus("Reindexing upload...");
+      const response = await fetch(`/documents/${encodeURIComponent(docId)}/reindex-upload`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: form
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || response.statusText);
+      }
       if (!payload.updated) {
         setStatus("Document not found.", "warn");
         return;

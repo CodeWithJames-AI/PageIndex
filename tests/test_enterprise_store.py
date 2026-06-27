@@ -8036,6 +8036,94 @@ class EnterpriseStoreTest(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
+    def test_http_reindex_upload_replaces_document_from_multipart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            original = tmp_path / "reindex-upload-old.txt"
+            original.write_text("Multipart legacy marker.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            other_workspace = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "viewer", "viewer")
+            store.add_workspace_member(other_workspace, "mallory", "owner")
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            viewer_token_record = store.create_api_token(workspace_id, "viewer", name="viewer")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), viewer_token_record["id"]),
+            )
+            store.conn.commit()
+            viewer_token = viewer_token_record["token"]
+            other_token = store.create_api_token(other_workspace, "mallory", name="other")["token"]
+            doc_id = store.ingest_file(original, workspace_id=workspace_id, actor_user_id="alice", name="Multipart reindex")
+            old_result = store.query_corpus("legacy", workspace_id=workspace_id, actor_user_id="alice")
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            upload_url = f"{base}/documents/{doc_id}/reindex-upload"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            try:
+                viewer = _post_multipart(
+                    upload_url,
+                    {"file": ("viewer.txt", b"Viewer upload blocked.")},
+                    headers={"Authorization": f"Bearer {viewer_token}"},
+                    status=403,
+                )
+                foreign = _post_multipart(
+                    upload_url,
+                    {"file": ("foreign.txt", b"Foreign upload masked.")},
+                    headers={"Authorization": f"Bearer {other_token}"},
+                )
+                missing = _post_multipart(
+                    f"{base}/documents/doc_missing/reindex-upload",
+                    {"file": ("missing.txt", b"Missing upload masked.")},
+                    headers=owner_headers,
+                )
+                owner = _post_multipart(
+                    upload_url,
+                    {
+                        "file": ("../reindex-upload-new.txt", b"Multipart replacement marker."),
+                        "name": "Multipart uploaded replacement",
+                    },
+                    headers=owner_headers,
+                )
+                old_after_replace = _post_json(f"{base}/query", {"query": "legacy"}, headers=owner_headers)
+                new_result = _post_json(f"{base}/query", {"query": "replacement"}, headers=owner_headers)
+                versions = _get_json(f"{base}/documents/{doc_id}/versions", headers=owner_headers)
+                pages = _get_json(f"{base}/documents/{doc_id}/pages", headers=owner_headers)
+                stored_path = Path(owner["stored_path"]).resolve()
+                store = EnterpriseStore(root)
+                try:
+                    stale_count = store.conn.execute(
+                        "SELECT COUNT(*) AS count FROM evidence WHERE run_id = ?",
+                        (old_result["run_id"],),
+                    ).fetchone()["count"]
+                finally:
+                    store.close()
+
+                self.assertEqual(viewer["error"], "workspace role denied")
+                self.assertEqual(foreign, {"updated": False})
+                self.assertEqual(missing, {"updated": False})
+                self.assertTrue(owner["updated"])
+                self.assertEqual(owner["document"]["id"], doc_id)
+                self.assertEqual(owner["document"]["name"], "Multipart uploaded replacement")
+                self.assertEqual(old_after_replace["citations"], [])
+                self.assertEqual(new_result["citations"][0]["doc_id"], doc_id)
+                self.assertEqual(pages["pages"][0]["content"], "Multipart replacement marker.")
+                self.assertEqual([version["action"] for version in versions["versions"]], ["document.reindex", "document.ingest"])
+                self.assertIn("reindex-upload-new.txt", versions["versions"][0]["source_name"])
+                self.assertTrue(_is_relative_to(stored_path, (root / "uploads" / workspace_id).resolve()))
+                self.assertNotIn("..", stored_path.name)
+                self.assertEqual(stale_count, 0)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_http_conversation_routes_reject_cross_workspace_tokens_and_headers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -8581,6 +8669,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("/documents", body)
                     self.assertIn("/ingest-file", body)
                     self.assertIn("/upload-file", body)
+                    self.assertIn("/reindex-upload", body)
                     self.assertIn("/import-structure", body)
                     self.assertIn("/query", body)
                     self.assertIn("/query-runs", body)
@@ -8588,10 +8677,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("refreshQueryRuns", body)
                     self.assertIn("loadQueryRunTrace", body)
                     self.assertIn("reindexDocument", body)
+                    self.assertIn("reindexDocumentUpload", body)
                     self.assertIn("loadDocumentPages", body)
                     self.assertIn("pagePreviewList", body)
                     self.assertIn("data-pages-doc-id", body)
                     self.assertIn("data-reindex-doc-id", body)
+                    self.assertIn("data-reindex-upload-doc-id", body)
                     self.assertIn("/access", body)
                     self.assertIn("documentAccessPanel", body)
                     self.assertIn("loadDocumentAccess", body)

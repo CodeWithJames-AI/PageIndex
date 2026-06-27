@@ -400,6 +400,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/upload-file":
                 self._upload_file()
                 return
+            reindex_upload_id = _document_reindex_upload_path(parsed.path)
+            if reindex_upload_id:
+                self._reindex_document_upload(reindex_upload_id)
+                return
             payload = self._read_json()
             if parsed.path == "/conversations":
                 self._create_conversation(payload)
@@ -931,14 +935,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope="write")
             upload = self._read_multipart_file()
-            uploads_root = Path(self.server.root).expanduser().resolve() / "uploads"
-            upload_dir = (uploads_root / _safe_path_segment(workspace_id)).resolve()
-            if not _is_relative_to(upload_dir, uploads_root.resolve()):
-                raise ValueError("workspace upload path is invalid")
-            upload_dir.mkdir(parents=True, exist_ok=True)
-            filename = _safe_upload_filename(upload["filename"])
-            stored_path = upload_dir / f"{uuid.uuid4().hex}_{filename}"
-            stored_path.write_bytes(upload["content"])
+            stored_path, filename = self._store_upload_file(workspace_id, upload)
             try:
                 doc_id = store.ingest_file(
                     stored_path,
@@ -954,6 +951,17 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             self._json({"doc_id": doc_id, "stored_path": str(stored_path)}, HTTPStatus.CREATED)
         finally:
             store.close()
+
+    def _store_upload_file(self, workspace_id: str, upload: dict[str, Any]) -> tuple[Path, str]:
+        uploads_root = Path(self.server.root).expanduser().resolve() / "uploads"
+        upload_dir = (uploads_root / _safe_path_segment(workspace_id)).resolve()
+        if not _is_relative_to(upload_dir, uploads_root.resolve()):
+            raise ValueError("workspace upload path is invalid")
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        filename = _safe_upload_filename(upload["filename"])
+        stored_path = upload_dir / f"{uuid.uuid4().hex}_{filename}"
+        stored_path.write_bytes(upload["content"])
+        return stored_path, filename
 
     def _reindex_document(self, doc_id: str, payload: dict[str, Any]) -> None:
         path = payload.get("path")
@@ -974,6 +982,32 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 self._json({"updated": False})
                 return
             self._json({"updated": True, "document": document})
+        finally:
+            store.close()
+
+    def _reindex_document_upload(self, doc_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            upload = self._read_multipart_file()
+            stored_path, filename = self._store_upload_file(workspace_id, upload)
+            try:
+                document = store.reindex_document_file(
+                    doc_id,
+                    stored_path,
+                    name=upload.get("name") or filename,
+                    folder_id=_optional_str(upload.get("folder_id"), "folder_id"),
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                )
+            except Exception:
+                stored_path.unlink(missing_ok=True)
+                raise
+            if document is None:
+                stored_path.unlink(missing_ok=True)
+                self._json({"updated": False})
+                return
+            self._json({"updated": True, "document": document, "stored_path": str(stored_path)})
         finally:
             store.close()
 
@@ -1946,6 +1980,13 @@ def _document_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "documents":
         return parts[1]
+    return None
+
+
+def _document_reindex_upload_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "documents" and parts[2] == "reindex-upload":
+        return unquote(parts[1])
     return None
 
 

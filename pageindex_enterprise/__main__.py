@@ -372,6 +372,18 @@ def main() -> None:
     export_conversation.add_argument("--limit", type=int, default=500)
     export_conversation.add_argument("--format", choices=["jsonl", "markdown"], default="jsonl")
 
+    conversation_share = sub.add_parser("conversation-share")
+    conversation_share.add_argument("workspace_id")
+    conversation_share.add_argument("user_id")
+    conversation_share.add_argument("--share")
+    conversation_share.add_argument("--shares")
+    conversation_share.add_argument("--revoke-share")
+    conversation_share.add_argument("--share-redact", action="store_true")
+    conversation_share.add_argument("--share-expires-at")
+    conversation_share.add_argument("--share-expires-in-days", type=_positive_int)
+    conversation_share.add_argument("--share-max-views", type=_positive_int)
+    conversation_share.add_argument("--share-password")
+
     chat_message = sub.add_parser("chat-message")
     chat_message.add_argument("conversation_id")
     chat_message.add_argument("user_id")
@@ -1129,6 +1141,63 @@ def main() -> None:
                 ),
                 end="",
             )
+        elif args.command == "conversation-share":
+            selected_actions = [
+                bool(args.share),
+                bool(args.shares),
+                bool(args.revoke_share),
+            ]
+            if sum(selected_actions) != 1:
+                raise SystemExit("choose --share, --shares, or --revoke-share")
+            share_option_used = (
+                args.share_redact
+                or args.share_expires_at is not None
+                or args.share_expires_in_days is not None
+                or args.share_max_views is not None
+                or args.share_password is not None
+            )
+            if share_option_used and not args.share:
+                raise SystemExit("share options require --share")
+            if args.share_expires_at is not None and args.share_expires_in_days is not None:
+                raise SystemExit("use --share-expires-at or --share-expires-in-days, not both")
+            if args.share:
+                expires_at = args.share_expires_at
+                if args.share_expires_in_days is not None:
+                    expires_at = expires_at_from_days(args.share_expires_in_days)
+                share_link = _conversation_cli(
+                    lambda: store.create_conversation_share_link(
+                        args.share,
+                        args.user_id,
+                        expected_workspace_id=args.workspace_id,
+                        expires_at=expires_at,
+                        redact_content=args.share_redact,
+                        max_views=args.share_max_views,
+                        password=args.share_password,
+                    )
+                )
+                print(json.dumps(share_link, indent=2))
+            elif args.shares:
+                print(
+                    json.dumps(
+                        _conversation_cli(
+                            lambda: store.list_conversation_share_links(
+                                args.shares,
+                                args.user_id,
+                                expected_workspace_id=args.workspace_id,
+                            )
+                        ),
+                        indent=2,
+                    )
+                )
+            else:
+                revoked = _conversation_cli(
+                    lambda: store.revoke_conversation_share_link(
+                        args.revoke_share,
+                        args.user_id,
+                        expected_workspace_id=args.workspace_id,
+                    )
+                )
+                print(json.dumps({"revoked": revoked}, indent=2))
         elif args.command == "chat-message":
             print(
                 json.dumps(

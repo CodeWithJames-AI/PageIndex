@@ -6676,6 +6676,7 @@ class EnterpriseStore:
             expected_workspace_id=expected_workspace_id,
             allow_archived=True,
         )
+        self.require_workspace_role(conversation["workspace_id"], actor_user_id, WORKSPACE_WRITE_ROLES)
         rows = self.conn.execute(
             """
             SELECT id, workspace_id, conversation_id, created_by, redact_content, max_views,
@@ -6708,6 +6709,7 @@ class EnterpriseStore:
             expected_workspace_id=expected_workspace_id,
             allow_archived=True,
         )
+        self.require_workspace_role(conversation["workspace_id"], actor_user_id, WORKSPACE_WRITE_ROLES)
         if link["workspace_id"] != conversation["workspace_id"]:
             return False
         if link["revoked_at"] is not None:

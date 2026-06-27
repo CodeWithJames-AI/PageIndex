@@ -2568,6 +2568,165 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn(active["token"], serialized_audit)
             self.assertNotIn("token_hash", serialized_audit)
 
+    def test_conversation_share_cli_creates_lists_and_revokes_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "conversation-share-cli.txt"
+            source.write_text("CLI conversation share evidence for renewal risk.", encoding="utf-8")
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team", workspace_id="ws_conversation_share_cli")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "owner")
+            store.add_workspace_member(workspace_id, "vivi", "member", actor_user_id="alice")
+            store.ingest_file(
+                source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="CLI conversation share source",
+            )
+            conversation = store.create_conversation(workspace_id, "alice", title="CLI share chat")
+            viewer_conversation = store.create_conversation(workspace_id, "vivi", title="Viewer share chat")
+            store.chat_message(conversation["id"], "alice", "renewal risk for CLI share", limit=4)
+            store.add_workspace_member(workspace_id, "vivi", "viewer", actor_user_id="alice")
+            store.close()
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+
+            created = subprocess.run(
+                [
+                    *base,
+                    "conversation-share",
+                    workspace_id,
+                    "alice",
+                    "--share",
+                    conversation["id"],
+                    "--share-redact",
+                    "--share-expires-in-days",
+                    "3",
+                    "--share-max-views",
+                    "2",
+                    "--share-password",
+                    "chat-open",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            share_link = json.loads(created.stdout)
+            listed = subprocess.run(
+                [*base, "conversation-share", workspace_id, "alice", "--shares", conversation["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            non_owner_create_denied = subprocess.run(
+                [*base, "conversation-share", workspace_id, "bob", "--share", conversation["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            viewer_list_denied = subprocess.run(
+                [*base, "conversation-share", workspace_id, "vivi", "--shares", viewer_conversation["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            share_option_without_share = subprocess.run(
+                [*base, "conversation-share", workspace_id, "alice", "--shares", conversation["id"], "--share-redact"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            missing_action = subprocess.run(
+                [*base, "conversation-share", workspace_id, "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            conflicting_expiry = subprocess.run(
+                [
+                    *base,
+                    "conversation-share",
+                    workspace_id,
+                    "alice",
+                    "--share",
+                    conversation["id"],
+                    "--share-expires-at",
+                    "2027-01-01T00:00:00+00:00",
+                    "--share-expires-in-days",
+                    "1",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            missing_conversation = subprocess.run(
+                [*base, "conversation-share", workspace_id, "alice", "--share", "conv_missing"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            revoked = subprocess.run(
+                [*base, "conversation-share", workspace_id, "alice", "--revoke-share", share_link["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            listed_after_revoke = subprocess.run(
+                [*base, "conversation-share", workspace_id, "alice", "--shares", conversation["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            listed_share_links = json.loads(listed.stdout)
+            revoke_result = json.loads(revoked.stdout)
+            share_links_after_revoke = json.loads(listed_after_revoke.stdout)
+            self.assertTrue(share_link["token"].startswith("pcs_"))
+            self.assertTrue(share_link["redact_content"])
+            self.assertEqual(share_link["max_views"], 2)
+            self.assertEqual(share_link["view_count"], 0)
+            self.assertTrue(share_link["password_protected"])
+            self.assertTrue(share_link["active"])
+            self.assertNotIn("token_hash", share_link)
+            self.assertEqual(listed_share_links[0]["id"], share_link["id"])
+            self.assertTrue(listed_share_links[0]["password_protected"])
+            self.assertNotIn(share_link["token"], listed.stdout)
+            self.assertNotIn("chat-open", listed.stdout)
+            self.assertNotIn("password_hash", listed.stdout)
+            self.assertNotIn("password_salt", listed.stdout)
+            self.assertNotEqual(non_owner_create_denied.returncode, 0)
+            self.assertIn("conversation access denied", non_owner_create_denied.stderr)
+            self.assertNotEqual(viewer_list_denied.returncode, 0)
+            self.assertIn("workspace role denied", viewer_list_denied.stderr)
+            self.assertNotEqual(share_option_without_share.returncode, 0)
+            self.assertIn("share options require --share", share_option_without_share.stderr)
+            self.assertNotEqual(missing_action.returncode, 0)
+            self.assertIn("choose --share, --shares, or --revoke-share", missing_action.stderr)
+            self.assertNotEqual(conflicting_expiry.returncode, 0)
+            self.assertIn("use --share-expires-at or --share-expires-in-days", conflicting_expiry.stderr)
+            self.assertNotEqual(missing_conversation.returncode, 0)
+            self.assertIn("Conversation not found", missing_conversation.stderr)
+            self.assertEqual(revoke_result, {"revoked": True})
+            self.assertFalse(share_links_after_revoke[0]["active"])
+
     def test_conversation_rename_updates_title_and_enforces_owner_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = EnterpriseStore(Path(tmp) / "workspace")

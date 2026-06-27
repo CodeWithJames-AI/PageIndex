@@ -4382,6 +4382,37 @@ class EnterpriseStore:
         policy["legal_hold"] = bool(policy.get("legal_hold"))
         return policy
 
+    def _query_run_cascade_counts(
+        self,
+        workspace_id: str,
+        *,
+        run_id: str | None = None,
+        created_before: str | None = None,
+    ) -> dict[str, int]:
+        where = ["q.workspace_id = ?"]
+        args: list[Any] = [workspace_id]
+        if run_id is not None:
+            where.append("q.id = ?")
+            args.append(run_id)
+        if created_before is not None:
+            where.append("q.created_at < ?")
+            args.append(created_before)
+        where_sql = " AND ".join(where)
+        run_filter_sql = f"SELECT q.id FROM query_runs q WHERE {where_sql}"
+
+        def count(sql: str) -> int:
+            row = self.conn.execute(sql, args).fetchone()
+            return int(row["count"]) if row else 0
+
+        return {
+            "query_run_count": count(f"SELECT COUNT(*) AS count FROM query_runs q WHERE {where_sql}"),
+            "evidence_count": count(f"SELECT COUNT(*) AS count FROM evidence e WHERE e.run_id IN ({run_filter_sql})"),
+            "citation_count": count(f"SELECT COUNT(*) AS count FROM citations c WHERE c.run_id IN ({run_filter_sql})"),
+            "conversation_message_count": count(
+                f"SELECT COUNT(*) AS count FROM conversation_messages m WHERE m.run_id IN ({run_filter_sql})"
+            ),
+        }
+
     def get_query_retention_policy(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         return self._query_retention_policy(workspace_id)
@@ -4465,26 +4496,20 @@ class EnterpriseStore:
         if retention_days is None:
             raise ValueError("query retention policy is not set")
         cutoff = (_now_dt() - timedelta(days=retention_days)).isoformat()
+        cascade_counts = self._query_run_cascade_counts(workspace_id, created_before=cutoff)
         if dry_run:
-            matched = int(
-                self.conn.execute(
-                    """
-                    SELECT COUNT(*) AS count
-                    FROM query_runs
-                    WHERE workspace_id = ? AND created_at < ?
-                    """,
-                    (workspace_id, cutoff),
-                ).fetchone()["count"]
-            )
             return {
                 "workspace_id": workspace_id,
                 "retention_days": retention_days,
                 "cutoff": cutoff,
-                "matched": matched,
+                "matched": cascade_counts["query_run_count"],
                 "purged": 0,
                 "dry_run": True,
                 "legal_hold": bool(policy["legal_hold"]),
                 "legal_hold_reason": policy["legal_hold_reason"],
+                "evidence_count": cascade_counts["evidence_count"],
+                "citation_count": cascade_counts["citation_count"],
+                "conversation_message_count": cascade_counts["conversation_message_count"],
             }
         if policy["legal_hold"]:
             raise ValueError("query retention legal hold is enabled")
@@ -4507,6 +4532,9 @@ class EnterpriseStore:
                     "retention_days": retention_days,
                     "cutoff": cutoff,
                     "purged": purged,
+                    "evidence_count": cascade_counts["evidence_count"],
+                    "citation_count": cascade_counts["citation_count"],
+                    "conversation_message_count": cascade_counts["conversation_message_count"],
                 },
             )
         return {
@@ -4518,6 +4546,9 @@ class EnterpriseStore:
             "dry_run": False,
             "legal_hold": False,
             "legal_hold_reason": None,
+            "evidence_count": cascade_counts["evidence_count"],
+            "citation_count": cascade_counts["citation_count"],
+            "conversation_message_count": cascade_counts["conversation_message_count"],
         }
 
     def _audit_retention_policy(self, workspace_id: str) -> dict[str, Any]:
@@ -9413,6 +9444,7 @@ class EnterpriseStore:
         if not run_id:
             raise ValueError("Query run id is required.")
         with self._atomic():
+            cascade_counts = self._query_run_cascade_counts(workspace_id, run_id=run_id)
             cursor = self.conn.execute(
                 "DELETE FROM query_runs WHERE id = ? AND workspace_id = ?",
                 (run_id, workspace_id),
@@ -9425,7 +9457,11 @@ class EnterpriseStore:
                     "query.run_delete",
                     target_type="query_run",
                     target_id=run_id,
-                    details={},
+                    details={
+                        "evidence_count": cascade_counts["evidence_count"],
+                        "citation_count": cascade_counts["citation_count"],
+                        "conversation_message_count": cascade_counts["conversation_message_count"],
+                    },
                 )
         return deleted
 

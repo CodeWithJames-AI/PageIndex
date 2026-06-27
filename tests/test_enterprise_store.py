@@ -2098,7 +2098,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 ).fetchone()["count"]
             )
             other_trace = store.get_query_trace(other["run_id"], workspace_id=other_workspace, actor_user_id="mallory")
-            audit_actions = [event["action"] for event in store.list_audit_events(workspace_id, "alice", limit=20)]
+            audit_events = store.list_audit_events(workspace_id, "alice", limit=20)
+            audit_actions = [event["action"] for event in audit_events]
+            purge_event = next(event for event in audit_events if event["action"] == "query.retention_purge")
 
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.set_query_retention_policy(workspace_id, "bob", retention_days=7)
@@ -2116,10 +2118,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(preview["purged"], 0)
             self.assertEqual(preview["legal_hold"], True)
             self.assertEqual(preview["legal_hold_reason"], "investigation 42")
+            self.assertEqual(preview["evidence_count"], 2)
+            self.assertEqual(preview["citation_count"], 2)
+            self.assertEqual(preview["conversation_message_count"], 1)
             self.assertEqual(release_policy["legal_hold"], False)
             self.assertIsNone(release_policy["legal_hold_reason"])
             self.assertEqual(purged["matched"], 2)
             self.assertEqual(purged["purged"], 2)
+            self.assertEqual(purged["evidence_count"], 2)
+            self.assertEqual(purged["citation_count"], 2)
+            self.assertEqual(purged["conversation_message_count"], 1)
             self.assertEqual([run["id"] for run in remaining_runs], [fresh["run_id"]])
             self.assertEqual(remaining_evidence, 0)
             self.assertEqual(remaining_citations, 0)
@@ -2128,6 +2136,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(other_trace["id"], other["run_id"])
             self.assertIn("query.retention_policy_update", audit_actions)
             self.assertIn("query.retention_purge", audit_actions)
+            self.assertEqual(purge_event["details"]["purged"], 2)
+            self.assertEqual(purge_event["details"]["evidence_count"], 2)
+            self.assertEqual(purge_event["details"]["citation_count"], 2)
+            self.assertEqual(purge_event["details"]["conversation_message_count"], 1)
 
     def test_query_run_deletion_is_admin_scoped_and_cascades_trace_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2161,7 +2173,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     (chat["result"]["run_id"],),
                 ).fetchone()["count"]
             )
-            audit_actions = [event["action"] for event in store.list_audit_events(workspace_id, "alice", limit=20)]
+            audit_events = store.list_audit_events(workspace_id, "alice", limit=20)
+            audit_actions = [event["action"] for event in audit_events]
+            delete_event = next(event for event in audit_events if event["action"] == "query.run_delete")
 
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.delete_query_run(kept["run_id"], workspace_id=workspace_id, actor_user_id="bob")
@@ -2177,6 +2191,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIsNone(chat_messages[1]["run_id"])
             self.assertIsNone(store.get_query_trace(chat["result"]["run_id"], workspace_id=workspace_id, actor_user_id="alice"))
             self.assertIn("query.run_delete", audit_actions)
+            self.assertEqual(
+                delete_event["details"],
+                {
+                    "evidence_count": 1,
+                    "citation_count": 1,
+                    "conversation_message_count": 1,
+                },
+            )
 
     def test_conversation_sessions_persist_messages_and_enforce_owner_access(self):
         with tempfile.TemporaryDirectory() as tmp:

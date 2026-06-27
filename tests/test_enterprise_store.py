@@ -16340,6 +16340,32 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("sk-secret-deploy-key", serialized_secret_url)
             self.assertNotIn("user:", serialized_secret_url)
 
+    def test_deployment_check_caps_active_api_tokens_to_current_roles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "deployment-root"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Production")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "vivi", "viewer", actor_user_id="alice")
+            stale_token = store.create_api_token(workspace_id, "vivi", name="stale-viewer")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["write", "audit"]), stale_token["id"]),
+            )
+            store.conn.commit()
+            stale_report = run_deployment_check(root, require_api_token=True)
+            store.create_api_token(workspace_id, "alice", name="deploy", scopes=["read", "write", "audit"])
+            ready_report = run_deployment_check(root, require_api_token=True)
+            store.close()
+
+            self.assertEqual(stale_report["ok"], False)
+            self.assertEqual(stale_report["checks"]["strict_http"]["ok"], True)
+            self.assertEqual(stale_report["checks"]["workspace_owner"]["ok"], True)
+            self.assertEqual(stale_report["checks"]["active_api_token"]["ok"], False)
+            self.assertEqual(stale_report["checks"]["active_api_token"]["active_token_count"], 0)
+            self.assertEqual(ready_report["ok"], True, ready_report)
+            self.assertEqual(ready_report["checks"]["active_api_token"]["active_token_count"], 1)
+
     def test_deployment_check_can_require_audit_sink_delivery(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "deployment-root"

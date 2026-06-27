@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from .llm import validate_openai_compatible_config
-from .store import AUDIT_SINK_FORMATS, EnterpriseStore, WORKSPACE_ADMIN_ROLES, _decode_api_token_scopes, _is_expired
+from .store import (
+    AUDIT_SINK_FORMATS,
+    EnterpriseStore,
+    WORKSPACE_ADMIN_ROLES,
+    _cap_api_token_scopes_to_role,
+    _decode_api_token_scopes,
+    _is_expired,
+)
 
 
 EXPECTED_TABLES = {
@@ -494,11 +501,12 @@ def _active_api_token_check(store: EnterpriseStore) -> dict[str, Any]:
     active_count = 0
     for row in rows:
         scopes = _decode_api_token_scopes(row["scopes_json"])
-        if (
-            scopes
-            and not _is_expired(row["expires_at"])
-            and store.user_can_access_workspace(row["workspace_id"], row["user_id"])
-        ):
+        if scopes is None or _is_expired(row["expires_at"]):
+            continue
+        if not store.user_can_access_workspace(row["workspace_id"], row["user_id"]):
+            continue
+        role = store.workspace_role(row["workspace_id"], row["user_id"])
+        if _cap_api_token_scopes_to_role(scopes, role):
             active_count += 1
     return _check(active_count > 0, active_token_count=active_count)
 

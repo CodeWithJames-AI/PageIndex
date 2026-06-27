@@ -336,6 +336,13 @@ def main() -> None:
     rename_conversation.add_argument("user_id")
     rename_conversation.add_argument("title")
 
+    set_conversation_scope = sub.add_parser("set-conversation-scope")
+    set_conversation_scope.add_argument("conversation_id")
+    set_conversation_scope.add_argument("user_id")
+    set_conversation_scope.add_argument("--source-set-id")
+    set_conversation_scope.add_argument("--folder-id")
+    set_conversation_scope.add_argument("--clear", action="store_true")
+
     delete_conversation = sub.add_parser("delete-conversation")
     delete_conversation.add_argument("conversation_id")
     delete_conversation.add_argument("user_id")
@@ -998,6 +1005,21 @@ def main() -> None:
                 json.dumps(
                     _conversation_cli(
                         lambda: store.rename_conversation(args.conversation_id, args.user_id, args.title)
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.command == "set-conversation-scope":
+            print(
+                json.dumps(
+                    _conversation_cli(
+                        lambda: store.update_conversation_scope(
+                            args.conversation_id,
+                            args.user_id,
+                            source_set_id=args.source_set_id,
+                            folder_id=args.folder_id,
+                            clear_scope=args.clear,
+                        )
                     ),
                     indent=2,
                 )

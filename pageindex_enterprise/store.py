@@ -5566,6 +5566,69 @@ class EnterpriseStore:
             expected_workspace_id=expected_workspace_id,
         )
 
+    def update_conversation_scope(
+        self,
+        conversation_id: str,
+        actor_user_id: str,
+        *,
+        source_set_id: str | None = None,
+        folder_id: str | None = None,
+        clear_scope: bool = False,
+        expected_workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(clear_scope, bool):
+            raise ValueError("clear_scope must be a boolean")
+        has_source_set = source_set_id is not None
+        has_folder = folder_id is not None
+        if sum([has_source_set, has_folder, clear_scope]) != 1:
+            raise ValueError("choose one conversation scope update")
+        actor_user_id = actor_user_id.strip()
+        conversation = self._conversation_for_actor(
+            conversation_id,
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+        )
+        self.require_workspace_role(conversation["workspace_id"], actor_user_id, WORKSPACE_WRITE_ROLES)
+        normalized_source_set_id: str | None = None
+        normalized_folder_id: str | None = None
+        if has_source_set:
+            normalized_source_set_id = _optional_source_set_id(source_set_id)
+            if not normalized_source_set_id:
+                raise ValueError("source_set_id is required")
+            self.resolve_query_source_set_doc_ids(conversation["workspace_id"], actor_user_id, normalized_source_set_id)
+        elif has_folder:
+            normalized_folder_id = _optional_folder_id(folder_id)
+            if not normalized_folder_id:
+                raise ValueError("folder_id is required")
+            self.resolve_query_folder_scope(conversation["workspace_id"], actor_user_id, normalized_folder_id)
+        now = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                UPDATE conversations
+                SET source_set_id = ?, folder_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (normalized_source_set_id, normalized_folder_id, now, conversation["id"]),
+            )
+            self._insert_audit_event(
+                conversation["workspace_id"],
+                actor_user_id,
+                "conversation.scope_update",
+                target_type="conversation",
+                target_id=conversation["id"],
+                details={
+                    "source_set_id": normalized_source_set_id,
+                    "folder_id": normalized_folder_id,
+                    "cleared": clear_scope,
+                },
+            )
+        return self._conversation_for_actor(
+            conversation["id"],
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+        )
+
     def delete_conversation(
         self,
         conversation_id: str,

@@ -519,6 +519,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if conversation_archive_id:
                 self._archive_conversation(conversation_archive_id, payload)
                 return
+            conversation_scope_id = _conversation_scope_path(parsed.path)
+            if conversation_scope_id:
+                self._update_conversation_scope(conversation_scope_id, payload)
+                return
             conversation_id = _conversation_messages_path(parsed.path)
             if conversation_id:
                 self._chat_message(conversation_id, payload)
@@ -847,6 +851,34 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                         conversation_id,
                         user_id,
                         title,
+                        expected_workspace_id=workspace_id,
+                    )
+                }
+            )
+        finally:
+            store.close()
+
+    def _update_conversation_scope(self, conversation_id: str, payload: dict[str, Any]) -> None:
+        clear_scope = payload.get("clear", payload.get("clear_scope", payload.get("clearScope", False)))
+        if not isinstance(clear_scope, bool):
+            raise ValueError("clear_scope must be a boolean")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            self._json(
+                {
+                    "conversation": store.update_conversation_scope(
+                        conversation_id,
+                        user_id,
+                        source_set_id=_optional_str(
+                            payload.get("source_set_id", payload.get("sourceSetId")),
+                            "source_set_id",
+                        ),
+                        folder_id=_optional_str(
+                            payload.get("folder_id", payload.get("folderId")),
+                            "folder_id",
+                        ),
+                        clear_scope=clear_scope,
                         expected_workspace_id=workspace_id,
                     )
                 }
@@ -2576,6 +2608,13 @@ def _conversation_archive_path(path: str) -> str | None:
 def _conversation_rename_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "rename":
+        return parts[1]
+    return None
+
+
+def _conversation_scope_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "scope":
         return parts[1]
     return None
 

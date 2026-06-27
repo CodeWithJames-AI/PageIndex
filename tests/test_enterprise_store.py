@@ -2083,6 +2083,93 @@ class EnterpriseStoreTest(unittest.TestCase):
                     folder_id=folder_id,
                 )
 
+    def test_conversation_scope_update_changes_future_chat_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_set_source = root / "scope-update-source-set.txt"
+            folder_source = root / "scope-update-folder.txt"
+            override_source = root / "scope-update-override.txt"
+            source_set_source.write_text("Source set renewal evidence for updated chat.", encoding="utf-8")
+            folder_source.write_text("Folder retention evidence for updated chat.", encoding="utf-8")
+            override_source.write_text("Override billing evidence for updated chat.", encoding="utf-8")
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            folder_id = store.create_folder("Accounts", workspace_id=workspace_id, actor_user_id="alice")
+            source_doc_id = store.ingest_file(
+                source_set_source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Source set update memo",
+            )
+            folder_doc_id = store.ingest_file(
+                folder_source,
+                folder_id=folder_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Folder update memo",
+            )
+            override_doc_id = store.ingest_file(
+                override_source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Override update memo",
+            )
+            source_set = store.create_query_source_set(workspace_id, "alice", "Updated chat source", [source_doc_id])
+            conversation = store.create_conversation(workspace_id, "alice", title="Scope update chat")
+
+            source_scoped = store.update_conversation_scope(
+                conversation["id"],
+                "alice",
+                source_set_id=source_set["id"],
+            )
+            source_chat = store.chat_message(conversation["id"], "alice", "renewal", limit=4)
+            folder_scoped = store.update_conversation_scope(
+                conversation["id"],
+                "alice",
+                folder_id=folder_id,
+            )
+            folder_chat = store.chat_message(conversation["id"], "alice", "retention", limit=4)
+            override_chat = store.chat_message(
+                conversation["id"],
+                "alice",
+                "billing",
+                doc_ids=[override_doc_id],
+                limit=4,
+            )
+            cleared = store.update_conversation_scope(conversation["id"], "alice", clear_scope=True)
+            cleared_chat = store.chat_message(conversation["id"], "alice", "renewal", limit=4)
+            listed = store.list_conversations(workspace_id, "alice")
+
+            self.assertEqual(source_scoped["source_set_id"], source_set["id"])
+            self.assertIsNone(source_scoped["folder_id"])
+            self.assertEqual(source_chat["result"]["trace"]["scope"]["source_set_id"], source_set["id"])
+            self.assertEqual(source_chat["result"]["trace"]["scope"]["doc_ids"], [source_doc_id])
+            self.assertEqual(folder_scoped["folder_id"], folder_id)
+            self.assertIsNone(folder_scoped["source_set_id"])
+            self.assertEqual(folder_chat["result"]["trace"]["scope"]["folder_id"], folder_id)
+            self.assertEqual(folder_chat["result"]["trace"]["scope"]["doc_ids"], [folder_doc_id])
+            self.assertNotIn("folder_id", override_chat["result"]["trace"]["scope"])
+            self.assertEqual(override_chat["result"]["trace"]["scope"]["doc_ids"], [override_doc_id])
+            self.assertIsNone(cleared["source_set_id"])
+            self.assertIsNone(cleared["folder_id"])
+            self.assertNotIn("source_set_id", cleared_chat["result"]["trace"]["scope"])
+            self.assertNotIn("folder_id", cleared_chat["result"]["trace"]["scope"])
+            self.assertIsNone(listed[0]["source_set_id"])
+            self.assertIsNone(listed[0]["folder_id"])
+            with self.assertRaisesRegex(ValueError, "choose one conversation scope update"):
+                store.update_conversation_scope(
+                    conversation["id"],
+                    "alice",
+                    source_set_id=source_set["id"],
+                    folder_id=folder_id,
+                )
+            with self.assertRaisesRegex(ValueError, "choose one conversation scope update"):
+                store.update_conversation_scope(
+                    conversation["id"],
+                    "alice",
+                )
+
     def test_conversation_share_links_publish_bounded_transcripts_with_citations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2850,6 +2937,178 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(chat["result"]["verification"]["ok"], chat["result"]["verification"]["errors"])
             self.assertNotEqual(conflict.returncode, 0)
             self.assertIn("source_set_id or folder_id", conflict.stderr)
+
+    def test_conversation_cli_updates_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source_set_source = tmp_path / "cli-source-set-chat.txt"
+            folder_source = tmp_path / "cli-folder-chat.txt"
+            source_set_source.write_text("CLI source-set scope update evidence.", encoding="utf-8")
+            folder_source.write_text("CLI folder scope update evidence.", encoding="utf-8")
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run(
+                [*base, "workspace", "Team", "--workspace-id", "ws_cli_scope"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_cli_scope", "alice", "--role", "owner"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            folder_id = subprocess.run(
+                [*base, "folder", "Accounts", "--workspace-id", "ws_cli_scope", "--user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            source_doc_id = subprocess.run(
+                [
+                    *base,
+                    "ingest-file",
+                    str(source_set_source),
+                    "--workspace-id",
+                    "ws_cli_scope",
+                    "--user-id",
+                    "alice",
+                    "--name",
+                    "CLI source set scope note",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            folder_doc_id = subprocess.run(
+                [
+                    *base,
+                    "ingest-file",
+                    str(folder_source),
+                    "--workspace-id",
+                    "ws_cli_scope",
+                    "--user-id",
+                    "alice",
+                    "--name",
+                    "CLI folder scope note",
+                    "--folder-id",
+                    folder_id,
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            source_set = json.loads(
+                subprocess.run(
+                    [
+                        *base,
+                        "query-source-set",
+                        "ws_cli_scope",
+                        "alice",
+                        "--create",
+                        "CLI updated source",
+                        "--doc-id",
+                        source_doc_id,
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            conversation = json.loads(
+                subprocess.run(
+                    [*base, "create-conversation", "ws_cli_scope", "alice", "--title", "CLI scope update"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            source_scoped = json.loads(
+                subprocess.run(
+                    [*base, "set-conversation-scope", conversation["id"], "alice", "--source-set-id", source_set["id"]],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            source_chat = json.loads(
+                subprocess.run(
+                    [*base, "chat-message", conversation["id"], "alice", "source"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            folder_scoped = json.loads(
+                subprocess.run(
+                    [*base, "set-conversation-scope", conversation["id"], "alice", "--folder-id", folder_id],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            folder_chat = json.loads(
+                subprocess.run(
+                    [*base, "chat-message", conversation["id"], "alice", "folder"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            cleared = json.loads(
+                subprocess.run(
+                    [*base, "set-conversation-scope", conversation["id"], "alice", "--clear"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            conflict = subprocess.run(
+                [*base, "set-conversation-scope", conversation["id"], "alice", "--source-set-id", source_set["id"], "--folder-id", folder_id],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(source_scoped["source_set_id"], source_set["id"])
+            self.assertEqual(source_chat["result"]["trace"]["scope"]["source_set_id"], source_set["id"])
+            self.assertEqual(source_chat["result"]["trace"]["scope"]["doc_ids"], [source_doc_id])
+            self.assertEqual(folder_scoped["folder_id"], folder_id)
+            self.assertEqual(folder_chat["result"]["trace"]["scope"]["folder_id"], folder_id)
+            self.assertEqual(folder_chat["result"]["trace"]["scope"]["doc_ids"], [folder_doc_id])
+            self.assertIsNone(cleared["source_set_id"])
+            self.assertIsNone(cleared["folder_id"])
+            self.assertNotEqual(conflict.returncode, 0)
+            self.assertIn("choose one conversation scope update", conflict.stderr)
 
     def test_conversation_cli_errors_do_not_print_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9493,6 +9752,87 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(chat["result"]["trace"]["scope"]["doc_ids"], [doc_id])
             self.assertTrue(chat["result"]["verification"]["ok"], chat["result"]["verification"]["errors"])
             self.assertEqual(conflict["error"], "Use source_set_id or folder_id, not both")
+
+    def test_http_conversation_scope_update_changes_future_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_set_source = root / "http-scope-source-set.txt"
+            folder_source = root / "http-scope-folder.txt"
+            source_set_source.write_text("HTTP source set scope update evidence.", encoding="utf-8")
+            folder_source.write_text("HTTP folder scope update evidence.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            token = store.create_api_token(workspace_id, "alice", name="alice")["token"]
+            folder_id = store.create_folder("Accounts", workspace_id=workspace_id, actor_user_id="alice")
+            source_doc_id = store.ingest_file(
+                source_set_source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="HTTP source set scope note",
+            )
+            folder_doc_id = store.ingest_file(
+                folder_source,
+                folder_id=folder_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="HTTP folder scope note",
+            )
+            source_set = store.create_query_source_set(workspace_id, "alice", "HTTP updated source", [source_doc_id])
+            conversation = store.create_conversation(workspace_id, "alice", title="HTTP scope update")
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            headers = {"Authorization": f"Bearer {token}"}
+            try:
+                source_scoped = _post_json(
+                    f"{base}/conversations/{conversation['id']}/scope",
+                    {"source_set_id": source_set["id"]},
+                    headers=headers,
+                )["conversation"]
+                source_chat = _post_json(
+                    f"{base}/conversations/{conversation['id']}/messages",
+                    {"message": "source"},
+                    headers=headers,
+                )
+                folder_scoped = _post_json(
+                    f"{base}/conversations/{conversation['id']}/scope",
+                    {"folderId": folder_id},
+                    headers=headers,
+                )["conversation"]
+                folder_chat = _post_json(
+                    f"{base}/conversations/{conversation['id']}/messages",
+                    {"message": "folder"},
+                    headers=headers,
+                )
+                cleared = _post_json(
+                    f"{base}/conversations/{conversation['id']}/scope",
+                    {"clear": True},
+                    headers=headers,
+                )["conversation"]
+                conflict = _post_json(
+                    f"{base}/conversations/{conversation['id']}/scope",
+                    {"source_set_id": source_set["id"], "folder_id": folder_id},
+                    headers=headers,
+                    status=400,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(source_scoped["source_set_id"], source_set["id"])
+            self.assertEqual(source_chat["result"]["trace"]["scope"]["source_set_id"], source_set["id"])
+            self.assertEqual(source_chat["result"]["trace"]["scope"]["doc_ids"], [source_doc_id])
+            self.assertEqual(folder_scoped["folder_id"], folder_id)
+            self.assertIsNone(folder_scoped["source_set_id"])
+            self.assertEqual(folder_chat["result"]["trace"]["scope"]["folder_id"], folder_id)
+            self.assertEqual(folder_chat["result"]["trace"]["scope"]["doc_ids"], [folder_doc_id])
+            self.assertIsNone(cleared["source_set_id"])
+            self.assertIsNone(cleared["folder_id"])
+            self.assertEqual(conflict["error"], "choose one conversation scope update")
 
     def test_http_conversation_share_links_require_owner_and_public_token_resolves(self):
         with tempfile.TemporaryDirectory() as tmp:

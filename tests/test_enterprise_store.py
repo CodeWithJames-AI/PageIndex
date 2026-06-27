@@ -15297,6 +15297,24 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(workspaces, [])
             self.assertFalse(any(path.name.startswith("pageindex-enterprise-eval-") for path in root.iterdir()))
 
+    def test_packaging_metadata_declares_enterprise_cli(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        pyproject = (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+        setup_cfg = (repo_root / "setup.cfg").read_text(encoding="utf-8")
+        requirements = (repo_root / "requirements.txt").read_text(encoding="utf-8")
+
+        self.assertIn('build-backend = "setuptools.build_meta"', pyproject)
+        self.assertIn("name = pageindex-enterprise-cleanroom", setup_cfg)
+        self.assertIn("python_requires = >=3.9", setup_cfg)
+        self.assertIn("pageindex-enterprise = pageindex_enterprise.__main__:main", setup_cfg)
+        self.assertIn("    pageindex\n", setup_cfg)
+        self.assertIn("    pageindex_enterprise\n", setup_cfg)
+        self.assertIn("    config.yaml", setup_cfg)
+        for requirement in requirements.splitlines():
+            requirement = requirement.strip()
+            if requirement and not requirement.startswith("#"):
+                self.assertIn(f"    {requirement}", setup_cfg)
+
     def test_deployment_check_reports_readiness_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "deployment-root"

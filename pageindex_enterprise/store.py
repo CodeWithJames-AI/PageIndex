@@ -2801,6 +2801,55 @@ class EnterpriseStore:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         return self._workspace_provider_config_metadata(workspace_id)
 
+    def check_workspace_provider_config(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        config = self._workspace_provider_config_metadata(workspace_id)
+        checks = {
+            "configured": bool(config["configured"]),
+            "base_url_present": bool(config.get("base_url")),
+            "model_present": bool(config.get("model")),
+            "api_key_env_var_present": bool(config.get("api_key_env_var")),
+            "api_key_env_var_set": bool(config.get("api_key_configured")),
+            "config_valid": False,
+        }
+        report = {
+            **config,
+            "ok": False,
+            "checks": checks,
+            "reason": "not_configured",
+        }
+        if not checks["configured"]:
+            return report
+        if not checks["base_url_present"]:
+            report["reason"] = "base_url_missing"
+            return report
+        if not checks["model_present"]:
+            report["reason"] = "model_missing"
+            return report
+        if not checks["api_key_env_var_present"]:
+            report["reason"] = "api_key_env_var_missing"
+            return report
+        if not checks["api_key_env_var_set"]:
+            report["reason"] = "api_key_env_var_unset"
+            return report
+        try:
+            validated = validate_openai_compatible_config(
+                base_url=config["base_url"],
+                api_key=os.environ.get(config["api_key_env_var"]),
+                model=config["model"],
+                timeout=config["timeout_seconds"],
+            )
+        except ValueError as exc:
+            report["reason"] = "invalid_config"
+            report["error"] = str(exc)
+            return report
+        checks["config_valid"] = True
+        report["ok"] = all(checks.values())
+        report["reason"] = "ok" if report["ok"] else "unavailable"
+        report["provider_url"] = validated["url"]
+        report["resolved_timeout_seconds"] = validated["timeout_seconds"]
+        return report
+
     def set_workspace_provider_config(
         self,
         workspace_id: str,

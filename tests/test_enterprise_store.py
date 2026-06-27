@@ -5189,6 +5189,16 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            checked = json.loads(
+                subprocess.run(
+                    [*base, "provider-config", "ws_cli", "alice", "--check"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
             member_denied = subprocess.run(
                 [*base, "provider-config", "ws_cli", "bob"],
                 cwd=repo_root,
@@ -5219,7 +5229,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 events = store.list_audit_events("ws_cli", "alice")
             finally:
                 store.close()
-            serialized = json.dumps([initial, saved, read_back, cleared, events], sort_keys=True)
+            serialized = json.dumps([initial, saved, read_back, checked, cleared, events], sort_keys=True)
 
             self.assertEqual(initial["configured"], False)
             self.assertEqual(saved["configured"], True)
@@ -5229,6 +5239,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(saved["api_key_configured"], True)
             self.assertEqual(saved["timeout_seconds"], 2.5)
             self.assertEqual(read_back["model"], "cli-model")
+            self.assertEqual(checked["ok"], True)
+            self.assertEqual(checked["reason"], "ok")
+            self.assertEqual(checked["checks"]["api_key_env_var_set"], True)
+            self.assertEqual(checked["provider_url"], "http://127.0.0.1:1/v1/chat/completions")
             self.assertNotEqual(member_denied.returncode, 0)
             self.assertIn("workspace role denied", member_denied.stderr)
             self.assertNotIn("Traceback", member_denied.stderr)
@@ -10583,7 +10597,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             try:
                 local_header_denied = _get_error(f"{local_base}/provider-config", headers=legacy_headers)
                 initial_config = _get_json(f"{base}/provider-config", headers=audit_headers)
+                initial_check = _get_json(f"{base}/provider-config/check", headers=audit_headers)
                 write_get_blocked = _get_error(f"{base}/provider-config", headers=write_headers)
+                write_check_blocked = _get_error(f"{base}/provider-config/check", headers=write_headers)
                 write_set_blocked = _post_json(
                     f"{base}/provider-config",
                     {
@@ -10645,6 +10661,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     },
                     headers=admin_headers,
                 )
+                no_key_check = _get_json(f"{base}/provider-config/check", headers=audit_headers)
                 no_key_completion = _post_json(
                     f"{base}/chat/completions",
                     {
@@ -10664,6 +10681,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     },
                     headers=admin_headers,
                 )
+                unset_key_check = _get_json(f"{base}/provider-config/check", headers=audit_headers)
                 unset_key_completion = _post_json(
                     f"{base}/chat/completions",
                     {
@@ -10690,6 +10708,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     },
                     headers=admin_headers,
                 )
+                checked = _get_json(f"{base}/provider-config/check", headers=audit_headers)
                 read_back = _get_json(f"{base}/provider-config", headers=audit_headers)
                 completion = _post_json(
                     f"{base}/chat/completions",
@@ -10724,12 +10743,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             finally:
                 store.close()
             serialized_saved = json.dumps(saved, sort_keys=True)
+            serialized_checks = json.dumps([no_key_check, unset_key_check, checked], sort_keys=True)
             serialized_events = json.dumps(events, sort_keys=True)
             provider_payload = workspace_key_request["payload"]
 
             self.assertEqual(local_header_denied["error"], "api token required")
             self.assertEqual(initial_config["configured"], False)
+            self.assertEqual(initial_check["ok"], False)
+            self.assertEqual(initial_check["reason"], "not_configured")
             self.assertEqual(write_get_blocked["error"], "api token scope denied")
+            self.assertEqual(write_check_blocked["error"], "api token scope denied")
             self.assertEqual(write_set_blocked["error"], "api token scope denied")
             self.assertEqual(audit_set_blocked["error"], "api token scope denied")
             self.assertEqual(member_set_blocked["error"], "workspace role denied")
@@ -10737,11 +10760,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(bad_env_var["error"], "api_key_env_var must be an uppercase environment variable name")
             self.assertEqual(bad_timeout["error"], "timeout_seconds must be positive")
             self.assertEqual(no_key_saved["model"], "workspace-no-key-model")
+            self.assertEqual(no_key_check["ok"], False)
+            self.assertEqual(no_key_check["reason"], "api_key_env_var_missing")
             self.assertEqual(no_key_completion["model"], "workspace-no-key-model")
             self.assertIsNone(no_key_request["authorization"])
             self.assertEqual(no_key_request["payload"]["model"], "workspace-no-key-model")
             self.assertEqual(unset_key_saved["model"], "workspace-unset-key-model")
             self.assertEqual(unset_key_saved["api_key_configured"], False)
+            self.assertEqual(unset_key_check["ok"], False)
+            self.assertEqual(unset_key_check["reason"], "api_key_env_var_unset")
             self.assertEqual(unset_key_completion["model"], "workspace-unset-key-model")
             self.assertIsNone(unset_key_request["authorization"])
             self.assertEqual(unset_key_request["payload"]["model"], "workspace-unset-key-model")
@@ -10751,9 +10778,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(saved["api_key_env_var"], "PAGEINDEX_WORKSPACE_PROVIDER_KEY")
             self.assertEqual(saved["api_key_configured"], True)
             self.assertEqual(saved["timeout_seconds"], 3.5)
+            self.assertEqual(checked["ok"], True)
+            self.assertEqual(checked["reason"], "ok")
+            self.assertEqual(checked["provider_url"], f"http://127.0.0.1:{provider.server_port}/v1/chat/completions")
+            self.assertEqual(checked["resolved_timeout_seconds"], 3.5)
+            self.assertEqual(checked["checks"]["api_key_env_var_set"], True)
             self.assertEqual(read_back["model"], "workspace-model")
             self.assertNotIn("workspace-secret-key", serialized_saved)
             self.assertNotIn("global-secret-key", serialized_saved)
+            self.assertNotIn("workspace-secret-key", serialized_checks)
+            self.assertNotIn("global-secret-key", serialized_checks)
             self.assertEqual(completion["model"], "workspace-model")
             self.assertEqual(completion["pageindex"]["synthesis"]["model"], "workspace-model")
             self.assertEqual(workspace_key_request["authorization"], "Bearer workspace-secret-key")
@@ -14592,6 +14626,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("providerTimeoutInput", body)
                     self.assertIn("providerConfigSummary", body)
                     self.assertIn("refreshProviderConfig", body)
+                    self.assertIn("checkProviderButton", body)
+                    self.assertIn("/provider-config/check", body)
+                    self.assertIn("checkProviderConfig", body)
                     self.assertIn("saveProviderConfig", body)
                     self.assertIn("clearProviderConfig", body)
                     self.assertIn("X-PageIndex-Workspace", body)

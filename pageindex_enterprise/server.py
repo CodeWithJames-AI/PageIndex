@@ -313,6 +313,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/deployment-check":
                 self._deployment_check(parsed.query)
                 return
+            if parsed.path == "/provider-config/check":
+                self._check_provider_config()
+                return
             if parsed.path == "/provider-config":
                 self._get_provider_config()
                 return
@@ -1998,6 +2001,14 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
             self._json(store.get_workspace_provider_config(workspace_id, user_id))
+        finally:
+            store.close()
+
+    def _check_provider_config(self) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+            self._json(store.check_workspace_provider_config(workspace_id, user_id))
         finally:
             store.close()
 

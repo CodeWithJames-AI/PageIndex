@@ -645,6 +645,7 @@ DASHBOARD_HTML = """<!doctype html>
               <input id="providerTimeoutInput" value="" placeholder="timeout seconds" aria-label="Provider timeout seconds">
               <div class="provider-actions">
                 <button id="refreshProviderButton" class="secondary" type="button">Refresh</button>
+                <button id="checkProviderButton" class="secondary" type="button">Check</button>
                 <button id="saveProviderButton" type="button">Save</button>
                 <button id="clearProviderButton" class="secondary" type="button">Clear</button>
               </div>
@@ -2126,6 +2127,12 @@ DASHBOARD_HTML = """<!doctype html>
       const keyState = config.api_key_env_var ? (config.api_key_configured ? "key env set" : "key env unset") : "no key env";
       providerConfigSummary.className = "muted";
       providerConfigSummary.textContent = `${config.provider || "openai-compatible"} | ${config.model || "no model"} | ${keyState}`;
+    }
+
+    function renderProviderCheck(report) {
+      renderProviderConfig(report);
+      providerConfigSummary.className = report.ok ? "status ok" : "status warn";
+      providerConfigSummary.textContent = `Provider check ${report.reason || "unknown"}.`;
     }
 
     function renderMessages(messages) {
@@ -3680,6 +3687,13 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function checkProviderConfig() {
+      setStatus("Checking provider...");
+      const report = await api("/provider-config/check");
+      renderProviderCheck(report);
+      setStatus(report.ok ? "Provider check passed." : "Provider check needs attention.", report.ok ? "ok" : "warn");
+    }
+
     async function saveProviderConfig() {
       const baseUrl = providerBaseUrlInput.value.trim();
       const model = providerModelInput.value.trim();
@@ -4210,6 +4224,7 @@ DASHBOARD_HTML = """<!doctype html>
       providerConfigSummary.textContent = "Provider unavailable.";
       setStatus(error.message, "error");
     }));
+    document.getElementById("checkProviderButton").addEventListener("click", () => checkProviderConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveProviderButton").addEventListener("click", () => saveProviderConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearProviderButton").addEventListener("click", () => clearProviderConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("chatButton").addEventListener("click", () => sendChatMessage().catch((error) => setStatus(error.message, "error")));

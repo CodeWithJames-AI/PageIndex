@@ -8614,6 +8614,163 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertNotIn(prompt, serialized_trace)
                 self.assertNotIn(prompt, serialized_events)
 
+    def test_http_chat_completions_can_append_stateful_conversation_turns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            alpha = tmp_path / "alpha-stateful.txt"
+            beta = tmp_path / "beta-stateful.txt"
+            alpha.write_text("Alpha stateful renewal evidence says the account asked for a discount.", encoding="utf-8")
+            beta.write_text("Beta override evidence says implementation risk moved to legal review.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            alpha_doc_id = store.ingest_file(alpha, workspace_id=workspace_id, actor_user_id="alice", name="Alpha stateful memo")
+            beta_doc_id = store.ingest_file(beta, workspace_id=workspace_id, actor_user_id="alice", name="Beta override memo")
+            source_set = store.create_query_source_set(workspace_id, "alice", "Stateful chat scope", [alpha_doc_id])
+            conversation = store.create_conversation(
+                workspace_id,
+                "alice",
+                title="Stateful Chat Completions",
+                source_set_id=source_set["id"],
+            )
+            bob_conversation = store.create_conversation(workspace_id, "bob", title="Bob private chat")
+            read_token = store.create_api_token(workspace_id, "alice", name="reader", scopes=["read"])["token"]
+            write_token = store.create_api_token(workspace_id, "alice", name="chat-writer", scopes=["read", "write"])["token"]
+            store.close()
+
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            header_server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=False)
+            header_thread = threading.Thread(target=header_server.serve_forever, daemon=True)
+            header_thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            header_base = f"http://127.0.0.1:{header_server.server_port}"
+            read_headers = {"Authorization": f"Bearer {read_token}"}
+            write_headers = {"Authorization": f"Bearer {write_token}"}
+            try:
+                header_auth_denied = _post_json(
+                    f"{header_base}/chat/completions",
+                    {
+                        "conversation_id": conversation["id"],
+                        "messages": [{"role": "user", "content": "alpha renewal"}],
+                    },
+                    headers={"X-PageIndex-Workspace": workspace_id, "X-PageIndex-User": "alice"},
+                    status=403,
+                )
+                read_only_denied = _post_json(
+                    f"{base}/chat/completions",
+                    {
+                        "conversation_id": conversation["id"],
+                        "messages": [{"role": "user", "content": "alpha renewal"}],
+                    },
+                    headers=read_headers,
+                    status=403,
+                )
+                foreign_denied = _post_json(
+                    f"{base}/chat/completions",
+                    {
+                        "conversation_id": bob_conversation["id"],
+                        "messages": [{"role": "user", "content": "alpha renewal"}],
+                    },
+                    headers=write_headers,
+                    status=403,
+                )
+                provider_denied = _post_json(
+                    f"{base}/chat/completions",
+                    {
+                        "conversation_id": conversation["id"],
+                        "pageindex_synthesis": {"mode": "provider"},
+                        "messages": [{"role": "user", "content": "alpha renewal"}],
+                    },
+                    headers=write_headers,
+                    status=400,
+                )
+                first = _post_json(
+                    f"{base}/chat/completions",
+                    {
+                        "model": "pageindex-stateful-test",
+                        "conversation_id": conversation["id"],
+                        "messages": [{"role": "user", "content": "alpha renewal"}],
+                    },
+                    headers=write_headers,
+                )
+                second = _post_json(
+                    f"{base}/chat/completions",
+                    {
+                        "model": "pageindex-stateful-test",
+                        "conversationId": conversation["id"],
+                        "messages": [
+                            {"role": "system", "content": "Answer from saved evidence."},
+                            {"role": "user", "content": "what changed next"},
+                        ],
+                    },
+                    headers=write_headers,
+                )
+                override = _post_json(
+                    f"{base}/chat/completions",
+                    {
+                        "model": "pageindex-stateful-test",
+                        "conversation_id": conversation["id"],
+                        "messages": [{"role": "user", "content": "implementation risk"}],
+                        "doc_id": beta_doc_id,
+                    },
+                    headers=write_headers,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+                header_server.shutdown()
+                header_server.server_close()
+                header_thread.join(timeout=5)
+
+            store = EnterpriseStore(root)
+            try:
+                rows = store.conn.execute(
+                    """
+                    SELECT role, content, run_id
+                    FROM conversation_messages
+                    WHERE conversation_id = ?
+                    ORDER BY created_at, id
+                    """,
+                    (conversation["id"],),
+                ).fetchall()
+            finally:
+                store.close()
+
+            first_conversation = first["pageindex"]["conversation"]
+            second_conversation = second["pageindex"]["conversation"]
+            override_scope = override["pageindex"]["trace"]["scope"]
+
+            self.assertEqual(header_auth_denied["error"], "api token required")
+            self.assertEqual(read_only_denied["error"], "api token scope denied")
+            self.assertEqual(foreign_denied["error"], "conversation access denied")
+            self.assertEqual(provider_denied["error"], "conversation_id is not supported with provider synthesis")
+            self.assertEqual(first["object"], "chat.completion")
+            self.assertEqual(first["model"], "pageindex-stateful-test")
+            self.assertEqual(first_conversation["id"], conversation["id"])
+            self.assertEqual(first_conversation["history_user_message_count"], 0)
+            self.assertTrue(first_conversation["user_message_id"].startswith("msg_"))
+            self.assertTrue(first_conversation["assistant_message_id"].startswith("msg_"))
+            self.assertIn("Alpha stateful memo", first["choices"][0]["message"]["content"])
+            self.assertNotIn("Beta override memo", first["choices"][0]["message"]["content"])
+            self.assertEqual(first["pageindex"]["trace"]["scope"]["source_set_id"], source_set["id"])
+            self.assertEqual(first["pageindex"]["citations"][0]["doc_id"], alpha_doc_id)
+            self.assertEqual(second_conversation["history_user_message_count"], 1)
+            self.assertEqual(second["pageindex"]["trace"]["scope"]["source_set_id"], source_set["id"])
+            self.assertIn("Alpha stateful memo", second["choices"][0]["message"]["content"])
+            self.assertNotIn("source_set_id", override_scope)
+            self.assertEqual(override_scope["doc_ids"], [beta_doc_id])
+            self.assertIn("Beta override memo", override["choices"][0]["message"]["content"])
+            self.assertEqual([row["role"] for row in rows], ["user", "assistant", "user", "assistant", "user", "assistant"])
+            self.assertEqual([row["content"] for row in rows[::2]], ["alpha renewal", "what changed next", "implementation risk"])
+            self.assertEqual(rows[1]["run_id"], first["pageindex"]["run_id"])
+            self.assertEqual(rows[3]["run_id"], second["pageindex"]["run_id"])
+            self.assertEqual(rows[5]["run_id"], override["pageindex"]["run_id"])
+
     def test_http_chat_completions_can_use_openai_compatible_synthesis_provider(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -9460,6 +9617,63 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("Alpha memo", list_text)
             self.assertNotIn("Beta memo", list_text)
             self.assertEqual(list_finish["pageindex"]["citations"][0]["doc_id"], alpha_doc_id)
+
+    def test_http_chat_completions_streaming_conversation_turn_persists_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "stateful-stream.txt"
+            source.write_text("Stateful stream evidence says retention risk stayed high.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Stateful stream memo")
+            conversation = store.create_conversation(workspace_id, "alice", title="Stateful stream")
+            token = store.create_api_token(workspace_id, "alice", name="chat-writer", scopes=["read", "write"])["token"]
+            store.close()
+
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            headers = {"Authorization": f"Bearer {token}"}
+            try:
+                content_type, events = _post_sse(
+                    f"{base}/chat/completions",
+                    {
+                        "model": "pageindex-stateful-stream",
+                        "conversation_id": conversation["id"],
+                        "messages": [{"role": "user", "content": "stateful stream retention"}],
+                        "stream": True,
+                    },
+                    headers=headers,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            chunks = [json.loads(event) for event in events if event != "[DONE]"]
+            text = "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks)
+            finish = chunks[-1]
+            store = EnterpriseStore(root)
+            try:
+                rows = store.conn.execute(
+                    "SELECT role, content, run_id FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, id",
+                    (conversation["id"],),
+                ).fetchall()
+            finally:
+                store.close()
+
+            self.assertIn("text/event-stream", content_type)
+            self.assertEqual(events[-1], "[DONE]")
+            self.assertIn("Stateful stream memo", text)
+            self.assertEqual(finish["choices"][0]["finish_reason"], "stop")
+            self.assertEqual(finish["pageindex"]["conversation"]["id"], conversation["id"])
+            self.assertEqual(finish["pageindex"]["conversation"]["history_user_message_count"], 0)
+            self.assertEqual([row["role"] for row in rows], ["user", "assistant"])
+            self.assertEqual(rows[0]["content"], "stateful stream retention")
+            self.assertEqual(rows[1]["run_id"], finish["pageindex"]["run_id"])
 
     def test_http_strict_conversation_sessions_are_owned_by_token_user(self):
         with tempfile.TemporaryDirectory() as tmp:

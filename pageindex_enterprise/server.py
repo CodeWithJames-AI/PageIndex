@@ -2069,39 +2069,64 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         query = _chat_completion_query(messages)
         model = _optional_str(payload.get("model"), "model") or "pageindex-deterministic"
         synthesis_mode = _chat_synthesis_mode(payload.get("pageindex_synthesis"))
+        conversation_id = _chat_conversation_id(payload)
+        if conversation_id and synthesis_mode == "provider":
+            raise ValueError("conversation_id is not supported with provider synthesis")
         limit = int(payload.get("limit", 8))
         if synthesis_mode == "provider":
             limit = max(1, min(limit, 8))
         store = EnterpriseStore(self.server.root)
         try:
-            required_scope = ("read", "write") if synthesis_mode == "provider" else "read"
+            required_scope = ("read", "write") if synthesis_mode == "provider" or conversation_id else "read"
             workspace_id, user_id = self._workspace_context(
                 store,
                 required_scope=required_scope,
-                require_api_token=synthesis_mode == "provider",
+                require_api_token=synthesis_mode == "provider" or bool(conversation_id),
             )
             provider_options: dict[str, Any] = {"model": model}
             if synthesis_mode == "provider":
                 store.require_workspace_role(workspace_id, user_id, WORKSPACE_WRITE_ROLES)
                 provider_options = store.workspace_provider_request_options(workspace_id, model)
                 model = provider_options["model"]
-            result = store.query_corpus(
-                query,
-                doc_ids=_chat_doc_ids(payload),
-                expert_hints=_list_or_none(payload.get("expert_hints")),
-                workspace_id=workspace_id,
-                limit=limit,
-                actor_user_id=user_id,
-                scope_extra={
-                    "chat_completion": {
-                        "message_count": len(messages),
-                        "model": model,
-                        "synthesis_mode": synthesis_mode,
-                    }
-                },
-                stored_query=CHAT_TRACE_QUERY,
-                redact_query_tree=True,
-            )
+            conversation_metadata = None
+            if conversation_id:
+                chat_result = store.chat_message(
+                    conversation_id,
+                    user_id,
+                    _chat_latest_user_message(messages),
+                    doc_ids=_chat_doc_ids(payload),
+                    expert_hints=_list_or_none(payload.get("expert_hints")),
+                    limit=limit,
+                    expected_workspace_id=workspace_id,
+                )
+                result = chat_result["result"]
+                query = chat_result["retrieval"]["query"]
+                conversation_metadata = {
+                    "id": chat_result["conversation"]["id"],
+                    "source_set_id": chat_result["conversation"].get("source_set_id"),
+                    "folder_id": chat_result["conversation"].get("folder_id"),
+                    "user_message_id": chat_result["user_message"]["id"],
+                    "assistant_message_id": chat_result["assistant_message"]["id"],
+                    "history_user_message_count": len(chat_result["retrieval"]["history_user_messages"]),
+                }
+            else:
+                result = store.query_corpus(
+                    query,
+                    doc_ids=_chat_doc_ids(payload),
+                    expert_hints=_list_or_none(payload.get("expert_hints")),
+                    workspace_id=workspace_id,
+                    limit=limit,
+                    actor_user_id=user_id,
+                    scope_extra={
+                        "chat_completion": {
+                            "message_count": len(messages),
+                            "model": model,
+                            "synthesis_mode": synthesis_mode,
+                        }
+                    },
+                    stored_query=CHAT_TRACE_QUERY,
+                    redact_query_tree=True,
+                )
             answer = result["answer"]
             synthesis = {"mode": "deterministic"}
             if synthesis_mode == "provider" and payload.get("stream") is not True:
@@ -2123,6 +2148,8 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 "verification": result["verification"],
                 "synthesis": synthesis,
             }
+            if conversation_metadata is not None:
+                pageindex["conversation"] = conversation_metadata
             if payload.get("stream") is True:
                 if synthesis_mode == "provider":
                     with open_openai_compatible_stream(
@@ -2455,6 +2482,18 @@ def _chat_doc_ids(payload: dict[str, Any]) -> list[str] | None:
     raise ValueError("doc_id must be a string or list of strings")
 
 
+def _chat_conversation_id(payload: dict[str, Any]) -> str | None:
+    value = payload.get("conversation_id", payload.get("conversationId"))
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("conversation_id must be a string")
+    value = value.strip()
+    if not value:
+        raise ValueError("conversation_id must be a string")
+    return value
+
+
 def _chat_completion_response(
     completion_id: str,
     created: int,
@@ -2585,6 +2624,13 @@ def _chat_completion_query(messages: list[dict[str, str]]) -> str:
     if not recent_context:
         return current
     return "\n".join([*recent_context, current])
+
+
+def _chat_latest_user_message(messages: list[dict[str, str]]) -> str:
+    for message in reversed(messages):
+        if message["role"] == "user" and message["content"]:
+            return message["content"]
+    raise ValueError("at least one user message is required")
 
 
 def _rough_token_count(value: str) -> int:

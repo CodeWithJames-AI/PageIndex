@@ -234,6 +234,13 @@ def main() -> None:
     provider_config.add_argument("--timeout-seconds", type=_positive_float)
     provider_config.add_argument("--clear", action="store_true")
 
+    audit_sink = sub.add_parser("audit-sink")
+    audit_sink.add_argument("workspace_id")
+    audit_sink.add_argument("user_id")
+    audit_sink.add_argument("--relative-path")
+    audit_sink.add_argument("--disable", action="store_true")
+    audit_sink.add_argument("--clear", action="store_true")
+
     workspace_export = sub.add_parser("workspace-export")
     workspace_export.add_argument("workspace_id")
     workspace_export.add_argument("user_id")
@@ -825,6 +832,38 @@ def main() -> None:
             else:
                 config = _workspace_member_cli(
                     lambda: store.get_workspace_provider_config(args.workspace_id, args.user_id)
+                )
+            print(json.dumps(config, indent=2))
+        elif args.command == "audit-sink":
+            has_update = args.relative_path is not None or args.disable
+            if args.clear and has_update:
+                raise SystemExit("choose --clear or audit sink fields")
+            if args.clear:
+                config = _workspace_member_cli(
+                    lambda: store.clear_workspace_audit_jsonl_sink_config(args.workspace_id, args.user_id)
+                )
+            elif has_update:
+                relative_path = args.relative_path
+                if args.disable and relative_path is None:
+                    current = _workspace_member_cli(
+                        lambda: store.get_workspace_audit_jsonl_sink_config(args.workspace_id, args.user_id)
+                    )
+                    relative_path = current["relative_path"]
+                    if not current["configured"] or relative_path is None:
+                        raise SystemExit("--relative-path is required when disabling an unconfigured audit sink")
+                if relative_path is None:
+                    raise SystemExit("--relative-path is required when setting audit sink")
+                config = _workspace_member_cli(
+                    lambda: store.set_workspace_audit_jsonl_sink_config(
+                        args.workspace_id,
+                        args.user_id,
+                        relative_path=relative_path,
+                        enabled=not args.disable,
+                    )
+                )
+            else:
+                config = _workspace_member_cli(
+                    lambda: store.get_workspace_audit_jsonl_sink_config(args.workspace_id, args.user_id)
                 )
             print(json.dumps(config, indent=2))
         elif args.command == "workspace-export":

@@ -4918,6 +4918,156 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("provider_config.clear", [event["action"] for event in events])
             self.assertNotIn("cli-secret-key", serialized)
 
+    def test_audit_sink_cli_get_set_disable_clear(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run(
+                [*base, "workspace", "Team", "--workspace-id", "ws_cli"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_cli", "alice", "--role", "owner"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_cli", "ada", "--role", "admin", "--actor-user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_cli", "bob", "--role", "member", "--actor-user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            initial = json.loads(
+                subprocess.run(
+                    [*base, "audit-sink", "ws_cli", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            disable_unconfigured = subprocess.run(
+                [*base, "audit-sink", "ws_cli", "alice", "--disable"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            saved = json.loads(
+                subprocess.run(
+                    [*base, "audit-sink", "ws_cli", "alice", "--relative-path", "audit/cli.jsonl"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            read_back = json.loads(
+                subprocess.run(
+                    [*base, "audit-sink", "ws_cli", "ada"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            member_denied = subprocess.run(
+                [*base, "audit-sink", "ws_cli", "bob"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            bad_path = subprocess.run(
+                [*base, "audit-sink", "ws_cli", "alice", "--relative-path", "../outside.jsonl"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            mixed_clear = subprocess.run(
+                [*base, "audit-sink", "ws_cli", "alice", "--clear", "--relative-path", "audit/cli.jsonl"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            disabled = json.loads(
+                subprocess.run(
+                    [*base, "audit-sink", "ws_cli", "alice", "--disable"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            cleared = json.loads(
+                subprocess.run(
+                    [*base, "audit-sink", "ws_cli", "alice", "--clear"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+
+            sink_path = root / "audit" / "cli.jsonl"
+            lines = [json.loads(line) for line in sink_path.read_text(encoding="utf-8").splitlines()]
+            store = EnterpriseStore(root)
+            try:
+                events = store.list_audit_events("ws_cli", "alice")
+            finally:
+                store.close()
+
+            self.assertEqual(initial["configured"], False)
+            self.assertNotEqual(disable_unconfigured.returncode, 0)
+            self.assertIn("--relative-path is required", disable_unconfigured.stderr)
+            self.assertEqual(saved["configured"], True)
+            self.assertEqual(saved["relative_path"], "audit/cli.jsonl")
+            self.assertEqual(saved["enabled"], True)
+            self.assertEqual(read_back["relative_path"], "audit/cli.jsonl")
+            self.assertNotEqual(member_denied.returncode, 0)
+            self.assertIn("workspace role denied", member_denied.stderr)
+            self.assertNotIn("Traceback", member_denied.stderr)
+            self.assertNotEqual(bad_path.returncode, 0)
+            self.assertIn("audit sink path must stay inside", bad_path.stderr)
+            self.assertNotIn("Traceback", bad_path.stderr)
+            self.assertNotEqual(mixed_clear.returncode, 0)
+            self.assertIn("choose --clear or audit sink fields", mixed_clear.stderr)
+            self.assertNotIn("Traceback", mixed_clear.stderr)
+            self.assertEqual(disabled["relative_path"], "audit/cli.jsonl")
+            self.assertEqual(disabled["enabled"], False)
+            self.assertEqual(cleared["configured"], False)
+            self.assertEqual([line["action"] for line in lines], ["audit_sink.config_update"])
+            self.assertIn("audit_sink.config_update", [event["action"] for event in events])
+            self.assertIn("audit_sink.config_clear", [event["action"] for event in events])
+
     def test_workspace_export_cli_writes_redacted_zip_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

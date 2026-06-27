@@ -598,6 +598,7 @@ DASHBOARD_HTML = """<!doctype html>
               <div class="provider-actions">
                 <button id="refreshAuditSinkButton" class="secondary" type="button">Sink</button>
                 <button id="checkAuditSinkButton" class="secondary" type="button">Check sink</button>
+                <button id="statusAuditSinkButton" class="secondary" type="button">Status</button>
                 <button id="saveAuditSinkButton" type="button">Save sink</button>
                 <button id="clearAuditSinkButton" class="secondary" type="button">Clear sink</button>
               </div>
@@ -2062,7 +2063,9 @@ DASHBOARD_HTML = """<!doctype html>
       }
       auditSinkSummary.className = config.enabled ? "status ok" : "muted";
       const state = config.enabled ? "enabled" : "disabled";
-      auditSinkSummary.textContent = `${state} | ${config.relative_path || "no path"} | updated ${config.updated_at || "unknown"}`;
+      const delivery = Number.isFinite(Number(config.line_count)) ? ` | lines ${config.line_count}` : "";
+      const lastEvent = config.last_event && config.last_event.action ? ` | last ${config.last_event.action}` : "";
+      auditSinkSummary.textContent = `${state} | ${config.relative_path || "no path"}${delivery}${lastEvent} | updated ${config.updated_at || "unknown"}`;
     }
 
     function renderAuditPurgeResult(result) {
@@ -2730,6 +2733,16 @@ DASHBOARD_HTML = """<!doctype html>
       auditSinkSummary.className = report.ok ? "status ok" : "status warn";
       auditSinkSummary.textContent = `Sink check ${report.reason || "unknown"}.`;
       setStatus(report.ok ? "Audit sink check passed." : "Audit sink check needs attention.", report.ok ? "ok" : "warn");
+    }
+
+    async function statusAuditSinkConfig() {
+      setStatus("Loading audit sink status...");
+      const report = await api("/audit-sink/status");
+      renderAuditSinkConfig(report);
+      auditSinkSummary.className = report.ok ? "status ok" : "status warn";
+      const lastEvent = report.last_event && report.last_event.action ? ` Last ${report.last_event.action}.` : "";
+      auditSinkSummary.textContent = `Sink status ${report.reason || "unknown"} | lines ${report.line_count || 0}.${lastEvent}`;
+      setStatus(report.ok ? "Audit sink status loaded." : "Audit sink status needs attention.", report.ok ? "ok" : "warn");
     }
 
     async function verifyAuditIntegrity(options = {}) {
@@ -4232,6 +4245,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("clearAuditRetentionButton").addEventListener("click", () => clearAuditRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshAuditSinkButton").addEventListener("click", () => refreshAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("checkAuditSinkButton").addEventListener("click", () => checkAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("statusAuditSinkButton").addEventListener("click", () => statusAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveAuditSinkButton").addEventListener("click", () => saveAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearAuditSinkButton").addEventListener("click", () => clearAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("enableAuditLegalHoldButton").addEventListener("click", () => setAuditLegalHold(true).catch((error) => setStatus(error.message, "error")));

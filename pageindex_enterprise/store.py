@@ -3086,6 +3086,62 @@ class EnterpriseStore:
             report["reason"] = "unavailable"
         return report
 
+    def get_workspace_audit_jsonl_sink_status(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        report = self.check_workspace_audit_jsonl_sink(workspace_id, actor_user_id)
+        status = {
+            **report,
+            "sink_exists": False,
+            "byte_size": 0,
+            "line_count": 0,
+            "last_line_valid": None,
+            "last_event": None,
+        }
+        relative_path = report.get("relative_path")
+        if not isinstance(relative_path, str):
+            return status
+        sink_path = _workspace_audit_sink_path(self.root, relative_path)
+        if not sink_path or not sink_path.exists() or not sink_path.is_file():
+            return status
+        status["sink_exists"] = True
+        try:
+            status["byte_size"] = sink_path.stat().st_size
+            last_line: str | None = None
+            with sink_path.open("r", encoding="utf-8") as sink:
+                for line in sink:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    status["line_count"] += 1
+                    last_line = stripped
+        except OSError:
+            status["ok"] = False
+            status["reason"] = "status_unreadable"
+            return status
+        if last_line is None:
+            return status
+        try:
+            event = json.loads(last_line)
+        except json.JSONDecodeError:
+            status["ok"] = False
+            status["reason"] = "last_line_invalid"
+            status["last_line_valid"] = False
+            return status
+        if not isinstance(event, dict):
+            status["ok"] = False
+            status["reason"] = "last_line_invalid"
+            status["last_line_valid"] = False
+            return status
+        status["last_line_valid"] = True
+        status["last_event"] = {
+            "id": event.get("id"),
+            "action": event.get("action"),
+            "user_id": event.get("user_id"),
+            "target_type": event.get("target_type"),
+            "created_at": event.get("created_at"),
+            "integrity_hash": event.get("integrity_hash"),
+        }
+        return status
+
     def set_workspace_audit_jsonl_sink_config(
         self,
         workspace_id: str,

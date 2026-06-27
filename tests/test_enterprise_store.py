@@ -5348,6 +5348,16 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            status = json.loads(
+                subprocess.run(
+                    [*base, "audit-sink", "ws_cli", "alice", "--status"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
             read_back = json.loads(
                 subprocess.run(
                     [*base, "audit-sink", "ws_cli", "ada"],
@@ -5427,6 +5437,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(checked["ok"])
             self.assertEqual(checked["reason"], "ok")
             self.assertTrue(checked["checks"]["parent_preparable"])
+            self.assertTrue(status["ok"])
+            self.assertTrue(status["sink_exists"])
+            self.assertEqual(status["line_count"], 1)
+            self.assertTrue(status["last_line_valid"])
+            self.assertEqual(status["last_event"]["action"], "audit_sink.config_update")
+            self.assertIn("integrity_hash", status["last_event"])
+            self.assertNotIn("details", status["last_event"])
             self.assertEqual(disabled["relative_path"], "audit/cli.jsonl")
             self.assertEqual(disabled["enabled"], False)
             self.assertEqual(cleared["configured"], False)
@@ -14088,7 +14105,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 local_header_denied = _get_error(f"{local_base}/audit-sink", headers=legacy_headers)
                 initial = _get_json(f"{base}/audit-sink", headers=audit_headers)
                 initial_check = _get_json(f"{base}/audit-sink/check", headers=audit_headers)
+                initial_status = _get_json(f"{base}/audit-sink/status", headers=audit_headers)
                 write_get_blocked = _get_error(f"{base}/audit-sink", headers=write_headers)
+                write_status_blocked = _get_error(f"{base}/audit-sink/status", headers=write_headers)
                 audit_write_blocked = _post_json(
                     f"{base}/audit-sink",
                     {"relative_path": "audit/http.jsonl"},
@@ -14131,6 +14150,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=full_headers,
                 )
                 checked = _get_json(f"{base}/audit-sink/check", headers=audit_headers)
+                status = _get_json(f"{base}/audit-sink/status", headers=audit_headers)
                 read_back = _get_json(f"{base}/audit-sink", headers=audit_headers)
                 disabled = _post_json(
                     f"{base}/audit-sink",
@@ -14154,7 +14174,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertFalse(initial["configured"])
             self.assertFalse(initial_check["ok"])
             self.assertEqual(initial_check["reason"], "not_configured")
+            self.assertFalse(initial_status["ok"])
+            self.assertEqual(initial_status["line_count"], 0)
             self.assertEqual(write_get_blocked["error"], "api token scope denied")
+            self.assertEqual(write_status_blocked["error"], "api token scope denied")
             self.assertEqual(audit_write_blocked["error"], "api token scope denied")
             self.assertEqual(write_audit_blocked["error"], "api token scope denied")
             self.assertEqual(member_blocked["error"], "workspace role denied")
@@ -14167,6 +14190,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(checked["ok"])
             self.assertEqual(checked["reason"], "ok")
             self.assertTrue(checked["checks"]["target_not_directory"])
+            self.assertTrue(status["ok"])
+            self.assertTrue(status["sink_exists"])
+            self.assertGreater(status["byte_size"], 0)
+            self.assertEqual(status["line_count"], 1)
+            self.assertTrue(status["last_line_valid"])
+            self.assertEqual(status["last_event"]["action"], "audit_sink.config_update")
+            self.assertNotIn("details", status["last_event"])
             self.assertEqual(read_back["relative_path"], "audit/http.jsonl")
             self.assertEqual(disabled["relative_path"], "audit/http-disabled.jsonl")
             self.assertFalse(disabled["enabled"])
@@ -14652,6 +14682,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("checkAuditSinkButton", body)
                     self.assertIn("/audit-sink/check", body)
                     self.assertIn("checkAuditSinkConfig", body)
+                    self.assertIn("statusAuditSinkButton", body)
+                    self.assertIn("/audit-sink/status", body)
+                    self.assertIn("statusAuditSinkConfig", body)
                     self.assertIn("saveAuditSinkConfig", body)
                     self.assertIn("clearAuditSinkConfig", body)
                     self.assertIn("/query-retention", body)

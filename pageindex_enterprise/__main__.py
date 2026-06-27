@@ -6,7 +6,14 @@ import json
 from .deployment import run_deployment_check
 from .eval import run_enterprise_eval
 from .server import serve
-from .store import API_TOKEN_SCOPES, EnterpriseStore, _UNSET, expires_at_from_days, validate_workspace_import_bundle
+from .store import (
+    API_TOKEN_SCOPES,
+    EnterpriseStore,
+    _UNSET,
+    _redacted_audit_export_events,
+    expires_at_from_days,
+    validate_workspace_import_bundle,
+)
 
 
 def _positive_int(value: str) -> int:
@@ -880,19 +887,20 @@ def main() -> None:
             )
             print(json.dumps(manifest, indent=2))
         elif args.command == "audit-log":
+            events = store.list_audit_events(
+                args.workspace_id,
+                args.user_id,
+                limit=args.limit,
+                since=args.since,
+                until=args.until,
+                action=args.action,
+                event_user_id=args.event_user_id,
+                target_type=args.target_type,
+                target_id=args.target_id,
+            )
             print(
                 json.dumps(
-                    store.list_audit_events(
-                        args.workspace_id,
-                        args.user_id,
-                        limit=args.limit,
-                        since=args.since,
-                        until=args.until,
-                        action=args.action,
-                        event_user_id=args.event_user_id,
-                        target_type=args.target_type,
-                        target_id=args.target_id,
-                    ),
+                    _redacted_audit_export_events(events),
                     indent=2,
                 )
             )

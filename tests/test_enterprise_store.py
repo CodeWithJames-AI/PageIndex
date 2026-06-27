@@ -7183,6 +7183,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             store = EnterpriseStore(root)
             try:
+                secret_event = store.record_audit_event(
+                    "ws_cli",
+                    "alice",
+                    "custom.secret_probe",
+                    target_type="probe",
+                    target_id="probe_cli",
+                    details={
+                        "note": "pit_cli_secret_should_not_log",
+                        "source_set_link": "pss_cli_secret_should_not_log",
+                        "token_hash": "hash_should_not_log",
+                    },
+                )
                 bob_event = store.record_audit_event(
                     "ws_cli",
                     "bob",
@@ -7261,11 +7273,20 @@ class EnterpriseStoreTest(unittest.TestCase):
             serialized = json.dumps(events, sort_keys=True)
             exported_event = json.loads(exported)
             csv_rows = list(csv.DictReader(io.StringIO(exported_csv)))
+            secret_event_payload = next(event for event in events if event["id"] == secret_event)
 
             self.assertEqual([event["id"] for event in bob_events], [bob_event])
-            self.assertEqual([event["action"] for event in events[:3]], ["document.delete", "api_token.revoke", "api_token.create"])
+            self.assertEqual(
+                [event["action"] for event in events[:4]],
+                ["document.delete", "custom.secret_probe", "api_token.revoke", "api_token.create"],
+            )
             self.assertEqual(exported_event["action"], "api_token.revoke")
             self.assertEqual([row["action"] for row in csv_rows], ["api_token.create", "api_token.revoke"])
+            self.assertEqual(
+                secret_event_payload["details"],
+                {"note": "[redacted]", "source_set_link": "[redacted]"},
+            )
+            self.assertIsNone(secret_event_payload["integrity_hash"])
             self.assertTrue(integrity["ok"])
             self.assertGreaterEqual(integrity["checked"], 3)
             self.assertTrue(integrity["latest_integrity_hash"])
@@ -7275,6 +7296,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn(token["token"], serialized)
             self.assertNotIn(token["token"], exported)
             self.assertNotIn(token["token"], exported_csv)
+            self.assertNotIn("pit_cli_secret_should_not_log", serialized)
+            self.assertNotIn("pss_cli_secret_should_not_log", serialized)
+            self.assertNotIn("hash_should_not_log", serialized)
             self.assertNotIn("token_hash", serialized)
             self.assertNotIn("token_hash", exported)
             self.assertNotIn("token_hash", exported_csv)

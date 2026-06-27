@@ -9360,6 +9360,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("/documents", body)
                     self.assertIn("/ingest-file", body)
                     self.assertIn("/upload-file", body)
+                    self.assertIn("/upload-files", body)
+                    self.assertIn("multiple", body)
                     self.assertIn("/reindex-upload", body)
                     self.assertIn("/import-structure", body)
                     self.assertIn("/query", body)
@@ -9781,6 +9783,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers={"X-PageIndex-Workspace": workspace_id, "X-PageIndex-User": "bob"},
                     status=403,
                 )
+                batch_blocked = _post_multipart(
+                    f"{base}/upload-files",
+                    {"file": [("batch-a.txt", b"Blocked batch evidence.")]},
+                    headers={"X-PageIndex-Workspace": workspace_id, "X-PageIndex-User": "bob"},
+                    status=403,
+                )
                 bad_type = _post_json(
                     f"{base}/upload-file",
                     {"path": "not multipart"},
@@ -9804,20 +9812,64 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=headers,
                     status=201,
                 )
+                batch_uploaded = _post_multipart(
+                    f"{base}/upload-files",
+                    {
+                        "file": [
+                            ("batch-alpha.txt", b"Alpha batch upload evidence."),
+                            ("batch-beta.txt", b"Beta batch upload evidence."),
+                        ],
+                        "folder_id": folder["folder_id"],
+                    },
+                    headers=headers,
+                    status=201,
+                )
+                partial_batch = _post_multipart(
+                    f"{base}/upload-files",
+                    {
+                        "file": [
+                            ("batch-good.txt", b"Good partial batch evidence."),
+                            ("batch-broken.txt", b"\xff\xfe\xfa"),
+                        ],
+                        "folder_id": folder["folder_id"],
+                    },
+                    headers=headers,
+                    status=201,
+                )
                 docs = _get_json(f"{base}/documents", headers=headers)
                 result = _post_json(f"{base}/query", {"query": "inflation upload"}, headers=headers)
+                batch_result = _post_json(f"{base}/query", {"query": "beta batch upload"}, headers=headers)
+                partial_result = _post_json(f"{base}/query", {"query": "partial batch"}, headers=headers)
                 stored_path = Path(uploaded["stored_path"])
+                batch_paths = [Path(item["stored_path"]) for item in batch_uploaded["documents"]]
+                partial_error_path = root / "uploads" / workspace_id
+                broken_files = list(partial_error_path.glob("*batch-broken*")) if partial_error_path.exists() else []
 
                 self.assertEqual(blocked["error"], "workspace access denied")
+                self.assertEqual(batch_blocked["error"], "workspace access denied")
                 self.assertEqual(bad_type["error"], "multipart/form-data is required")
                 self.assertEqual(missing_file["error"], "file is required")
-                self.assertEqual(docs["documents"][0]["id"], uploaded["doc_id"])
-                self.assertEqual(docs["documents"][0]["workspace_id"], workspace_id)
-                self.assertEqual(docs["documents"][0]["folder_id"], folder["folder_id"])
+                self.assertIn(uploaded["doc_id"], {doc["id"] for doc in docs["documents"]})
+                self.assertEqual({doc["workspace_id"] for doc in docs["documents"]}, {workspace_id})
+                self.assertEqual(
+                    {doc["folder_id"] for doc in docs["documents"] if doc["id"] in {uploaded["doc_id"], *[item["doc_id"] for item in batch_uploaded["documents"]]}},
+                    {folder["folder_id"]},
+                )
                 self.assertEqual(result["citations"][0]["doc_id"], uploaded["doc_id"])
+                self.assertEqual(len(batch_uploaded["documents"]), 2)
+                self.assertEqual(batch_uploaded["errors"], [])
+                self.assertEqual({item["filename"] for item in batch_uploaded["documents"]}, {"batch-alpha.txt", "batch-beta.txt"})
+                self.assertEqual(len(partial_batch["documents"]), 1)
+                self.assertEqual(partial_batch["documents"][0]["filename"], "batch-good.txt")
+                self.assertEqual(partial_batch["errors"][0]["filename"], "batch-broken.txt")
+                self.assertIn("decode", partial_batch["errors"][0]["error"].casefold())
+                self.assertIn(batch_result["citations"][0]["doc_id"], {item["doc_id"] for item in batch_uploaded["documents"]})
+                self.assertEqual(partial_result["citations"][0]["doc_id"], partial_batch["documents"][0]["doc_id"])
                 self.assertTrue(result["verification"]["ok"], result["verification"]["errors"])
                 self.assertTrue(_is_relative_to(stored_path.resolve(), (root / "uploads" / workspace_id).resolve()))
+                self.assertTrue(all(_is_relative_to(path.resolve(), (root / "uploads" / workspace_id).resolve()) for path in batch_paths))
                 self.assertNotIn("..", stored_path.name)
+                self.assertEqual(broken_files, [])
             finally:
                 server.shutdown()
                 server.server_close()
@@ -10385,19 +10437,21 @@ def _post_multipart(url: str, fields: dict, status: int = 200, headers=None):
     boundary = "----pageindex-test-boundary"
     chunks = []
     for name, value in fields.items():
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-        if isinstance(value, tuple):
-            filename, content = value
-            chunks.append(
-                (
-                    f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
-                    "Content-Type: application/octet-stream\r\n\r\n"
-                ).encode("utf-8")
-            )
-            chunks.append(content)
-            chunks.append(b"\r\n")
-        else:
-            chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8"))
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            chunks.append(f"--{boundary}\r\n".encode("utf-8"))
+            if isinstance(item, tuple):
+                filename, content = item
+                chunks.append(
+                    (
+                        f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                        "Content-Type: application/octet-stream\r\n\r\n"
+                    ).encode("utf-8")
+                )
+                chunks.append(content)
+                chunks.append(b"\r\n")
+            else:
+                chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n{item}\r\n'.encode("utf-8"))
     chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
     body = b"".join(chunks)
     request = Request(

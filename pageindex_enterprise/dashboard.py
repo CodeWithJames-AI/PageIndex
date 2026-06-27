@@ -401,7 +401,7 @@ DASHBOARD_HTML = """<!doctype html>
           <section>
             <h2 class="section-title">Upload</h2>
             <div class="import-row">
-              <input id="uploadInput" type="file" aria-label="Upload file">
+              <input id="uploadInput" type="file" aria-label="Upload files" multiple>
               <button id="uploadButton" type="button">Upload</button>
             </div>
           </section>
@@ -2819,20 +2819,19 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function uploadFile() {
-      const file = uploadInput.files && uploadInput.files[0];
-      if (!file) {
-        setStatus("Choose a file.", "warn");
+      const files = Array.from(uploadInput.files || []);
+      if (!files.length) {
+        setStatus("Choose one or more files.", "warn");
         return;
       }
       const form = new FormData();
-      form.append("file", file);
-      form.append("name", file.name);
+      files.forEach((file) => form.append("file", file));
       const folderId = selectedFolderId();
       if (folderId) {
         form.append("folder_id", folderId);
       }
-      setStatus("Uploading...");
-      const response = await fetch("/upload-file", {
+      setStatus(files.length === 1 ? "Uploading..." : `Uploading ${files.length} files...`);
+      const response = await fetch(files.length === 1 ? "/upload-file" : "/upload-files", {
         method: "POST",
         headers: authHeaders(),
         body: form
@@ -2841,7 +2840,9 @@ DASHBOARD_HTML = """<!doctype html>
       if (!response.ok) {
         throw new Error(payload.error || response.statusText);
       }
-      setStatus(`Uploaded ${payload.doc_id}.`, "ok");
+      const uploaded = payload.documents ? payload.documents.length : (payload.doc_id ? 1 : 0);
+      const failed = payload.errors ? payload.errors.length : 0;
+      setStatus(failed ? `Uploaded ${uploaded}, failed ${failed}.` : `Uploaded ${uploaded}.`, failed ? "warn" : "ok");
       await refreshDocuments();
     }
 

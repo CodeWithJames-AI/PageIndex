@@ -27,6 +27,7 @@ from .store import (
 
 MAX_JSON_BODY_BYTES = 64 * 1024
 MAX_MULTIPART_BODY_BYTES = 10 * 1024 * 1024
+MAX_MULTIPART_FILES = 20
 
 
 class EnterpriseHTTPServer(ThreadingHTTPServer):
@@ -411,6 +412,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parsed = urlparse(self.path)
+            if parsed.path == "/upload-files":
+                self._upload_files()
+                return
             if parsed.path == "/upload-file":
                 self._upload_file()
                 return
@@ -1031,6 +1035,37 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 stored_path.unlink(missing_ok=True)
                 raise
             self._json({"doc_id": doc_id, "stored_path": str(stored_path)}, HTTPStatus.CREATED)
+        finally:
+            store.close()
+
+    def _upload_files(self) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            uploads = self._read_multipart_files()
+            documents: list[dict[str, Any]] = []
+            errors: list[dict[str, str]] = []
+            for upload in uploads:
+                stored_path: Path | None = None
+                filename = _safe_upload_filename(upload["filename"])
+                try:
+                    stored_path, filename = self._store_upload_file(workspace_id, upload)
+                    doc_id = store.ingest_file(
+                        stored_path,
+                        folder_id=_optional_str(upload.get("folder_id"), "folder_id"),
+                        name=upload.get("name") or filename,
+                        workspace_id=workspace_id,
+                        actor_user_id=user_id,
+                        audit_action="document.upload",
+                    )
+                except Exception as exc:
+                    if stored_path:
+                        stored_path.unlink(missing_ok=True)
+                    errors.append({"filename": filename, "error": str(exc)})
+                else:
+                    documents.append({"filename": filename, "doc_id": doc_id, "stored_path": str(stored_path)})
+            status = HTTPStatus.CREATED if documents else HTTPStatus.BAD_REQUEST
+            self._json({"documents": documents, "errors": errors}, status)
         finally:
             store.close()
 
@@ -1802,6 +1837,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         return data
 
     def _read_multipart_file(self) -> dict[str, Any]:
+        return self._read_multipart_files()[0]
+
+    def _read_multipart_files(self) -> list[dict[str, Any]]:
         content_type = self.headers.get("Content-Type", "")
         if "multipart/form-data" not in content_type:
             raise ValueError("multipart/form-data is required")
@@ -1815,24 +1853,27 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         if not message.is_multipart():
             raise ValueError("multipart/form-data is required")
         fields: dict[str, str] = {}
-        file_part: dict[str, Any] | None = None
+        file_parts: list[dict[str, Any]] = []
         for part in message.iter_parts():
             if part.get_content_disposition() != "form-data":
                 continue
             name = part.get_param("name", header="content-disposition")
             filename = part.get_filename()
             content = part.get_payload(decode=True) or b""
-            if name == "file" and filename:
-                file_part = {"filename": filename, "content": content}
+            if name in {"file", "files"} and filename:
+                file_parts.append({"filename": filename, "content": content})
             elif name:
                 fields[name] = content.decode("utf-8", errors="replace").strip()
-        if not file_part:
+        if not file_parts:
             raise ValueError("file is required")
-        if fields.get("name"):
-            file_part["name"] = fields["name"]
+        if len(file_parts) > MAX_MULTIPART_FILES:
+            raise ValueError(f"too many files; maximum is {MAX_MULTIPART_FILES}")
+        if len(file_parts) == 1 and fields.get("name"):
+            file_parts[0]["name"] = fields["name"]
         if fields.get("folder_id"):
-            file_part["folder_id"] = fields["folder_id"]
-        return file_part
+            for file_part in file_parts:
+                file_part["folder_id"] = fields["folder_id"]
+        return file_parts
 
     def _workspace_context(
         self,

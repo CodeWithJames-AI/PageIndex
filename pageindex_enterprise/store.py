@@ -4985,11 +4985,32 @@ class EnterpriseStore:
         deleted_folder_ids = [row["id"] for row in folder_rows]
         with self._atomic():
             scoped_conversation_count = 0
+            unfiled_document_count = 0
+            folder_access_grant_count = 0
+            folder_group_access_grant_count = 0
             if deleted_folder_ids:
                 placeholders = ",".join("?" for _ in deleted_folder_ids)
                 scoped_conversation_count = int(
                     self._one(
                         f"SELECT COUNT(*) AS count FROM conversations WHERE folder_id IN ({placeholders})",
+                        tuple(deleted_folder_ids),
+                    )["count"]
+                )
+                unfiled_document_count = int(
+                    self._one(
+                        f"SELECT COUNT(*) AS count FROM documents WHERE folder_id IN ({placeholders})",
+                        tuple(deleted_folder_ids),
+                    )["count"]
+                )
+                folder_access_grant_count = int(
+                    self._one(
+                        f"SELECT COUNT(*) AS count FROM folder_access_grants WHERE folder_id IN ({placeholders})",
+                        tuple(deleted_folder_ids),
+                    )["count"]
+                )
+                folder_group_access_grant_count = int(
+                    self._one(
+                        f"SELECT COUNT(*) AS count FROM folder_group_access_grants WHERE folder_id IN ({placeholders})",
                         tuple(deleted_folder_ids),
                     )["count"]
                 )
@@ -5014,6 +5035,10 @@ class EnterpriseStore:
                         "name": folder["name"],
                         "path": folder["path"],
                         "scoped_conversation_count": scoped_conversation_count,
+                        "folder_count": len(deleted_folder_ids),
+                        "unfiled_document_count": unfiled_document_count,
+                        "folder_access_grant_count": folder_access_grant_count,
+                        "folder_group_access_grant_count": folder_group_access_grant_count,
                     },
                 )
         return deleted

@@ -86,6 +86,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             store = EnterpriseStore(Path(tmp) / "workspace")
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
             store.add_workspace_member(workspace_id, "vera", "viewer", actor_user_id="alice")
 
             reports = store.create_folder("Reports", workspace_id=workspace_id, actor_user_id="alice")
@@ -99,6 +100,19 @@ class EnterpriseStoreTest(unittest.TestCase):
                 folder_id=archive,
                 workspace_id=workspace_id,
                 actor_user_id="alice",
+            )
+            group = store.create_workspace_group(workspace_id, "alice", "Folder reviewers")
+            store.grant_folder_access(
+                reports,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="bob",
+            )
+            store.grant_folder_group_access(
+                archive,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                group_id=group["id"],
             )
 
             with self.assertRaisesRegex(ValueError, "Folder path already exists"):
@@ -121,13 +135,26 @@ class EnterpriseStoreTest(unittest.TestCase):
 
             self.assertNotIn("/Reports 2026/Archive", [folder["path"] for folder in store.list_folders(workspace_id)])
             self.assertIsNone(store.get_document(doc_id)["folder_id"])
+            delete_events = store.list_audit_events(workspace_id, "alice", action="folder.delete")
             self.assertEqual(
                 [event["action"] for event in store.list_audit_events(workspace_id, "alice", action="folder.rename")],
                 ["folder.rename"],
             )
             self.assertEqual(
-                [event["action"] for event in store.list_audit_events(workspace_id, "alice", action="folder.delete")],
+                [event["action"] for event in delete_events],
                 ["folder.delete"],
+            )
+            self.assertEqual(
+                delete_events[0]["details"],
+                {
+                    "name": "Reports 2026",
+                    "path": "/Reports 2026",
+                    "scoped_conversation_count": 0,
+                    "folder_count": 2,
+                    "unfiled_document_count": 1,
+                    "folder_access_grant_count": 1,
+                    "folder_group_access_grant_count": 1,
+                },
             )
 
     def test_workspace_folders_can_be_moved_without_cycles(self):

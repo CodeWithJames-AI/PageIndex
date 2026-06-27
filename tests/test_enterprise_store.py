@@ -2085,12 +2085,17 @@ class EnterpriseStoreTest(unittest.TestCase):
             jsonl_export = store.export_conversation_transcript(conversation["id"], "alice", format="jsonl")
             markdown_export = store.export_conversation_transcript(conversation["id"], "alice", format="markdown")
             spoof_markdown_export = store.export_conversation_transcript(markdown_conversation["id"], "alice", format="markdown")
+            spoof_share_link = store.create_conversation_share_link(markdown_conversation["id"], "alice")
             export_events = store.list_audit_events(workspace_id, "alice", action="conversation.export")
             export_lines = [json.loads(line) for line in jsonl_export.splitlines()]
             serialized_export_events = json.dumps(export_events, sort_keys=True)
             deleted_spoof = store.delete_conversation(markdown_conversation["id"], "alice")
             remaining_spoof_messages = store.conn.execute(
                 "SELECT COUNT(*) AS count FROM conversation_messages WHERE conversation_id = ?",
+                (markdown_conversation["id"],),
+            ).fetchone()["count"]
+            remaining_spoof_share_links = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM conversation_share_links WHERE conversation_id = ?",
                 (markdown_conversation["id"],),
             ).fetchone()["count"]
             spoof_trace = store.get_query_trace(spoof_chat["result"]["run_id"], workspace_id=workspace_id, actor_user_id="alice")
@@ -2129,11 +2134,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(deleted_spoof)
             self.assertTrue(deleted_archived)
             self.assertEqual(remaining_spoof_messages, 0)
+            self.assertEqual(remaining_spoof_share_links, 0)
+            self.assertIsNone(store.resolve_conversation_share_link(spoof_share_link["token"]))
             self.assertIsNotNone(spoof_trace)
             self.assertEqual(delete_events[0]["target_id"], markdown_conversation["id"])
             self.assertEqual(delete_events[0]["details"]["message_count"], 2)
+            self.assertEqual(delete_events[0]["details"]["share_link_count"], 1)
             self.assertEqual(delete_events[0]["details"]["was_archived"], False)
             self.assertNotIn("spoof", serialized_delete_events)
+            self.assertNotIn(spoof_share_link["token"], serialized_delete_events)
             archived = store.archive_conversation(conversation["id"], "alice")
             hidden_conversations = store.list_conversations(workspace_id, "alice")
             archived_conversations = store.list_conversations(workspace_id, "alice", include_archived=True)

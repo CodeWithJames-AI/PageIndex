@@ -7634,6 +7634,10 @@ class EnterpriseStore:
             "SELECT COUNT(*) AS count FROM conversation_messages WHERE conversation_id = ?",
             (conversation["id"],),
         ).fetchone()["count"]
+        share_link_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM conversation_share_links WHERE workspace_id = ? AND conversation_id = ?",
+            (conversation["workspace_id"], conversation["id"]),
+        ).fetchone()["count"]
         with self._atomic():
             cursor = self.conn.execute(
                 "DELETE FROM conversations WHERE id = ?",
@@ -7649,6 +7653,7 @@ class EnterpriseStore:
                     target_id=conversation["id"],
                     details={
                         "message_count": message_count,
+                        "share_link_count": share_link_count,
                         "was_archived": bool(conversation.get("archived_at")),
                     },
                 )

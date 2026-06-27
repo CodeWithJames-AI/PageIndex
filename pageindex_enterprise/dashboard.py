@@ -689,6 +689,17 @@ DASHBOARD_HTML = """<!doctype html>
             <div id="documentShareList" class="member-list muted" style="margin-top:12px">No document shares loaded.</div>
             <input id="shareUrlOutput" readonly value="" placeholder="latest share URL" aria-label="Latest share URL">
           </section>
+          <section>
+            <h2 class="section-title">ACL bulk</h2>
+            <div class="stack">
+              <textarea id="aclBulkPolicyInput" aria-label="ACL bulk policy">{"document_grants":[],"folder_grants":[]}</textarea>
+              <div class="provider-actions">
+                <button id="dryRunAclBulkButton" class="secondary" type="button">Dry run</button>
+                <button id="applyAclBulkButton" type="button">Apply</button>
+              </div>
+              <pre id="aclBulkReportText">{}</pre>
+            </div>
+          </section>
           <div id="status" class="status"></div>
         </div>
       </aside>
@@ -829,6 +840,8 @@ DASHBOARD_HTML = """<!doctype html>
     const documentList = document.getElementById("documentList");
     const documentAccessPanel = document.getElementById("documentAccessPanel");
     const folderAccessPanel = document.getElementById("folderAccessPanel");
+    const aclBulkPolicyInput = document.getElementById("aclBulkPolicyInput");
+    const aclBulkReportText = document.getElementById("aclBulkReportText");
     const versionList = document.getElementById("versionList");
     const pagePreviewList = document.getElementById("pagePreviewList");
     const questionSuggestionList = document.getElementById("questionSuggestionList");
@@ -1117,6 +1130,24 @@ DASHBOARD_HTML = """<!doctype html>
         throw new Error(payload.error || response.statusText);
       }
       return payload;
+    }
+
+    async function runAclBulk(dryRun) {
+      let policy;
+      try {
+        policy = JSON.parse(aclBulkPolicyInput.value || "{}");
+      } catch (error) {
+        setStatus("ACL bulk JSON is invalid.", "error");
+        return;
+      }
+      setStatus(dryRun ? "Dry-running ACL bulk import..." : "Applying ACL bulk import...");
+      const report = await api("/acl-bulk", {
+        method: "POST",
+        body: JSON.stringify({ policy, dry_run: dryRun })
+      });
+      aclBulkReportText.textContent = JSON.stringify(report, null, 2);
+      const errorText = report.errors && report.errors.length ? ` with ${report.errors.length} errors` : "";
+      setStatus(dryRun ? `ACL bulk dry run complete${errorText}.` : `ACL bulk applied ${report.applied || 0} operations${errorText}.`, report.errors && report.errors.length ? "warn" : "ok");
     }
 
     function renderDocuments(documents) {
@@ -4106,6 +4137,8 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("revokeFolderAccessButton").addEventListener("click", () => revokeFolderAccess().catch((error) => setStatus(error.message, "error")));
     document.getElementById("grantFolderGroupAccessButton").addEventListener("click", () => grantFolderGroupAccess().catch((error) => setStatus(error.message, "error")));
     document.getElementById("revokeFolderGroupAccessButton").addEventListener("click", () => revokeFolderGroupAccess().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("dryRunAclBulkButton").addEventListener("click", () => runAclBulk(true).catch((error) => setStatus(error.message, "error")));
+    document.getElementById("applyAclBulkButton").addEventListener("click", () => runAclBulk(false).catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshVirtualNodesButton").addEventListener("click", () => refreshVirtualNodes().catch((error) => setStatus(error.message, "error")));
     document.getElementById("planVirtualNodesButton").addEventListener("click", () => planVirtualNodes().catch((error) => setStatus(error.message, "error")));
     document.getElementById("uploadButton").addEventListener("click", () => uploadFile().catch((error) => setStatus(error.message, "error")));

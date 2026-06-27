@@ -549,6 +549,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/folders":
                 self._create_folder(payload)
                 return
+            if parsed.path == "/acl-bulk":
+                self._apply_acl_bulk(payload)
+                return
             document_share_links_id = _document_share_links_path(parsed.path)
             if document_share_links_id:
                 self._create_document_share_link(document_share_links_id, payload)
@@ -1278,6 +1281,29 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             )
             access = store.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id=user_id)
             self._json({"revoked": revoked, "access": access})
+        finally:
+            store.close()
+
+    def _apply_acl_bulk(self, payload: dict[str, Any]) -> None:
+        policy = payload.get("policy")
+        if policy is None:
+            policy = {
+                "document_grants": payload.get("document_grants", []),
+                "folder_grants": payload.get("folder_grants", []),
+            }
+        if not isinstance(policy, dict):
+            raise ValueError("policy must be an object")
+        dry_run = payload.get("dry_run", True)
+        if not isinstance(dry_run, bool):
+            raise ValueError("dry_run must be boolean")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope=("audit", "write"),
+                require_api_token=True,
+            )
+            self._json(store.apply_acl_bulk(workspace_id, user_id, policy, dry_run=dry_run))
         finally:
             store.close()
 

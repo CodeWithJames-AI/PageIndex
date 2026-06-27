@@ -12947,6 +12947,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             doc_id = store.ingest_file(source, folder_id=folder_id, workspace_id=workspace_id, actor_user_id="alice", name="Bulk memo")
             group = store.create_workspace_group(workspace_id, "alice", "Reviewers")
             store.add_workspace_group_member(workspace_id, "alice", group["id"], "bob")
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
             policy = {
                 "document_grants": [
                     {"doc_id": doc_id, "user_id": "bob", "role": "write"},
@@ -12991,8 +12992,38 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             cli_dry_run_report = json.loads(cli_dry_run.stdout)
             cli_apply_report = json.loads(cli_apply.stdout)
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            try:
+                http_dry_run = _post_json(
+                    f"{base_url}/acl-bulk",
+                    {"policy": {"document_grants": [{"doc_id": doc_id, "user_id": "bob", "role": "read"}]}},
+                    headers=owner_headers,
+                )
+                http_apply = _post_json(
+                    f"{base_url}/acl-bulk",
+                    {
+                        "policy": {"document_grants": [{"doc_id": doc_id, "user_id": "bob", "role": "read"}]},
+                        "dry_run": False,
+                    },
+                    headers=owner_headers,
+                )
+                bad_dry_run = _post_json(
+                    f"{base_url}/acl-bulk",
+                    {"policy": {}, "dry_run": "no"},
+                    headers=owner_headers,
+                    status=400,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
             inspected = EnterpriseStore(root)
             folder_access_after_cli = inspected.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id="alice")
+            document_access_after_http = inspected.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice")
             inspected.close()
 
             self.assertTrue(dry_run["dry_run"])
@@ -13012,6 +13043,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertFalse(cli_apply_report["dry_run"])
             self.assertEqual(cli_apply_report["applied"], 1)
             self.assertEqual(folder_access_after_cli["grants"][0]["role"], "deny")
+            self.assertTrue(http_dry_run["dry_run"])
+            self.assertEqual(http_dry_run["applied"], 0)
+            self.assertFalse(http_apply["dry_run"])
+            self.assertEqual(http_apply["applied"], 1)
+            self.assertEqual(bad_dry_run["error"], "dry_run must be boolean")
+            self.assertEqual(document_access_after_http["grants"][0]["role"], "read")
 
     def test_http_workspace_group_routes_grant_document_access(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14209,6 +14246,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("folderEffectiveAccessUserInput", body)
                     self.assertIn("previewFolderEffectiveAccess", body)
                     self.assertIn("effective_access", body)
+                    self.assertIn("aclBulkPolicyInput", body)
+                    self.assertIn("/acl-bulk", body)
+                    self.assertIn("runAclBulk", body)
                     self.assertIn("data-rename-folder-id", body)
                     self.assertIn("data-move-folder-id", body)
                     self.assertIn("data-delete-folder-id", body)

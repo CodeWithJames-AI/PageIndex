@@ -201,6 +201,10 @@ def _normalize_policy_days(days: int | None, name: str) -> int | None:
     return days
 
 
+def _normalize_share_max_views(max_views: int | None) -> int | None:
+    return _normalize_policy_days(max_views, "max_views")
+
+
 def _normalize_quota_limit(limit: int | None, name: str) -> int | None:
     if limit is None:
         return None
@@ -751,7 +755,7 @@ def _minimize_redacted_public_share_link(link: dict[str, Any], target_key: str) 
 
 def _strip_public_share_link_management_fields(link: dict[str, Any]) -> dict[str, Any]:
     public_link = dict(link)
-    for key in ("view_count", "last_viewed_at"):
+    for key in ("max_views", "view_count", "last_viewed_at"):
         public_link.pop(key, None)
     return public_link
 
@@ -989,6 +993,7 @@ class EnterpriseStore:
               created_by TEXT NOT NULL,
               token_hash TEXT NOT NULL UNIQUE,
               redact_content INTEGER NOT NULL DEFAULT 0,
+              max_views INTEGER,
               view_count INTEGER NOT NULL DEFAULT 0,
               last_viewed_at TEXT,
               created_at TEXT NOT NULL,
@@ -1069,6 +1074,7 @@ class EnterpriseStore:
               created_by TEXT NOT NULL,
               token_hash TEXT NOT NULL UNIQUE,
               redact_content INTEGER NOT NULL DEFAULT 0,
+              max_views INTEGER,
               view_count INTEGER NOT NULL DEFAULT 0,
               last_viewed_at TEXT,
               created_at TEXT NOT NULL,
@@ -1257,12 +1263,14 @@ class EnterpriseStore:
             "document_share_links": {
                 "revoked_at": "TEXT",
                 "redact_content": "INTEGER NOT NULL DEFAULT 0",
+                "max_views": "INTEGER",
                 "view_count": "INTEGER NOT NULL DEFAULT 0",
                 "last_viewed_at": "TEXT",
             },
             "conversation_share_links": {
                 "revoked_at": "TEXT",
                 "redact_content": "INTEGER NOT NULL DEFAULT 0",
+                "max_views": "INTEGER",
                 "view_count": "INTEGER NOT NULL DEFAULT 0",
                 "last_viewed_at": "TEXT",
             },
@@ -1709,6 +1717,7 @@ class EnterpriseStore:
                     WHERE workspace_id = ?
                       AND revoked_at IS NULL
                       AND (expires_at IS NULL OR expires_at > ?)
+                      AND (max_views IS NULL OR view_count < max_views)
                     """,
                     (workspace_id, share_now),
                 ),
@@ -1766,6 +1775,7 @@ class EnterpriseStore:
                     WHERE workspace_id = ?
                       AND revoked_at IS NULL
                       AND (expires_at IS NULL OR expires_at > ?)
+                      AND (max_views IS NULL OR view_count < max_views)
                     """,
                     (workspace_id, share_now),
                 ),
@@ -4504,9 +4514,11 @@ class EnterpriseStore:
         actor_user_id: str,
         expires_at: str | None = None,
         redact_content: bool = False,
+        max_views: int | None = None,
     ) -> dict[str, Any] | None:
         if not isinstance(redact_content, bool):
             raise ValueError("redact_content must be a boolean")
+        max_views = _normalize_share_max_views(max_views)
         doc_id = doc_id.strip()
         if not doc_id:
             raise ValueError("Document id is required.")
@@ -4525,9 +4537,9 @@ class EnterpriseStore:
                 """
                 INSERT INTO document_share_links (
                   id, workspace_id, doc_id, created_by, token_hash,
-                  redact_content, created_at, expires_at, revoked_at
+                  redact_content, max_views, created_at, expires_at, revoked_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     share_link_id,
@@ -4536,6 +4548,7 @@ class EnterpriseStore:
                     actor_user_id.strip(),
                     _hash_token(token),
                     1 if redact_content else 0,
+                    max_views,
                     created_at,
                     expires_at,
                 ),
@@ -4550,6 +4563,7 @@ class EnterpriseStore:
                     "share_link_id": share_link_id,
                     "expires_at": expires_at,
                     "redact_content": redact_content,
+                    "max_views": max_views,
                 },
             )
         link = self._document_share_link(share_link_id)
@@ -4573,7 +4587,7 @@ class EnterpriseStore:
         self._require_document_write(document, actor_user_id)
         rows = self.conn.execute(
             """
-            SELECT id, workspace_id, doc_id, created_by, redact_content, view_count, last_viewed_at,
+            SELECT id, workspace_id, doc_id, created_by, redact_content, max_views, view_count, last_viewed_at,
                    created_at, expires_at, revoked_at
             FROM document_share_links
             WHERE doc_id = ?
@@ -4645,14 +4659,19 @@ class EnterpriseStore:
             return False
         viewed_at = _now()
         with self._atomic():
-            self.conn.execute(
+            cursor = self.conn.execute(
                 """
                 UPDATE document_share_links
                 SET view_count = view_count + 1, last_viewed_at = ?
                 WHERE id = ?
+                  AND revoked_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?)
+                  AND (max_views IS NULL OR view_count < max_views)
                 """,
-                (viewed_at, row["id"]),
+                (viewed_at, row["id"], viewed_at),
             )
+            if cursor.rowcount != 1:
+                return False
             self._insert_audit_event(
                 row["workspace_id"],
                 "public",
@@ -4685,7 +4704,8 @@ class EnterpriseStore:
         row = self._one(
             """
             SELECT l.id AS share_link_id, l.workspace_id, l.doc_id, l.created_by,
-                   l.token_hash, l.redact_content, l.created_at, l.expires_at, l.revoked_at,
+                   l.token_hash, l.redact_content, l.max_views, l.view_count,
+                   l.created_at, l.expires_at, l.revoked_at,
                    d.name, d.description, d.kind, d.access_mode, d.page_count, d.line_count
             FROM document_share_links l
             JOIN documents d ON d.id = l.doc_id
@@ -4696,6 +4716,8 @@ class EnterpriseStore:
         if not row or not hmac.compare_digest(row["token_hash"], token_hash):
             return None
         if row["revoked_at"] is not None or _is_expired(row["expires_at"]):
+            return None
+        if _share_link_view_limit_reached(row["view_count"], row["max_views"]):
             return None
         limit = max(1, min(int(limit), 100))
         offset = max(0, int(offset))
@@ -4735,6 +4757,8 @@ class EnterpriseStore:
                 "doc_id": row["doc_id"],
                 "created_by": row["created_by"],
                 "redact_content": row["redact_content"],
+                "max_views": row["max_views"],
+                "view_count": row["view_count"],
                 "created_at": row["created_at"],
                 "expires_at": row["expires_at"],
                 "revoked_at": row["revoked_at"],
@@ -5949,9 +5973,11 @@ class EnterpriseStore:
         expected_workspace_id: str | None = None,
         expires_at: str | None = None,
         redact_content: bool = False,
+        max_views: int | None = None,
     ) -> dict[str, Any]:
         if not isinstance(redact_content, bool):
             raise ValueError("redact_content must be a boolean")
+        max_views = _normalize_share_max_views(max_views)
         conversation = self._conversation_for_actor(
             conversation_id,
             actor_user_id,
@@ -5967,9 +5993,9 @@ class EnterpriseStore:
                 """
                 INSERT INTO conversation_share_links (
                   id, workspace_id, conversation_id, created_by, token_hash,
-                  redact_content, created_at, expires_at, revoked_at
+                  redact_content, max_views, created_at, expires_at, revoked_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     share_link_id,
@@ -5978,6 +6004,7 @@ class EnterpriseStore:
                     actor_user_id.strip(),
                     _hash_token(token),
                     1 if redact_content else 0,
+                    max_views,
                     created_at,
                     expires_at,
                 ),
@@ -5992,6 +6019,7 @@ class EnterpriseStore:
                     "share_link_id": share_link_id,
                     "expires_at": expires_at,
                     "redact_content": redact_content,
+                    "max_views": max_views,
                 },
             )
         link = self._conversation_share_link(share_link_id)
@@ -6014,7 +6042,7 @@ class EnterpriseStore:
         )
         rows = self.conn.execute(
             """
-            SELECT id, workspace_id, conversation_id, created_by, redact_content, view_count, last_viewed_at,
+            SELECT id, workspace_id, conversation_id, created_by, redact_content, max_views, view_count, last_viewed_at,
                    created_at, expires_at, revoked_at
             FROM conversation_share_links
             WHERE conversation_id = ?
@@ -6090,14 +6118,24 @@ class EnterpriseStore:
             return False
         viewed_at = _now()
         with self._atomic():
-            self.conn.execute(
+            cursor = self.conn.execute(
                 """
                 UPDATE conversation_share_links
                 SET view_count = view_count + 1, last_viewed_at = ?
                 WHERE id = ?
+                  AND revoked_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?)
+                  AND (max_views IS NULL OR view_count < max_views)
+                  AND EXISTS (
+                    SELECT 1 FROM conversations c
+                    WHERE c.id = conversation_share_links.conversation_id
+                      AND c.archived_at IS NULL
+                  )
                 """,
-                (viewed_at, row["id"]),
+                (viewed_at, row["id"], viewed_at),
             )
+            if cursor.rowcount != 1:
+                return False
             self._insert_audit_event(
                 row["workspace_id"],
                 "public",
@@ -6126,7 +6164,8 @@ class EnterpriseStore:
         row = self._one(
             """
             SELECT l.id AS share_link_id, l.workspace_id, l.conversation_id, l.created_by,
-                   l.token_hash, l.redact_content, l.created_at, l.expires_at, l.revoked_at,
+                   l.token_hash, l.redact_content, l.max_views, l.view_count,
+                   l.created_at, l.expires_at, l.revoked_at,
                    c.title, c.created_at AS conversation_created_at, c.updated_at, c.archived_at
             FROM conversation_share_links l
             JOIN conversations c ON c.id = l.conversation_id
@@ -6137,6 +6176,8 @@ class EnterpriseStore:
         if not row or not hmac.compare_digest(row["token_hash"], token_hash):
             return None
         if row["revoked_at"] is not None or _is_expired(row["expires_at"]) or row["archived_at"] is not None:
+            return None
+        if _share_link_view_limit_reached(row["view_count"], row["max_views"]):
             return None
         limit = max(1, min(int(limit), 500))
         redact_content = bool(row["redact_content"])
@@ -6203,6 +6244,8 @@ class EnterpriseStore:
                 "conversation_id": row["conversation_id"],
                 "created_by": row["created_by"],
                 "redact_content": row["redact_content"],
+                "max_views": row["max_views"],
+                "view_count": row["view_count"],
                 "created_at": row["created_at"],
                 "expires_at": row["expires_at"],
                 "revoked_at": row["revoked_at"],
@@ -7582,7 +7625,7 @@ class EnterpriseStore:
     def _document_share_link(self, share_link_id: str) -> dict[str, Any] | None:
         row = self._one(
             """
-            SELECT id, workspace_id, doc_id, created_by, redact_content, view_count, last_viewed_at,
+            SELECT id, workspace_id, doc_id, created_by, redact_content, max_views, view_count, last_viewed_at,
                    created_at, expires_at, revoked_at
             FROM document_share_links
             WHERE id = ?
@@ -7594,7 +7637,7 @@ class EnterpriseStore:
     def _conversation_share_link(self, share_link_id: str) -> dict[str, Any] | None:
         row = self._one(
             """
-            SELECT id, workspace_id, conversation_id, created_by, redact_content, view_count, last_viewed_at,
+            SELECT id, workspace_id, conversation_id, created_by, redact_content, max_views, view_count, last_viewed_at,
                    created_at, expires_at, revoked_at
             FROM conversation_share_links
             WHERE id = ?
@@ -7721,21 +7764,35 @@ def _content_line_count(content: str) -> int:
     return max(1, len(str(content).splitlines()))
 
 
+def _share_link_view_limit_reached(view_count: Any, max_views: Any) -> bool:
+    if max_views is None:
+        return False
+    return int(view_count or 0) >= int(max_views)
+
+
+def _share_link_is_active(link: dict[str, Any]) -> bool:
+    if link.get("revoked_at") is not None or _is_expired(link.get("expires_at")):
+        return False
+    return not _share_link_view_limit_reached(link.get("view_count"), link.get("max_views"))
+
+
 def _decorate_document_share_link(link: dict[str, Any]) -> dict[str, Any]:
     decorated = dict(link)
     decorated["redact_content"] = bool(decorated.get("redact_content"))
+    decorated["max_views"] = int(decorated["max_views"]) if decorated.get("max_views") is not None else None
     decorated["view_count"] = int(decorated.get("view_count") or 0)
     decorated["last_viewed_at"] = decorated.get("last_viewed_at")
-    decorated["active"] = decorated.get("revoked_at") is None and not _is_expired(decorated.get("expires_at"))
+    decorated["active"] = _share_link_is_active(decorated)
     return decorated
 
 
 def _decorate_conversation_share_link(link: dict[str, Any]) -> dict[str, Any]:
     decorated = dict(link)
     decorated["redact_content"] = bool(decorated.get("redact_content"))
+    decorated["max_views"] = int(decorated["max_views"]) if decorated.get("max_views") is not None else None
     decorated["view_count"] = int(decorated.get("view_count") or 0)
     decorated["last_viewed_at"] = decorated.get("last_viewed_at")
-    decorated["active"] = decorated.get("revoked_at") is None and not _is_expired(decorated.get("expires_at"))
+    decorated["active"] = _share_link_is_active(decorated)
     return decorated
 
 

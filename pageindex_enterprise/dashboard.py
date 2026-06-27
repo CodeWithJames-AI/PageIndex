@@ -445,7 +445,10 @@ DASHBOARD_HTML = """<!doctype html>
               </div>
               <div id="conversationList" class="conversation-list muted">No conversations loaded.</div>
               <textarea id="conversationExportText" readonly placeholder="conversation export output" aria-label="Conversation export output"></textarea>
-              <label class="checkbox-row"><input id="conversationShareRedactInput" type="checkbox"> Redact share content</label>
+              <div class="import-row">
+                <label class="checkbox-row"><input id="conversationShareRedactInput" type="checkbox"> Redact share content</label>
+                <input id="conversationShareMaxViewsInput" value="" placeholder="max views" aria-label="Conversation share max views">
+              </div>
               <div id="conversationShareList" class="member-list muted">No conversation shares loaded.</div>
             </div>
           </section>
@@ -656,7 +659,10 @@ DASHBOARD_HTML = """<!doctype html>
             <div id="versionList" class="version-list muted" style="margin-top:12px">No versions loaded.</div>
             <div id="pagePreviewList" class="page-list muted" style="margin-top:12px">No pages loaded.</div>
             <div id="questionSuggestionList" class="page-list muted" style="margin-top:12px">No questions loaded.</div>
-            <label class="checkbox-row" style="margin-top:12px"><input id="documentShareRedactInput" type="checkbox"> Redact share content</label>
+            <div class="import-row" style="margin-top:12px">
+              <label class="checkbox-row"><input id="documentShareRedactInput" type="checkbox"> Redact share content</label>
+              <input id="documentShareMaxViewsInput" value="" placeholder="max views" aria-label="Document share max views">
+            </div>
             <div id="documentShareList" class="member-list muted" style="margin-top:12px">No document shares loaded.</div>
             <input id="shareUrlOutput" readonly value="" placeholder="latest share URL" aria-label="Latest share URL">
           </section>
@@ -746,6 +752,7 @@ DASHBOARD_HTML = """<!doctype html>
     const conversationExportFormatInput = document.getElementById("conversationExportFormatInput");
     const conversationExportText = document.getElementById("conversationExportText");
     const conversationShareRedactInput = document.getElementById("conversationShareRedactInput");
+    const conversationShareMaxViewsInput = document.getElementById("conversationShareMaxViewsInput");
     const conversationShareList = document.getElementById("conversationShareList");
     const memberUserInput = document.getElementById("memberUserInput");
     const memberRoleInput = document.getElementById("memberRoleInput");
@@ -800,6 +807,7 @@ DASHBOARD_HTML = """<!doctype html>
     const questionSuggestionList = document.getElementById("questionSuggestionList");
     const documentShareList = document.getElementById("documentShareList");
     const documentShareRedactInput = document.getElementById("documentShareRedactInput");
+    const documentShareMaxViewsInput = document.getElementById("documentShareMaxViewsInput");
     const shareUrlOutput = document.getElementById("shareUrlOutput");
     const folderList = document.getElementById("folderList");
     const virtualNodeList = document.getElementById("virtualNodeList");
@@ -1397,8 +1405,26 @@ DASHBOARD_HTML = """<!doctype html>
       return { cancelled: false, payload: { expires_in_days: days } };
     }
 
+    function shareMaxViewsPayload(input) {
+      const trimmed = input.value.trim();
+      if (!trimmed) {
+        return { cancelled: false, payload: {} };
+      }
+      const maxViews = Number(trimmed);
+      if (!Number.isInteger(maxViews) || maxViews <= 0) {
+        setStatus("Max views must be a positive integer.", "warn");
+        return { cancelled: true };
+      }
+      return { cancelled: false, payload: { max_views: maxViews } };
+    }
+
     function publicShareUrl(kind, token) {
       return `${window.location.origin}/public/${kind}/${encodeURIComponent(token)}`;
+    }
+
+    function shareViewSummary(link) {
+      const viewCount = link.view_count || 0;
+      return link.max_views != null ? `${viewCount}/${link.max_views}` : `${viewCount}`;
     }
 
     function renderShareLinks(container, kind, links) {
@@ -1415,7 +1441,7 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="member-row">
             <div>
               <strong>${escapeHtml(link.active ? "active" : "inactive")}</strong>
-              <div class="muted">${escapeHtml(link.id)} | ${escapeHtml(link.redact_content ? "redacted" : "raw")} | views ${escapeHtml(link.view_count || 0)}${link.last_viewed_at ? ` | last viewed ${escapeHtml(link.last_viewed_at)}` : ""}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
+              <div class="muted">${escapeHtml(link.id)} | ${escapeHtml(link.redact_content ? "redacted" : "raw")} | views ${escapeHtml(shareViewSummary(link))}${link.last_viewed_at ? ` | last viewed ${escapeHtml(link.last_viewed_at)}` : ""}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
             </div>
             <button class="secondary" type="button" data-revoke-share-kind="${escapeHtml(kind)}" data-revoke-share-target-id="${escapeHtml(link[targetKey] || "")}" data-revoke-share-link-path="${escapeHtml(path)}" data-revoke-share-link-id="${escapeHtml(link.id)}"${link.active ? "" : " disabled"}>Revoke</button>
           </div>
@@ -2105,9 +2131,14 @@ DASHBOARD_HTML = """<!doctype html>
       if (expiry.cancelled) {
         return;
       }
+      const maxViews = shareMaxViewsPayload(documentShareMaxViewsInput);
+      if (maxViews.cancelled) {
+        return;
+      }
       setStatus("Creating document share...");
       const payloadBody = {
         ...expiry.payload,
+        ...maxViews.payload,
         redact_content: documentShareRedactInput.checked
       };
       const payload = await api(`/documents/${encodeURIComponent(docId)}/share-links`, {
@@ -2743,9 +2774,14 @@ DASHBOARD_HTML = """<!doctype html>
       if (expiry.cancelled) {
         return;
       }
+      const maxViews = shareMaxViewsPayload(conversationShareMaxViewsInput);
+      if (maxViews.cancelled) {
+        return;
+      }
       setStatus("Creating conversation share...");
       const payloadBody = {
         ...expiry.payload,
+        ...maxViews.payload,
         redact_content: conversationShareRedactInput.checked
       };
       const payload = await api(`/conversations/${encodeURIComponent(conversationId)}/share-links`, {

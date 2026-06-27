@@ -913,6 +913,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if "redact_content" in payload
             else False
         )
+        max_views = _optional_positive_int(payload.get("max_views"), "max_views") if "max_views" in payload else None
         store = EnterpriseStore(self.server.root)
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope="write")
@@ -924,6 +925,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                         expected_workspace_id=workspace_id,
                         expires_at=expires_at,
                         redact_content=redact_content,
+                        max_views=max_views,
                     )
                 },
                 HTTPStatus.CREATED,
@@ -1482,6 +1484,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if "redact_content" in payload
             else False
         )
+        max_views = _optional_positive_int(payload.get("max_views"), "max_views") if "max_views" in payload else None
         store = EnterpriseStore(self.server.root)
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope="write")
@@ -1491,6 +1494,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 actor_user_id=user_id,
                 expires_at=expires_at,
                 redact_content=redact_content,
+                max_views=max_views,
             )
             if share_link is None:
                 self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)

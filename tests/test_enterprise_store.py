@@ -15315,6 +15315,24 @@ class EnterpriseStoreTest(unittest.TestCase):
             if requirement and not requirement.startswith("#"):
                 self.assertIn(f"    {requirement}", setup_cfg)
 
+    def test_release_smoke_builds_packaged_console_and_eval(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            [sys.executable, str(repo_root / "scripts" / "release_smoke.py"), "--repo-root", str(repo_root)],
+            cwd="/tmp",
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        report = json.loads(result.stdout)
+
+        self.assertEqual(report["ok"], True)
+        self.assertEqual(report["wheel"], "pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl")
+        self.assertEqual(report["checks"]["wheel_built"], True)
+        self.assertEqual(report["checks"]["console_script"], True)
+        self.assertEqual(report["checks"]["eval_command"], True)
+        self.assertEqual(report["checks"]["eval_checks"]["failed"], 0)
+
     def test_deployment_check_reports_readiness_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "deployment-root"

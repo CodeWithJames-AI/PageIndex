@@ -628,6 +628,8 @@ DASHBOARD_HTML = """<!doctype html>
           <label>Hint
             <input id="hintInput" value="Streaming" placeholder="optional">
           </label>
+          <span id="queryScopeLabel" class="muted">Workspace</span>
+          <button id="clearQueryScopeButton" class="secondary" type="button">Clear scope</button>
           <button id="queryButton" type="button">Ask</button>
         </div>
         <div class="content">
@@ -743,6 +745,7 @@ DASHBOARD_HTML = """<!doctype html>
     const providerApiKeyEnvVarInput = document.getElementById("providerApiKeyEnvVarInput");
     const providerTimeoutInput = document.getElementById("providerTimeoutInput");
     const queryInput = document.getElementById("queryInput");
+    const queryScopeLabel = document.getElementById("queryScopeLabel");
     const hintInput = document.getElementById("hintInput");
     const chatInput = document.getElementById("chatInput");
     const statusEl = document.getElementById("status");
@@ -778,6 +781,8 @@ DASHBOARD_HTML = """<!doctype html>
     const queryRetentionSummary = document.getElementById("queryRetentionSummary");
     let activeConversationId = "";
     let activeFolderId = "";
+    let activeQueryDocId = "";
+    let activeQueryDocName = "";
     let workspaceExportUrl = "";
     let currentFolders = [];
 
@@ -815,6 +820,22 @@ DASHBOARD_HTML = """<!doctype html>
       return folderId ? { ...payload, folder_id: folderId } : payload;
     }
 
+    function renderQueryScope() {
+      queryScopeLabel.textContent = activeQueryDocId ? `Doc: ${activeQueryDocName || activeQueryDocId}` : "Workspace";
+    }
+
+    function setQueryDocumentScope(docId, docName) {
+      activeQueryDocId = docId || "";
+      activeQueryDocName = docName || docId || "";
+      renderQueryScope();
+      queryInput.focus();
+      setStatus(activeQueryDocId ? `Query scoped to ${activeQueryDocName}.` : "Query scope cleared.", activeQueryDocId ? "ok" : "warn");
+    }
+
+    function clearQueryScope() {
+      setQueryDocumentScope("", "");
+    }
+
     async function api(path, options = {}) {
       const response = await fetch(path, {
         ...options,
@@ -840,6 +861,7 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="muted">${escapeHtml(doc.kind || "unknown")} | ${escapeHtml(doc.id)}</div>
           ${doc.folder_id ? `<div class="muted">folder ${escapeHtml(doc.folder_id)}</div>` : ""}
           <div class="doc-actions">
+            <button class="secondary" type="button" data-query-doc-id="${escapeHtml(doc.id)}" data-query-doc-name="${escapeHtml(doc.name)}">Ask</button>
             <button class="secondary" type="button" data-pages-doc-id="${escapeHtml(doc.id)}">Preview</button>
             <button class="secondary" type="button" data-versions-doc-id="${escapeHtml(doc.id)}">Versions</button>
             <button class="secondary" type="button" data-access-doc-id="${escapeHtml(doc.id)}">Access</button>
@@ -852,6 +874,9 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
         </article>
       `).join("");
+      documentList.querySelectorAll("[data-query-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => setQueryDocumentScope(button.dataset.queryDocId, button.dataset.queryDocName));
+      });
       documentList.querySelectorAll("[data-pages-doc-id]").forEach((button) => {
         button.addEventListener("click", () => loadDocumentPages(button.dataset.pagesDocId).catch((error) => setStatus(error.message, "error")));
       });
@@ -1491,7 +1516,11 @@ DASHBOARD_HTML = """<!doctype html>
     async function refreshDocuments() {
       setStatus("Refreshing...");
       const payload = await api("/documents");
-      renderDocuments(payload.documents || []);
+      const documents = payload.documents || [];
+      if (activeQueryDocId && !documents.some((doc) => doc.id === activeQueryDocId)) {
+        clearQueryScope();
+      }
+      renderDocuments(documents);
       setStatus("Documents refreshed.", "ok");
     }
 
@@ -2849,9 +2878,13 @@ DASHBOARD_HTML = """<!doctype html>
     async function queryCorpus() {
       setStatus("Querying...");
       const hint = hintInput.value.trim();
+      const body = { query: queryInput.value.trim(), expert_hints: hint ? [hint] : [] };
+      if (activeQueryDocId) {
+        body.doc_ids = [activeQueryDocId];
+      }
       const payload = await api("/query", {
         method: "POST",
-        body: JSON.stringify({ query: queryInput.value.trim(), expert_hints: hint ? [hint] : [] })
+        body: JSON.stringify(body)
       });
       answerText.className = "";
       answerText.textContent = payload.answer || "No answer returned.";
@@ -3056,6 +3089,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("ingestButton").addEventListener("click", () => ingestFile().catch((error) => setStatus(error.message, "error")));
     document.getElementById("importButton").addEventListener("click", () => importStructure().catch((error) => setStatus(error.message, "error")));
     document.getElementById("queryButton").addEventListener("click", () => queryCorpus().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("clearQueryScopeButton").addEventListener("click", () => clearQueryScope());
     document.getElementById("refreshQueryRunsButton").addEventListener("click", () => refreshQueryRuns().catch((error) => setStatus(error.message, "error")));
     document.getElementById("exportQueryRunsButton").addEventListener("click", () => exportQueryRuns().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshQueryRetentionButton").addEventListener("click", () => refreshQueryRetention().catch((error) => setStatus(error.message, "error")));

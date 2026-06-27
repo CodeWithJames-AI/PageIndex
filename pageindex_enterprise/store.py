@@ -1718,6 +1718,8 @@ class EnterpriseStore:
         created_at = _now()
         with self._atomic():
             expired_invitation_count = self._expire_workspace_invitations(workspace_id, email=email)
+            if self.workspace_role(workspace_id, email) is not None:
+                raise ValueError("workspace member already exists")
             if self._one(
                 """
                 SELECT id FROM workspace_invitations

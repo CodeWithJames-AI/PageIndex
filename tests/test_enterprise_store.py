@@ -539,6 +539,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             accepted = store.accept_workspace_invitation(invitation["id"], "bob@example.com")
             with self.assertRaisesRegex(ValueError, "not pending"):
                 store.accept_workspace_invitation(invitation["id"], "bob@example.com")
+            with self.assertRaisesRegex(ValueError, "workspace member already exists"):
+                store.create_workspace_invitation(workspace_id, "alice", "bob@example.com", role="member")
             revoked_invitation = store.create_workspace_invitation(workspace_id, "ada", "carol@example.com", role="member")
             revoked = store.revoke_workspace_invitation(workspace_id, "alice", revoked_invitation["id"])
             revoked_again = store.revoke_workspace_invitation(workspace_id, "alice", revoked_invitation["id"])
@@ -575,6 +577,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 expires_at=future,
             )
             store.add_workspace_member(workspace_id, "frank@example.com", "member", actor_user_id="alice")
+            with self.assertRaisesRegex(ValueError, "workspace member already exists"):
+                store.create_workspace_invitation(workspace_id, "alice", "frank@example.com", role="viewer")
             expired = store.list_workspace_invitations(workspace_id, "alice", status="expired")
             events = store.list_audit_events(workspace_id, "alice", limit=50)
             actions = [event["action"] for event in events]

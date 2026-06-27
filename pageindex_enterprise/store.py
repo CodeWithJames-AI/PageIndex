@@ -1507,6 +1507,8 @@ class EnterpriseStore:
         if actor_user_id:
             self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         previous_role = self.workspace_role(workspace_id, user_id)
+        if actor_user_id and (role == "owner" or previous_role == "owner"):
+            self.require_workspace_role(workspace_id, actor_user_id, {"owner"})
         if previous_role == "owner" and role != "owner" and self._workspace_owner_count(workspace_id) <= 1:
             raise ValueError("workspace must keep at least one owner")
         if previous_role is None:
@@ -1718,6 +1720,8 @@ class EnterpriseStore:
         previous_role = self.workspace_role(workspace_id, user_id)
         if not previous_role:
             return False
+        if previous_role == "owner":
+            self.require_workspace_role(workspace_id, actor_user_id, {"owner"})
         if previous_role == "owner" and self._workspace_owner_count(workspace_id) <= 1:
             raise ValueError("workspace must keep at least one owner")
         with self._atomic():

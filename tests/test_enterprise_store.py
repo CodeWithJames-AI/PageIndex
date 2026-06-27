@@ -374,6 +374,15 @@ class EnterpriseStoreTest(unittest.TestCase):
                 store.add_workspace_member(workspace_id, "alice", "admin", actor_user_id="alice")
             with self.assertRaisesRegex(ValueError, "at least one owner"):
                 store.remove_workspace_member(workspace_id, "alice", "alice")
+            store.add_workspace_member(workspace_id, "dana", "owner", actor_user_id="alice")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.add_workspace_member(workspace_id, "erin", "owner", actor_user_id="carol")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.add_workspace_member(workspace_id, "dana", "admin", actor_user_id="carol")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.remove_workspace_member(workspace_id, "dana", "carol")
+            store.add_workspace_member(workspace_id, "dana", "admin", actor_user_id="alice")
+            self.assertEqual(store.workspace_role(workspace_id, "dana"), "admin")
 
     def test_workspace_invitations_are_admin_scoped_and_audited(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9895,8 +9904,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "ada", "admin", actor_user_id="alice")
             store.add_workspace_member(workspace_id, "bob@example.com", "viewer")
             owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            admin_token = store.create_api_token(workspace_id, "ada", name="admin")["token"]
             read_token = store.create_api_token(workspace_id, "alice", name="readonly", scopes=["read"])["token"]
             audit_token = store.create_api_token(workspace_id, "alice", name="auditor", scopes=["audit"])["token"]
             bob_token_record = store.create_api_token(workspace_id, "bob@example.com", name="viewer")
@@ -9912,6 +9923,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             thread.start()
             base = f"http://127.0.0.1:{server.server_port}"
             owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            admin_headers = {"Authorization": f"Bearer {admin_token}"}
             read_headers = {"Authorization": f"Bearer {read_token}"}
             audit_headers = {"Authorization": f"Bearer {audit_token}"}
             bob_headers = {"Authorization": f"Bearer {bob_token}"}
@@ -9949,6 +9961,33 @@ class EnterpriseStoreTest(unittest.TestCase):
                     {"user_id": "carol", "role": "admin"},
                     headers=owner_headers,
                 )
+                admin_owner_add_blocked = _post_json(
+                    f"{base}/workspace-members",
+                    {"user_id": "dana", "role": "owner"},
+                    headers=admin_headers,
+                    status=403,
+                )
+                owner_promoted = _post_json(
+                    f"{base}/workspace-members",
+                    {"user_id": "dana", "role": "owner"},
+                    headers=owner_headers,
+                )
+                admin_owner_demote_blocked = _post_json(
+                    f"{base}/workspace-members",
+                    {"user_id": "dana", "role": "admin"},
+                    headers=admin_headers,
+                    status=403,
+                )
+                admin_owner_delete_blocked = _delete_json(
+                    f"{base}/workspace-members/dana",
+                    headers=admin_headers,
+                    status=403,
+                )
+                owner_demoted = _post_json(
+                    f"{base}/workspace-members",
+                    {"user_id": "dana", "role": "admin"},
+                    headers=owner_headers,
+                )
                 delete_blocked = _delete_json(
                     f"{base}/workspace-members/bob%40example.com",
                     headers=audit_headers,
@@ -9984,20 +10023,26 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(read_blocked["error"], "api token scope denied")
             self.assertEqual(viewer_blocked["status"], 403)
             self.assertEqual(viewer_blocked["error"], "workspace role denied")
-            self.assertEqual([member["user_id"] for member in listed["members"]], ["alice", "bob@example.com"])
-            self.assertEqual([member["user_id"] for member in audit_listed["members"]], ["alice", "bob@example.com"])
+            self.assertEqual([member["user_id"] for member in listed["members"]], ["ada", "alice", "bob@example.com"])
+            self.assertEqual([member["user_id"] for member in audit_listed["members"]], ["ada", "alice", "bob@example.com"])
             self.assertEqual(bad_user["error"], "user_id is required")
             self.assertEqual(bad_role["error"], "role must be a string")
             self.assertEqual(write_blocked["error"], "api token scope denied")
             self.assertEqual(viewer_write_blocked["error"], "workspace role denied")
             self.assertEqual(saved["member"], {"workspace_id": workspace_id, "user_id": "carol", "role": "admin"})
+            self.assertEqual(admin_owner_add_blocked["error"], "workspace role denied")
+            self.assertEqual(owner_promoted["member"], {"workspace_id": workspace_id, "user_id": "dana", "role": "owner"})
+            self.assertEqual(admin_owner_demote_blocked["error"], "workspace role denied")
+            self.assertEqual(admin_owner_delete_blocked["error"], "workspace role denied")
+            self.assertEqual(owner_demoted["member"], {"workspace_id": workspace_id, "user_id": "dana", "role": "admin"})
             self.assertEqual(delete_blocked["error"], "api token scope denied")
             self.assertEqual(viewer_delete_blocked["error"], "workspace role denied")
             self.assertEqual(removed, {"removed": True})
             self.assertEqual(removed_again, {"removed": False})
             self.assertEqual(bob_after_remove["status"], 403)
             self.assertEqual(bob_after_remove["error"], "invalid api token")
-            self.assertEqual([member["user_id"] for member in final_members["members"]], ["alice", "carol"])
+            self.assertEqual([member["user_id"] for member in final_members["members"]], ["ada", "alice", "carol", "dana"])
+            self.assertEqual({member["user_id"]: member["role"] for member in final_members["members"]}, {"ada": "admin", "alice": "owner", "carol": "admin", "dana": "admin"})
             self.assertIn("workspace_member.upsert", actions)
             self.assertIn("workspace_member.remove", actions)
 

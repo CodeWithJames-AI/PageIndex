@@ -1929,6 +1929,11 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         source_set_id = payload.get("source_set_id", payload.get("sourceSetId"))
         if source_set_id is not None and not isinstance(source_set_id, str):
             raise ValueError("source_set_id must be a string")
+        folder_id = payload.get("folder_id", payload.get("folderId"))
+        if folder_id is not None and not isinstance(folder_id, str):
+            raise ValueError("folder_id must be a string")
+        if folder_id and (source_set_id or payload.get("doc_ids") is not None):
+            raise ValueError("use only one of doc_ids, source_set_id, or folder_id")
         if source_set_id and payload.get("doc_ids") is not None:
             raise ValueError("use doc_ids or source_set_id, not both")
         store = EnterpriseStore(self.server.root)
@@ -1939,6 +1944,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     query,
                     doc_ids=_list_or_none(payload.get("doc_ids")),
                     source_set_id=source_set_id,
+                    folder_id=folder_id,
                     expert_hints=_list_or_none(payload.get("expert_hints")),
                     workspace_id=workspace_id,
                     limit=int(payload.get("limit", 8)),

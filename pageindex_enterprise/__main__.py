@@ -435,6 +435,7 @@ def main() -> None:
     query.add_argument("query")
     query.add_argument("--doc-id", action="append", dest="doc_ids")
     query.add_argument("--source-set-id")
+    query.add_argument("--folder-id")
     query.add_argument("--hint", action="append", dest="expert_hints")
     query.add_argument("--workspace-id")
     query.add_argument("--user-id")
@@ -1237,14 +1238,18 @@ def main() -> None:
                 )
             )
         elif args.command == "query":
-            if args.doc_ids and args.source_set_id:
-                raise SystemExit("use --doc-id or --source-set-id, not both")
+            selected_scopes = [bool(args.doc_ids), bool(args.source_set_id), bool(args.folder_id)]
+            if sum(selected_scopes) > 1:
+                if args.doc_ids and args.source_set_id and not args.folder_id:
+                    raise SystemExit("use --doc-id or --source-set-id, not both")
+                raise SystemExit("use only one of --doc-id, --source-set-id, or --folder-id")
             print(
                 json.dumps(
                     store.query_corpus(
                         args.query,
                         doc_ids=args.doc_ids,
                         source_set_id=args.source_set_id,
+                        folder_id=args.folder_id,
                         expert_hints=args.expert_hints,
                         workspace_id=args.workspace_id,
                         limit=args.limit,

@@ -1485,6 +1485,132 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("use --doc-id or --source-set-id", conflict.stderr)
             self.assertTrue(delete_result["deleted"])
 
+    def test_folder_scoped_query_limits_store_cli_and_http(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            scoped_source = tmp_path / "folder-scoped.txt"
+            sibling_source = tmp_path / "folder-sibling.txt"
+            scoped_source.write_text("Folder scoped contract evidence lives in the child folder.", encoding="utf-8")
+            sibling_source.write_text("Folder scoped archive evidence lives outside the selected folder.", encoding="utf-8")
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team", workspace_id="ws_folder_query")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            parent_folder_id = store.create_folder("Diligence", workspace_id=workspace_id, actor_user_id="alice")
+            child_folder_id = store.create_folder("Contracts", parent_id=parent_folder_id, actor_user_id="alice")
+            sibling_folder_id = store.create_folder("Archive", workspace_id=workspace_id, actor_user_id="alice")
+            scoped_doc_id = store.ingest_file(
+                scoped_source,
+                folder_id=child_folder_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Scoped contract memo",
+            )
+            sibling_doc_id = store.ingest_file(
+                sibling_source,
+                folder_id=sibling_folder_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Sibling archive memo",
+            )
+            source_set = store.create_query_source_set(workspace_id, "alice", "Folder set", [scoped_doc_id])
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner", scopes=["read"])["token"]
+
+            store_result = store.query_corpus(
+                "folder scoped evidence",
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                folder_id=parent_folder_id,
+            )
+            with self.assertRaisesRegex(ValueError, "Use only one of doc_ids, source_set_id, or folder_id"):
+                store.query_corpus(
+                    "folder scoped evidence",
+                    workspace_id=workspace_id,
+                    actor_user_id="alice",
+                    doc_ids=[scoped_doc_id],
+                    folder_id=parent_folder_id,
+                )
+            store.close()
+
+            base_cmd = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            cli_result = subprocess.run(
+                [
+                    *base_cmd,
+                    "query",
+                    "folder scoped evidence",
+                    "--workspace-id",
+                    workspace_id,
+                    "--user-id",
+                    "alice",
+                    "--folder-id",
+                    parent_folder_id,
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            cli_conflict = subprocess.run(
+                [
+                    *base_cmd,
+                    "query",
+                    "folder scoped evidence",
+                    "--workspace-id",
+                    workspace_id,
+                    "--user-id",
+                    "alice",
+                    "--folder-id",
+                    parent_folder_id,
+                    "--source-set-id",
+                    source_set["id"],
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            try:
+                http_result = _post_json(
+                    f"{base}/query",
+                    {"query": "folder scoped evidence", "folder_id": parent_folder_id},
+                    headers=owner_headers,
+                )
+                http_conflict = _post_json(
+                    f"{base}/query",
+                    {
+                        "query": "folder scoped evidence",
+                        "folder_id": parent_folder_id,
+                        "source_set_id": source_set["id"],
+                    },
+                    headers=owner_headers,
+                    status=400,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            cli_payload = json.loads(cli_result.stdout)
+            for result in (store_result, cli_payload, http_result):
+                self.assertEqual(result["trace"]["scope"]["folder_id"], parent_folder_id)
+                self.assertEqual(result["trace"]["scope"]["folder_document_count"], 1)
+                self.assertEqual(result["trace"]["scope"]["doc_ids"], [scoped_doc_id])
+                self.assertEqual({citation["doc_id"] for citation in result["citations"]}, {scoped_doc_id})
+                self.assertNotIn(sibling_doc_id, json.dumps(result["trace"]["scope"]))
+            self.assertNotEqual(cli_conflict.returncode, 0)
+            self.assertIn("use only one of --doc-id, --source-set-id, or --folder-id", cli_conflict.stderr)
+            self.assertEqual(http_conflict["error"], "use only one of doc_ids, source_set_id, or folder_id")
+
     def test_query_run_history_is_admin_scoped(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

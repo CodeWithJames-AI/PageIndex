@@ -5068,6 +5068,46 @@ class EnterpriseStore:
         documents = self._query_source_set_documents(workspace_id, source_set["id"], actor_user_id)
         return [document["id"] for document in documents]
 
+    def resolve_query_folder_scope(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        folder_id: str,
+    ) -> dict[str, Any]:
+        self.require_workspace_access(workspace_id, actor_user_id)
+        if not isinstance(folder_id, str):
+            raise ValueError("folder_id must be a string")
+        folder_id = folder_id.strip()
+        if not folder_id:
+            raise ValueError("folder_id is required")
+        folder = self._one(
+            "SELECT id, workspace_id, path FROM folders WHERE id = ?",
+            (folder_id,),
+        )
+        if folder is None or folder["workspace_id"] != workspace_id:
+            raise ValueError(f"Folder not found: {folder_id}")
+        read_condition, read_args = self._document_read_condition("d", actor_user_id)
+        descendant_pattern = f"{_escape_like(folder['path'])}/%"
+        rows = self.conn.execute(
+            f"""
+            SELECT d.id
+            FROM documents d
+            JOIN folders f ON f.id = d.folder_id
+            WHERE d.workspace_id = ?
+              AND (f.path = ? OR f.path LIKE ? ESCAPE '\\')
+              AND {read_condition}
+            ORDER BY f.path, d.name, d.id
+            """,
+            (workspace_id, folder["path"], descendant_pattern, *read_args),
+        )
+        doc_ids = [row["id"] for row in rows]
+        return {
+            "folder_id": folder["id"],
+            "folder_path": folder["path"],
+            "doc_ids": doc_ids,
+            "folder_document_count": len(doc_ids),
+        }
+
     def list_documents(
         self,
         folder_id: str | None = None,
@@ -6029,6 +6069,7 @@ class EnterpriseStore:
         *,
         doc_ids: list[str] | None = None,
         source_set_id: str | None = None,
+        folder_id: str | None = None,
         expert_hints: list[str] | None = None,
         workspace_id: str | None = None,
         limit: int = 8,
@@ -6043,8 +6084,14 @@ class EnterpriseStore:
             raise ValueError("Use doc_ids or source_set_id, not both.")
         if source_set_id is not None and not isinstance(source_set_id, str):
             raise ValueError("source_set_id must be a string")
+        if folder_id is not None and not isinstance(folder_id, str):
+            raise ValueError("folder_id must be a string")
         resolved_source_set_id = source_set_id.strip() if isinstance(source_set_id, str) else None
+        resolved_folder_id = folder_id.strip() if isinstance(folder_id, str) else None
+        if resolved_folder_id and (doc_ids is not None or resolved_source_set_id):
+            raise ValueError("Use only one of doc_ids, source_set_id, or folder_id.")
         source_set_scope: dict[str, Any] | None = None
+        folder_scope: dict[str, Any] | None = None
         if resolved_source_set_id:
             if not workspace_id or not actor_user_id:
                 raise ValueError("source_set_id requires workspace_id and actor_user_id")
@@ -6052,6 +6099,16 @@ class EnterpriseStore:
             source_set_scope = {
                 "source_set_id": resolved_source_set_id,
                 "source_set_document_count": len(doc_ids),
+            }
+        elif resolved_folder_id:
+            if not workspace_id or not actor_user_id:
+                raise ValueError("folder_id requires workspace_id and actor_user_id")
+            resolved_folder_scope = self.resolve_query_folder_scope(workspace_id, actor_user_id, resolved_folder_id)
+            doc_ids = resolved_folder_scope["doc_ids"]
+            folder_scope = {
+                "folder_id": resolved_folder_scope["folder_id"],
+                "folder_path": resolved_folder_scope["folder_path"],
+                "folder_document_count": resolved_folder_scope["folder_document_count"],
             }
         search = self.hybrid_search(
             query,
@@ -6075,6 +6132,8 @@ class EnterpriseStore:
             }
             if source_set_scope:
                 scope.update(source_set_scope)
+            if folder_scope:
+                scope.update(folder_scope)
             if scope_extra:
                 scope.update(scope_extra)
             run_id = self.start_query(

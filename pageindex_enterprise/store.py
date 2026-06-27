@@ -3487,6 +3487,7 @@ class EnterpriseStore:
         scopes = _decode_api_token_scopes(row["scopes_json"])
         if scopes is None:
             return None
+        scopes = _cap_api_token_scopes_to_role(scopes, self.workspace_role(row["workspace_id"], row["user_id"]))
         self.conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (_now(), row["id"]))
         self._commit()
         return {
@@ -3518,9 +3519,11 @@ class EnterpriseStore:
         )
         tokens = []
         policy = self._api_token_policy(workspace_id)
+        token_owner_role = self.workspace_role(workspace_id, token_owner_user_id)
         for row in rows:
             token = dict(row)
-            token["scopes"] = _decode_api_token_scopes(token.pop("scopes_json")) or []
+            stored_scopes = _decode_api_token_scopes(token.pop("scopes_json")) or []
+            token["scopes"] = _cap_api_token_scopes_to_role(stored_scopes, token_owner_role)
             token.update(_rotation_metadata(token["created_at"], policy["rotation_due_in_days"]))
             tokens.append(token)
         return tokens

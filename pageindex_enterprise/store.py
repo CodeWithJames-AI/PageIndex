@@ -1102,6 +1102,23 @@ class EnterpriseStore:
               PRIMARY KEY (source_set_id, doc_id)
             );
 
+            CREATE TABLE IF NOT EXISTS query_source_set_share_links (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              source_set_id TEXT NOT NULL REFERENCES query_source_sets(id) ON DELETE CASCADE,
+              created_by TEXT NOT NULL,
+              token_hash TEXT NOT NULL UNIQUE,
+              password_salt TEXT,
+              password_hash TEXT,
+              redact_content INTEGER NOT NULL DEFAULT 0,
+              max_views INTEGER,
+              view_count INTEGER NOT NULL DEFAULT 0,
+              last_viewed_at TEXT,
+              created_at TEXT NOT NULL,
+              expires_at TEXT,
+              revoked_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS document_pages (
               doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
               page INTEGER NOT NULL,
@@ -5523,6 +5540,294 @@ class EnterpriseStore:
             )
         return True
 
+    def _query_source_set_share_link(self, share_link_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            """
+            SELECT id, workspace_id, source_set_id, created_by, redact_content, max_views,
+                   password_hash IS NOT NULL AS password_protected, view_count, last_viewed_at,
+                   created_at, expires_at, revoked_at
+            FROM query_source_set_share_links
+            WHERE id = ?
+            """,
+            (share_link_id,),
+        )
+        return _decorate_source_set_share_link(dict(row)) if row else None
+
+    def create_query_source_set_share_link(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        source_set_id: str,
+        *,
+        expires_at: str | None = None,
+        redact_content: bool = False,
+        max_views: int | None = None,
+        password: str | None = None,
+    ) -> dict[str, Any] | None:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        if not isinstance(redact_content, bool):
+            raise ValueError("redact_content must be a boolean")
+        source_set = self._query_source_set_row(workspace_id, source_set_id)
+        if not source_set:
+            return None
+        max_views = _normalize_share_max_views(max_views)
+        password_salt, password_hash = _share_password_fields(password)
+        expires_at = _normalize_expires_at(expires_at)
+        token = f"pss_{secrets.token_urlsafe(32)}"
+        share_link_id = f"qssl_{uuid.uuid4().hex}"
+        created_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO query_source_set_share_links (
+                  id, workspace_id, source_set_id, created_by, token_hash,
+                  password_salt, password_hash, redact_content, max_views,
+                  created_at, expires_at, revoked_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    share_link_id,
+                    workspace_id,
+                    source_set["id"],
+                    actor_user_id.strip(),
+                    _hash_token(token),
+                    password_salt,
+                    password_hash,
+                    1 if redact_content else 0,
+                    max_views,
+                    created_at,
+                    expires_at,
+                ),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "query_source_set.share_link_create",
+                target_type="query_source_set",
+                target_id=source_set["id"],
+                details={
+                    "share_link_id": share_link_id,
+                    "expires_at": expires_at,
+                    "redact_content": redact_content,
+                    "max_views": max_views,
+                    "password_protected": password_hash is not None,
+                },
+            )
+        link = self._query_source_set_share_link(share_link_id)
+        assert link is not None
+        link["token"] = token
+        return link
+
+    def list_query_source_set_share_links(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        source_set_id: str,
+    ) -> list[dict[str, Any]]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        source_set = self._query_source_set_row(workspace_id, source_set_id)
+        if not source_set:
+            return []
+        rows = self.conn.execute(
+            """
+            SELECT id, workspace_id, source_set_id, created_by, redact_content, max_views,
+                   password_hash IS NOT NULL AS password_protected, view_count, last_viewed_at,
+                   created_at, expires_at, revoked_at
+            FROM query_source_set_share_links
+            WHERE source_set_id = ?
+            ORDER BY created_at DESC, id
+            """,
+            (source_set["id"],),
+        )
+        return [_decorate_source_set_share_link(dict(row)) for row in rows]
+
+    def revoke_query_source_set_share_link(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        share_link_id: str,
+    ) -> bool:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        share_link_id = share_link_id.strip()
+        if not share_link_id:
+            raise ValueError("Share link id is required.")
+        link = self._one("SELECT * FROM query_source_set_share_links WHERE id = ?", (share_link_id,))
+        if not link or link["workspace_id"] != workspace_id:
+            return False
+        source_set = self._query_source_set_row(workspace_id, link["source_set_id"])
+        if not source_set or link["revoked_at"] is not None:
+            return False
+        revoked_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                "UPDATE query_source_set_share_links SET revoked_at = ? WHERE id = ?",
+                (revoked_at, share_link_id),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "query_source_set.share_link_revoke",
+                target_type="query_source_set",
+                target_id=source_set["id"],
+                details={"share_link_id": share_link_id},
+            )
+        return True
+
+    def _public_query_source_set_documents(self, source_set_id: str, *, limit: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT d.id, d.workspace_id, d.name, d.description, d.kind, d.access_mode,
+                   d.page_count, d.line_count, qsd.position
+            FROM query_source_set_documents qsd
+            JOIN documents d ON d.id = qsd.doc_id
+            WHERE qsd.source_set_id = ?
+            ORDER BY qsd.position, d.name, d.id
+            LIMIT ?
+            """,
+            (source_set_id, limit),
+        )
+        return [dict(row) for row in rows]
+
+    def resolve_query_source_set_share_link(
+        self,
+        token: str,
+        *,
+        password: str | None = None,
+        document_limit: int = 100,
+    ) -> dict[str, Any] | None:
+        token = token.strip()
+        if not token:
+            raise ValueError("Share token is required.")
+        token_hash = _hash_token(token)
+        row = self._one(
+            """
+            SELECT l.id AS share_link_id, l.workspace_id, l.source_set_id, l.created_by,
+                   l.token_hash, l.password_salt, l.password_hash,
+                   l.redact_content, l.max_views, l.view_count,
+                   l.created_at, l.expires_at, l.revoked_at,
+                   q.name, q.description, q.shared, q.created_at AS source_set_created_at,
+                   q.updated_at
+            FROM query_source_set_share_links l
+            JOIN query_source_sets q ON q.id = l.source_set_id
+            WHERE l.token_hash = ?
+            """,
+            (token_hash,),
+        )
+        if not row or not hmac.compare_digest(row["token_hash"], token_hash):
+            return None
+        if not _share_password_matches(password, row["password_salt"], row["password_hash"]):
+            return None
+        if row["revoked_at"] is not None or _is_expired(row["expires_at"]):
+            return None
+        if _share_link_view_limit_reached(row["view_count"], row["max_views"]):
+            return None
+        document_limit = max(1, min(int(document_limit), 500))
+        redact_content = bool(row["redact_content"])
+        documents = self._public_query_source_set_documents(row["source_set_id"], limit=document_limit)
+        total_documents_row = self._one(
+            "SELECT COUNT(*) AS count FROM query_source_set_documents WHERE source_set_id = ?",
+            (row["source_set_id"],),
+        )
+        public_documents = []
+        for document in documents:
+            public_documents.append(
+                {
+                    "name": _redact_public_share_text(document["name"]) if redact_content else document["name"],
+                    "description": _redact_public_share_text(document["description"])
+                    if redact_content
+                    else document["description"],
+                    "kind": document["kind"],
+                    "page_count": document["page_count"],
+                    "line_count": document["line_count"],
+                    "position": document["position"],
+                }
+            )
+        share_link = _decorate_source_set_share_link(
+            {
+                "id": row["share_link_id"],
+                "workspace_id": row["workspace_id"],
+                "source_set_id": row["source_set_id"],
+                "created_by": row["created_by"],
+                "redact_content": row["redact_content"],
+                "max_views": row["max_views"],
+                "password_protected": row["password_hash"] is not None,
+                "view_count": row["view_count"],
+                "created_at": row["created_at"],
+                "expires_at": row["expires_at"],
+                "revoked_at": row["revoked_at"],
+            }
+        )
+        share_link = _strip_public_share_link_management_fields(
+            _minimize_redacted_public_share_link(share_link, "source_set_id")
+        )
+        source_set = {
+            "name": _redact_public_share_text(row["name"]) if redact_content else row["name"],
+            "description": _redact_public_share_text(row["description"]) if redact_content else row["description"],
+            "created_at": row["source_set_created_at"],
+            "updated_at": row["updated_at"],
+            "document_count": int(total_documents_row["count"]) if total_documents_row else len(documents),
+            "documents_returned": len(public_documents),
+        }
+        return {"share_link": share_link, "source_set": source_set, "documents": public_documents}
+
+    def record_query_source_set_share_link_view(
+        self,
+        token: str,
+        *,
+        password: str | None = None,
+        response_format: str,
+        document_limit: int,
+    ) -> bool:
+        token = token.strip()
+        if not token:
+            raise ValueError("Share token is required.")
+        token_hash = _hash_token(token)
+        row = self._one(
+            """
+            SELECT id, workspace_id, source_set_id, token_hash, password_salt, password_hash,
+                   redact_content, expires_at, revoked_at
+            FROM query_source_set_share_links
+            WHERE token_hash = ?
+            """,
+            (token_hash,),
+        )
+        if not row or not hmac.compare_digest(row["token_hash"], token_hash):
+            return False
+        if not _share_password_matches(password, row["password_salt"], row["password_hash"]):
+            return False
+        if row["revoked_at"] is not None or _is_expired(row["expires_at"]):
+            return False
+        viewed_at = _now()
+        with self._atomic():
+            cursor = self.conn.execute(
+                """
+                UPDATE query_source_set_share_links
+                SET view_count = view_count + 1, last_viewed_at = ?
+                WHERE id = ?
+                  AND revoked_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?)
+                  AND (max_views IS NULL OR view_count < max_views)
+                """,
+                (viewed_at, row["id"], viewed_at),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._insert_audit_event(
+                row["workspace_id"],
+                "public",
+                "query_source_set.share_link_view",
+                target_type="query_source_set",
+                target_id=row["source_set_id"],
+                details={
+                    "share_link_id": row["id"],
+                    "response_format": response_format,
+                    "redact_content": bool(row["redact_content"]),
+                    "document_limit": document_limit,
+                },
+            )
+        return True
+
     def resolve_query_source_set_doc_ids(
         self,
         workspace_id: str,
@@ -8052,6 +8357,17 @@ def _decorate_document_share_link(link: dict[str, Any]) -> dict[str, Any]:
 
 
 def _decorate_conversation_share_link(link: dict[str, Any]) -> dict[str, Any]:
+    decorated = dict(link)
+    decorated["redact_content"] = bool(decorated.get("redact_content"))
+    decorated["password_protected"] = bool(decorated.get("password_protected"))
+    decorated["max_views"] = int(decorated["max_views"]) if decorated.get("max_views") is not None else None
+    decorated["view_count"] = int(decorated.get("view_count") or 0)
+    decorated["last_viewed_at"] = decorated.get("last_viewed_at")
+    decorated["active"] = _share_link_is_active(decorated)
+    return decorated
+
+
+def _decorate_source_set_share_link(link: dict[str, Any]) -> dict[str, Any]:
     decorated = dict(link)
     decorated["redact_content"] = bool(decorated.get("redact_content"))
     decorated["password_protected"] = bool(decorated.get("password_protected"))

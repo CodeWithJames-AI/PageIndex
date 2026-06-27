@@ -93,6 +93,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if public_conversation_share_token:
                 self._public_conversation_share(public_conversation_share_token, parsed.query)
                 return
+            public_source_set_share_token = _public_source_set_share_path(parsed.path)
+            if public_source_set_share_token:
+                self._public_source_set_share(public_source_set_share_token, parsed.query)
+                return
             if parsed.path in {"/", "/dashboard"}:
                 self._html(DASHBOARD_HTML)
                 return
@@ -268,6 +272,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/query-source-sets":
                 self._list_query_source_sets()
+                return
+            source_set_share_links_id = _query_source_set_share_links_path(parsed.path)
+            if source_set_share_links_id:
+                self._list_query_source_set_share_links(source_set_share_links_id)
                 return
             query_run_id = _query_run_path(parsed.path)
             if query_run_id:
@@ -604,6 +612,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/query-source-sets":
                 self._create_query_source_set(payload)
                 return
+            source_set_share_links_id = _query_source_set_share_links_path(parsed.path)
+            if source_set_share_links_id:
+                self._create_query_source_set_share_link(source_set_share_links_id, payload)
+                return
             if parsed.path == "/chat/completions":
                 self._chat_completion(payload)
                 return
@@ -762,6 +774,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             conversation_share_link_id = _conversation_share_link_path(parsed.path)
             if conversation_share_link_id:
                 self._revoke_conversation_share_link(conversation_share_link_id)
+                return
+            source_set_share_link_id = _query_source_set_share_link_path(parsed.path)
+            if source_set_share_link_id:
+                self._revoke_query_source_set_share_link(source_set_share_link_id)
                 return
             doc_id = _document_path(parsed.path)
             if doc_id:
@@ -2151,6 +2167,100 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         finally:
             store.close()
 
+    def _list_query_source_set_share_links(self, source_set_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store, required_scope=("audit", "write"), require_api_token=True
+            )
+            self._json(
+                {
+                    "share_links": store.list_query_source_set_share_links(
+                        workspace_id,
+                        user_id,
+                        source_set_id,
+                    )
+                }
+            )
+        finally:
+            store.close()
+
+    def _create_query_source_set_share_link(self, source_set_id: str, payload: dict[str, Any]) -> None:
+        if payload.get("expires_at") is not None and payload.get("expires_in_days") is not None:
+            raise ValueError("choose expires_at or expires_in_days")
+        expires_at = _optional_str(payload.get("expires_at"), "expires_at")
+        if payload.get("expires_in_days") is not None:
+            expires_at = expires_at_from_days(_optional_positive_int(payload.get("expires_in_days"), "expires_in_days"))
+        redact_content = (
+            _bool_body_value(payload.get("redact_content"), "redact_content")
+            if "redact_content" in payload
+            else False
+        )
+        max_views = _optional_positive_int(payload.get("max_views"), "max_views") if "max_views" in payload else None
+        password = _optional_str(payload.get("password"), "password") if "password" in payload else None
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store, required_scope=("audit", "write"), require_api_token=True
+            )
+            share_link = store.create_query_source_set_share_link(
+                workspace_id,
+                user_id,
+                source_set_id,
+                expires_at=expires_at,
+                redact_content=redact_content,
+                max_views=max_views,
+                password=password,
+            )
+            if share_link is None:
+                self._json({"error": "query source set not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._json({"share_link": share_link}, HTTPStatus.CREATED)
+        finally:
+            store.close()
+
+    def _revoke_query_source_set_share_link(self, share_link_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store, required_scope=("audit", "write"), require_api_token=True
+            )
+            revoked = store.revoke_query_source_set_share_link(workspace_id, user_id, share_link_id)
+            self._json({"revoked": revoked})
+        finally:
+            store.close()
+
+    def _public_source_set_share(self, token: str, query: str) -> None:
+        params = parse_qs(query)
+        document_limit = max(1, min(_int_param(params, "document_limit", 100), 500))
+        password = _share_password_value(params, self.headers)
+        store = EnterpriseStore(self.server.root)
+        try:
+            shared = store.resolve_query_source_set_share_link(
+                token,
+                password=password,
+                document_limit=document_limit,
+            )
+            if shared is None:
+                self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
+                return
+            wants_html = _share_response_wants_html(self.headers.get("Accept", ""), _str_param(params, "format"))
+            recorded = store.record_query_source_set_share_link_view(
+                token,
+                password=password,
+                response_format="html" if wants_html else "json",
+                document_limit=document_limit,
+            )
+            if not recorded:
+                self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
+                return
+            if wants_html:
+                self._html(_render_public_source_set_share(shared))
+                return
+            self._json(shared)
+        finally:
+            store.close()
+
     def _chat_completion(self, payload: dict[str, Any]) -> None:
         if (
             payload.get("tools") is not None
@@ -3097,6 +3207,48 @@ def _render_public_conversation_share(shared: dict[str, Any]) -> str:
     return _public_share_shell(title, body)
 
 
+def _render_public_source_set_share(shared: dict[str, Any]) -> str:
+    source_set = shared.get("source_set") or {}
+    share_link = shared.get("share_link") or {}
+    documents = shared.get("documents") or []
+    title = str(source_set.get("name") or "Shared source set")
+    description = str(source_set.get("description") or "").strip()
+    description_html = f'<p class="muted">{_html_value(description)}</p>' if description else ""
+    document_cards = "\n".join(
+        f"""
+      <article>
+        <h2>{_html_value(document.get("name") or "Document")}</h2>
+        <p class="muted">{_html_value(document.get("description") or "")}</p>
+        <div class="meta">
+          <span>{_html_value(document.get("kind") or "document")}</span>
+          <span>{_html_value(document.get("page_count") or 0)} pages</span>
+        </div>
+      </article>
+        """
+        for document in documents
+    )
+    if not document_cards:
+        document_cards = '<p class="empty muted">No documents in this view.</p>'
+    body = f"""
+  <main>
+    <header>
+      <p class="muted">PageIndex shared source set</p>
+      <h1>{_html_value(title)}</h1>
+      {description_html}
+      <div class="meta">
+        <span>{len(documents)} documents shown</span>
+        <span>Updated {_html_value(source_set.get("updated_at") or "unknown")}</span>
+        <span>Expires {_html_value(share_link.get("expires_at") or "never")}</span>
+      </div>
+    </header>
+    <section>
+      {document_cards}
+    </section>
+  </main>
+"""
+    return _public_share_shell(title, body)
+
+
 def _query_run_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "query-runs":
@@ -3108,6 +3260,27 @@ def _query_source_set_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "query-source-sets":
         return unquote(parts[1])
+    return None
+
+
+def _query_source_set_share_links_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "query-source-sets" and parts[2] == "share-links":
+        return unquote(parts[1])
+    return None
+
+
+def _query_source_set_share_link_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "query-source-set-share-links":
+        return unquote(parts[1])
+    return None
+
+
+def _public_source_set_share_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "public" and parts[1] == "source-sets":
+        return unquote(parts[2])
     return None
 
 

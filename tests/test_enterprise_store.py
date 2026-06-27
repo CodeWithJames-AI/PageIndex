@@ -5817,6 +5817,256 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(deleted["deleted"])
             self.assertFalse(deleted_again["deleted"])
 
+    def test_http_query_source_set_share_links_publish_metadata_only_public_views(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            first = tmp_path / "source-set-link-first.txt"
+            second = tmp_path / "source-set-link-second.txt"
+            first.write_text(
+                "Source set public link evidence Bearer first-secret "
+                "/Users/alice/source-set-first.txt first@example.com.",
+                encoding="utf-8",
+            )
+            second.write_text(
+                "Second public link evidence Bearer second-secret "
+                "/Users/alice/source-set-second.txt second@example.com.",
+                encoding="utf-8",
+            )
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            other_workspace = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(other_workspace, "mallory", "owner")
+            first_doc_id = store.ingest_file(
+                first,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="First link memo Bearer doc-secret /Users/alice/doc.txt doc@example.com",
+            )
+            second_doc_id = store.ingest_file(
+                second,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Second link memo",
+            )
+            source_set = store.create_query_source_set(
+                workspace_id,
+                "alice",
+                "Public source set Bearer set-secret /Users/alice/set.txt set@example.com",
+                [first_doc_id, second_doc_id],
+                description="Shared source set Bearer description-secret /Users/alice/desc.txt desc@example.com",
+                shared=True,
+            )
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store.conn.commit()
+            member_token = member_token_record["token"]
+            other_token = store.create_api_token(other_workspace, "mallory", name="other")["token"]
+            store.close()
+
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            url = f"{base}/query-source-sets/{source_set['id']}/share-links"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            try:
+                missing_auth = _post_json(url, {}, status=403)
+                audit_denied = _post_json(url, {}, headers={"Authorization": f"Bearer {audit_token}"}, status=403)
+                write_denied = _get_error(url, headers={"Authorization": f"Bearer {write_token}"})
+                member_denied = _post_json(url, {}, headers={"Authorization": f"Bearer {member_token}"}, status=403)
+                created = _post_json(
+                    url,
+                    {"redact_content": True, "max_views": 1, "password": "set-open"},
+                    headers=owner_headers,
+                    status=201,
+                )["share_link"]
+                html_link = _post_json(
+                    url,
+                    {"redact_content": True},
+                    headers=owner_headers,
+                    status=201,
+                )["share_link"]
+                bad_redact = _post_json(
+                    url,
+                    {"redact_content": "yes"},
+                    headers=owner_headers,
+                    status=400,
+                )
+                bad_max_views = _post_json(
+                    url,
+                    {"max_views": 0},
+                    headers=owner_headers,
+                    status=400,
+                )
+                bad_password = _post_json(
+                    url,
+                    {"password": 123},
+                    headers=owner_headers,
+                    status=400,
+                )
+                missing_source_set = _post_json(
+                    f"{base}/query-source-sets/qss_missing/share-links",
+                    {},
+                    headers=owner_headers,
+                    status=404,
+                )
+                listed = _get_json(url, headers=owner_headers)["share_links"]
+                password_missing = _get_error(f"{base}/public/source-sets/{created['token']}?document_limit=1")
+                password_wrong = _get_error(
+                    f"{base}/public/source-sets/{created['token']}?document_limit=1&password=wrong"
+                )
+                public = _get_json(
+                    f"{base}/public/source-sets/{created['token']}?document_limit=1&password=set-open"
+                )
+                capped_after_limit = _get_error(
+                    f"{base}/public/source-sets/{created['token']}?document_limit=1&password=set-open"
+                )
+                redacted_html, redacted_html_type = _get_text(
+                    f"{base}/public/source-sets/{html_link['token']}?document_limit=2",
+                    headers={"Accept": "text/html"},
+                )
+                foreign_revoke = _delete_json(
+                    f"{base}/query-source-set-share-links/{html_link['id']}",
+                    headers={"Authorization": f"Bearer {other_token}"},
+                )
+                revoked = _delete_json(
+                    f"{base}/query-source-set-share-links/{html_link['id']}",
+                    headers=owner_headers,
+                )
+                public_after_revoke = _get_error(f"{base}/public/source-sets/{html_link['token']}")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+            audit_store = EnterpriseStore(root)
+            try:
+                share_view_events = audit_store.list_audit_events(
+                    workspace_id,
+                    "alice",
+                    action="query_source_set.share_link_view",
+                    limit=20,
+                )
+                share_links_after_views = audit_store.list_query_source_set_share_links(
+                    workspace_id,
+                    "alice",
+                    source_set["id"],
+                )
+            finally:
+                audit_store.close()
+
+            serialized_public = json.dumps(public, sort_keys=True)
+            serialized_list = json.dumps(listed, sort_keys=True)
+            serialized_share_view_events = json.dumps(share_view_events, sort_keys=True)
+            listed_by_id = {link["id"]: link for link in listed}
+            self.assertEqual(missing_auth["error"], "api token required")
+            self.assertEqual(audit_denied["error"], "api token scope denied")
+            self.assertEqual(write_denied["error"], "api token scope denied")
+            self.assertEqual(member_denied["error"], "workspace role denied")
+            self.assertEqual(missing_source_set["error"], "query source set not found")
+            self.assertEqual(bad_redact["error"], "redact_content must be a boolean")
+            self.assertEqual(bad_max_views["error"], "max_views must be a positive integer")
+            self.assertEqual(bad_password["error"], "password must be a string")
+            self.assertTrue(created["token"].startswith("pss_"))
+            self.assertTrue(created["redact_content"])
+            self.assertEqual(created["max_views"], 1)
+            self.assertEqual(created["view_count"], 0)
+            self.assertTrue(created["password_protected"])
+            self.assertTrue(created["active"])
+            self.assertNotIn("token_hash", created)
+            self.assertNotIn(created["token"], serialized_list)
+            self.assertNotIn(html_link["token"], serialized_list)
+            self.assertNotIn("password_hash", serialized_list)
+            self.assertNotIn("password_salt", serialized_list)
+            self.assertNotIn("set-open", serialized_list)
+            self.assertTrue(listed_by_id[created["id"]]["password_protected"])
+            self.assertEqual(listed_by_id[created["id"]]["max_views"], 1)
+            self.assertEqual(listed_by_id[created["id"]]["view_count"], 0)
+            self.assertIsNone(listed_by_id[created["id"]]["last_viewed_at"])
+            self.assertEqual(password_missing["status"], 404)
+            self.assertEqual(password_wrong["status"], 404)
+            self.assertTrue(public["share_link"]["redact_content"])
+            self.assertEqual(public["source_set"]["document_count"], 2)
+            self.assertEqual(public["source_set"]["documents_returned"], 1)
+            self.assertEqual(len(public["documents"]), 1)
+            self.assertEqual(public["documents"][0]["position"], 0)
+            self.assertIn("[redacted]", public["source_set"]["name"])
+            self.assertIn("[redacted-path]", public["source_set"]["description"])
+            self.assertIn("[redacted-email]", public["documents"][0]["description"])
+            self.assertNotIn("Bearer", serialized_public)
+            self.assertNotIn("first-secret", serialized_public)
+            self.assertNotIn("doc-secret", serialized_public)
+            self.assertNotIn("set-secret", serialized_public)
+            self.assertNotIn("/Users/alice/source-set-first.txt", serialized_public)
+            self.assertNotIn("/Users/alice/doc.txt", serialized_public)
+            self.assertNotIn("/Users/alice/set.txt", serialized_public)
+            self.assertNotIn("first@example.com", serialized_public)
+            self.assertNotIn("doc@example.com", serialized_public)
+            self.assertNotIn("set@example.com", serialized_public)
+            self.assertNotIn("source_path", serialized_public)
+            self.assertNotIn("token_hash", serialized_public)
+            self.assertNotIn("set-open", serialized_public)
+            for key in ("password_protected", "max_views", "view_count", "last_viewed_at"):
+                self.assertNotIn(key, public["share_link"])
+            for key in ("id", "workspace_id", "source_set_id", "created_by"):
+                self.assertNotIn(key, public["share_link"])
+            self.assertNotIn("shared", public["source_set"])
+            for document in public["documents"]:
+                for key in ("id", "workspace_id", "access_mode"):
+                    self.assertNotIn(key, document)
+            self.assertEqual(capped_after_limit["status"], 404)
+            self.assertIn("text/html", redacted_html_type)
+            self.assertIn("PageIndex shared source set", redacted_html)
+            self.assertIn("[redacted]", redacted_html)
+            self.assertIn("[redacted-path]", redacted_html)
+            self.assertIn("[redacted-email]", redacted_html)
+            self.assertNotIn("Bearer", redacted_html)
+            self.assertNotIn("first-secret", redacted_html)
+            self.assertNotIn("second-secret", redacted_html)
+            self.assertNotIn("/Users/alice/source-set-first.txt", redacted_html)
+            self.assertNotIn("/Users/alice/source-set-second.txt", redacted_html)
+            self.assertNotIn("first@example.com", redacted_html)
+            self.assertNotIn("second@example.com", redacted_html)
+            self.assertNotIn(html_link["token"], redacted_html)
+            self.assertEqual(foreign_revoke, {"revoked": False})
+            self.assertEqual(revoked, {"revoked": True})
+            self.assertEqual(public_after_revoke["status"], 404)
+            self.assertEqual(public_after_revoke["error"], "share link not found")
+            self.assertEqual(len(share_view_events), 2)
+            self.assertEqual({event["user_id"] for event in share_view_events}, {"public"})
+            self.assertEqual({event["target_id"] for event in share_view_events}, {source_set["id"]})
+            self.assertEqual(
+                sorted(event["details"]["response_format"] for event in share_view_events),
+                ["html", "json"],
+            )
+            self.assertEqual(
+                sorted(event["details"]["document_limit"] for event in share_view_events),
+                [1, 2],
+            )
+            self.assertTrue(all(event["details"]["redact_content"] for event in share_view_events))
+            self.assertIn(created["id"], {event["details"]["share_link_id"] for event in share_view_events})
+            self.assertIn(html_link["id"], {event["details"]["share_link_id"] for event in share_view_events})
+            self.assertNotIn(created["token"], serialized_share_view_events)
+            self.assertNotIn(html_link["token"], serialized_share_view_events)
+            self.assertNotIn("set-open", serialized_share_view_events)
+            self.assertNotIn("token_hash", serialized_share_view_events)
+            self.assertNotIn("password_hash", serialized_share_view_events)
+            share_links_after_views_by_id = {link["id"]: link for link in share_links_after_views}
+            self.assertEqual(share_links_after_views_by_id[created["id"]]["view_count"], 1)
+            self.assertFalse(share_links_after_views_by_id[created["id"]]["active"])
+            self.assertEqual(share_links_after_views_by_id[html_link["id"]]["view_count"], 1)
+            self.assertFalse(share_links_after_views_by_id[html_link["id"]]["active"])
+            self.assertIsNotNone(share_links_after_views_by_id[created["id"]]["last_viewed_at"])
+            self.assertIsNotNone(share_links_after_views_by_id[html_link["id"]]["last_viewed_at"])
+
     def test_http_workspace_usage_requires_admin_audit_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

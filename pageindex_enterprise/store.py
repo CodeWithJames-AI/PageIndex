@@ -1596,6 +1596,7 @@ class EnterpriseStore:
             raise ValueError("workspace must keep at least one owner")
         if previous_role is None:
             self._enforce_workspace_quota(workspace_id, members_delta=1)
+        role_downgraded = previous_role is not None and WORKSPACE_ROLE_RANK[role] < WORKSPACE_ROLE_RANK[previous_role]
         with self._atomic():
             self.conn.execute(
                 """
@@ -1605,6 +1606,65 @@ class EnterpriseStore:
                 """,
                 (workspace_id, user_id, role, _now()),
             )
+            api_scope_update_count = 0
+            document_write_grant_downgrade_count = 0
+            folder_write_grant_downgrade_count = 0
+            if role_downgraded:
+                token_rows = self.conn.execute(
+                    "SELECT id, scopes_json FROM api_tokens WHERE workspace_id = ? AND user_id = ?",
+                    (workspace_id, user_id),
+                ).fetchall()
+                for token_row in token_rows:
+                    scopes = _decode_api_token_scopes(token_row["scopes_json"])
+                    if scopes is None:
+                        continue
+                    capped_scopes = _cap_api_token_scopes_to_role(scopes, role)
+                    if capped_scopes != scopes:
+                        if capped_scopes:
+                            self.conn.execute(
+                                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                                (json.dumps(capped_scopes), token_row["id"]),
+                            )
+                        else:
+                            self.conn.execute("DELETE FROM api_tokens WHERE id = ?", (token_row["id"],))
+                        api_scope_update_count += 1
+                if role not in WORKSPACE_WRITE_ROLES:
+                    document_write_grant_downgrade_count = int(
+                        self._one(
+                            """
+                            SELECT COUNT(*) AS count
+                            FROM document_access_grants
+                            WHERE workspace_id = ? AND user_id = ? AND role = 'write'
+                            """,
+                            (workspace_id, user_id),
+                        )["count"]
+                    )
+                    folder_write_grant_downgrade_count = int(
+                        self._one(
+                            """
+                            SELECT COUNT(*) AS count
+                            FROM folder_access_grants
+                            WHERE workspace_id = ? AND user_id = ? AND role = 'write'
+                            """,
+                            (workspace_id, user_id),
+                        )["count"]
+                    )
+                    self.conn.execute(
+                        """
+                        UPDATE document_access_grants
+                        SET role = 'read'
+                        WHERE workspace_id = ? AND user_id = ? AND role = 'write'
+                        """,
+                        (workspace_id, user_id),
+                    )
+                    self.conn.execute(
+                        """
+                        UPDATE folder_access_grants
+                        SET role = 'read'
+                        WHERE workspace_id = ? AND user_id = ? AND role = 'write'
+                        """,
+                        (workspace_id, user_id),
+                    )
             if actor_user_id:
                 self._insert_audit_event(
                     workspace_id,
@@ -1612,7 +1672,13 @@ class EnterpriseStore:
                     "workspace_member.upsert",
                     target_type="workspace_member",
                     target_id=user_id,
-                    details={"role": role, "previous_role": previous_role},
+                    details={
+                        "role": role,
+                        "previous_role": previous_role,
+                        "api_scope_update_count": api_scope_update_count,
+                        "document_write_grant_downgrade_count": document_write_grant_downgrade_count,
+                        "folder_write_grant_downgrade_count": folder_write_grant_downgrade_count,
+                    },
                 )
 
     def create_workspace_invitation(

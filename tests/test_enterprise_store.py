@@ -430,7 +430,53 @@ class EnterpriseStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.remove_workspace_member(workspace_id, "dana", "carol")
             store.add_workspace_member(workspace_id, "dana", "admin", actor_user_id="alice")
+            store.add_workspace_member(workspace_id, "erin", "admin", actor_user_id="alice")
+            erin_token = store.create_api_token(workspace_id, "erin", name="erin-admin")
+            store.grant_document_access(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="erin",
+                role="write",
+            )
+            store.grant_folder_access(
+                folder_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="erin",
+                role="write",
+            )
+            store.add_workspace_member(workspace_id, "erin", "viewer", actor_user_id="alice")
+            erin_verified = store.verify_api_token(erin_token["token"])
+            erin_document_grant_role = store.conn.execute(
+                "SELECT role FROM document_access_grants WHERE workspace_id = ? AND user_id = ? AND doc_id = ?",
+                (workspace_id, "erin", doc_id),
+            ).fetchone()["role"]
+            erin_folder_grant_role = store.conn.execute(
+                "SELECT role FROM folder_access_grants WHERE workspace_id = ? AND user_id = ? AND folder_id = ?",
+                (workspace_id, "erin", folder_id),
+            ).fetchone()["role"]
+            demote_events = [
+                event
+                for event in store.list_audit_events(workspace_id, "alice", limit=50)
+                if event["action"] == "workspace_member.upsert" and event["target_id"] == "erin"
+            ]
+            demote_event = next(event for event in demote_events if event["details"]["previous_role"] == "admin")
             self.assertEqual(store.workspace_role(workspace_id, "dana"), "admin")
+            self.assertEqual(store.workspace_role(workspace_id, "erin"), "viewer")
+            self.assertEqual(erin_verified["scopes"], ["read"])
+            self.assertEqual(erin_document_grant_role, "read")
+            self.assertEqual(erin_folder_grant_role, "read")
+            self.assertEqual(
+                demote_event["details"],
+                {
+                    "role": "viewer",
+                    "previous_role": "admin",
+                    "api_scope_update_count": 1,
+                    "document_write_grant_downgrade_count": 1,
+                    "folder_write_grant_downgrade_count": 1,
+                },
+            )
 
     def test_workspace_invitations_are_admin_scoped_and_audited(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -12135,8 +12181,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(bob_rename["error"], "conversation access denied")
                 self.assertEqual(bob_archive["error"], "conversation access denied")
                 self.assertEqual(bob_delete["error"], "conversation access denied")
-                self.assertEqual(viewer_create["error"], "workspace role denied")
-                self.assertEqual(viewer_append["error"], "workspace role denied")
+                self.assertEqual(viewer_create["error"], "api token scope denied")
+                self.assertEqual(viewer_append["error"], "api token scope denied")
                 self.assertTrue(deleted["deleted"])
                 self.assertEqual(after_delete_conversations, [])
                 self.assertEqual(deleted_messages["status"], 400)

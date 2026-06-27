@@ -24,10 +24,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build and smoke-test the PageIndex enterprise wheel.")
     parser.add_argument("--repo-root", default=Path(__file__).resolve().parents[1])
     parser.add_argument("--manifest-output")
+    parser.add_argument("--require-clean-source", action="store_true")
     args = parser.parse_args()
     report = run_release_smoke(
         Path(args.repo_root),
         manifest_output=Path(args.manifest_output) if args.manifest_output else None,
+        require_clean_source=args.require_clean_source,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     exit_code = _release_smoke_exit_code(report)
@@ -35,7 +37,12 @@ def main() -> None:
         raise SystemExit(exit_code)
 
 
-def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -> dict[str, Any]:
+def run_release_smoke(
+    repo_root: Path,
+    *,
+    manifest_output: Path | None = None,
+    require_clean_source: bool = False,
+) -> dict[str, Any]:
     repo_root = repo_root.expanduser().resolve()
     with tempfile.TemporaryDirectory(prefix="pageindex-release-smoke-") as tmp:
         tmp_path = Path(tmp)
@@ -121,6 +128,8 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
             "eval_command": eval_report.get("ok") is True,
             "eval_checks": eval_report.get("summary", {}),
         }
+        if require_clean_source:
+            checks["source_clean"] = manifest["source"]["dirty"] is False
         return {
             "ok": _release_checks_ok(checks),
             "wheel": wheel.name,
@@ -129,6 +138,7 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
                 "dependency_count": len(manifest["dependencies"]),
                 "direct_dependencies_pinned": manifest["dependency_policy"]["direct_dependencies_pinned"],
                 "path": str(manifest_output) if manifest_output is not None else None,
+                "source_clean_required": require_clean_source,
                 "source_commit": manifest["source"]["commit"],
                 "source_dirty": manifest["source"]["dirty"],
                 "wheel_content_policy_ok": manifest["artifacts"][0]["content"]["ok"],

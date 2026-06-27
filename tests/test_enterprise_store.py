@@ -15668,6 +15668,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["artifact_count"], 1)
         self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
         self.assertEqual(report["manifest"]["direct_dependencies_pinned"], True)
+        self.assertEqual(report["manifest"]["source_clean_required"], False)
         self.assertEqual(report["manifest"]["wheel_content_policy_ok"], True)
         self.assertEqual(report["manifest"]["wheel_record_hashes_valid"], True)
         self.assertEqual(manifest["schema_version"], 1)
@@ -15719,10 +15720,12 @@ class EnterpriseStoreTest(unittest.TestCase):
         }
         bad_record = {**checks, "wheel_record_hashes": False}
         bad_eval_summary = {**checks, "eval_checks": {"failed": 1}}
+        bad_source_clean = {**checks, "source_clean": False}
 
         self.assertEqual(_release_checks_ok(checks), True)
         self.assertEqual(_release_checks_ok(bad_record), False)
         self.assertEqual(_release_checks_ok(bad_eval_summary), False)
+        self.assertEqual(_release_checks_ok(bad_source_clean), False)
 
     def test_release_smoke_exit_code_follows_report_ok(self):
         from scripts.release_smoke import _release_smoke_exit_code

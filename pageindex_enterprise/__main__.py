@@ -559,6 +559,7 @@ def main() -> None:
     deployment_check.add_argument("--require-provider-api-key", action="store_true")
     deployment_check.add_argument("--require-audit-sink", action="store_true")
     deployment_check.add_argument("--require-audit-sink-format", choices=["jsonl", "siem-jsonl"])
+    deployment_check.add_argument("--fail-on-unready", action="store_true")
 
     args = parser.parse_args()
     if args.command == "serve":
@@ -575,19 +576,17 @@ def main() -> None:
         print(json.dumps(run_enterprise_eval(args.root, fixtures_root=args.fixtures_root), indent=2))
         return
     if args.command == "deployment-check":
-        print(
-            json.dumps(
-                run_deployment_check(
-                    args.root,
-                    require_api_token=args.require_api_token,
-                    check_provider=args.check_provider,
-                    require_provider_api_key=args.require_provider_api_key,
-                    require_audit_sink=args.require_audit_sink,
-                    require_audit_sink_format=args.require_audit_sink_format,
-                ),
-                indent=2,
-            )
+        report = run_deployment_check(
+            args.root,
+            require_api_token=args.require_api_token,
+            check_provider=args.check_provider,
+            require_provider_api_key=args.require_provider_api_key,
+            require_audit_sink=args.require_audit_sink,
+            require_audit_sink_format=args.require_audit_sink_format,
         )
+        print(json.dumps(report, indent=2))
+        if args.fail_on_unready and not report.get("ok"):
+            raise SystemExit(1)
         return
     if args.command == "workspace-import":
         if args.dry_run:

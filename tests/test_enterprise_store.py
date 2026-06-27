@@ -16088,10 +16088,45 @@ class EnterpriseStoreTest(unittest.TestCase):
                 check=True,
                 env=env,
             )
+            fail_unready_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pageindex_enterprise",
+                    "--root",
+                    str(root),
+                    "deployment-check",
+                    "--require-api-token",
+                    "--require-audit-sink",
+                    "--fail-on-unready",
+                ],
+                cwd=Path(tmp),
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            fail_ready_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pageindex_enterprise",
+                    "--root",
+                    str(root),
+                    "deployment-check",
+                    "--require-api-token",
+                    "--fail-on-unready",
+                ],
+                cwd=Path(tmp),
+                text=True,
+                capture_output=True,
+                env=env,
+            )
 
             report = json.loads(result.stdout)
             required_sink_report = json.loads(required_sink_result.stdout)
             required_sink_format_report = json.loads(required_sink_format_result.stdout)
+            fail_unready_report = json.loads(fail_unready_result.stdout)
+            fail_ready_report = json.loads(fail_ready_result.stdout)
             self.assertEqual(report["ok"], True, report)
             self.assertEqual(report["checks"]["strict_http"]["ok"], True)
             self.assertEqual(report["checks"]["provider_config"]["skipped"], True)
@@ -16101,6 +16136,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(required_sink_format_report["ok"], False)
             self.assertEqual(required_sink_format_report["checks"]["audit_sink_delivery"]["required_format"], "siem-jsonl")
             self.assertEqual(required_sink_format_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]["reason"], "not_configured")
+            self.assertEqual(fail_unready_result.returncode, 1, fail_unready_result.stderr)
+            self.assertEqual(fail_unready_report["ok"], False)
+            self.assertEqual(fail_unready_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]["reason"], "not_configured")
+            self.assertEqual(fail_ready_result.returncode, 0, fail_ready_result.stderr)
+            self.assertEqual(fail_ready_report["ok"], True, fail_ready_report)
+            self.assertNotIn("Traceback", fail_unready_result.stderr)
+            self.assertNotIn("Traceback", fail_ready_result.stderr)
 
     def test_deployment_check_cli_reports_store_open_failure_as_json(self):
         with tempfile.TemporaryDirectory() as tmp:

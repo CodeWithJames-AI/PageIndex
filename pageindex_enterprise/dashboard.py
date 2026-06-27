@@ -1183,12 +1183,16 @@ DASHBOARD_HTML = """<!doctype html>
             <div class="muted">${escapeHtml(conversation.message_count || 0)} messages</div>
           </button>
           <div class="doc-actions">
+            <button class="secondary" type="button" data-rename-conversation-id="${escapeHtml(conversation.id)}" data-conversation-title="${escapeHtml(conversation.title)}">Rename</button>
             <button class="secondary" type="button" data-archive-conversation-id="${escapeHtml(conversation.id)}">Archive</button>
           </div>
         </article>
       `).join("");
       conversationList.querySelectorAll("[data-conversation-id]").forEach((button) => {
         button.addEventListener("click", () => selectConversation(button.dataset.conversationId));
+      });
+      conversationList.querySelectorAll("[data-rename-conversation-id]").forEach((button) => {
+        button.addEventListener("click", () => renameConversation(button.dataset.renameConversationId, button.dataset.conversationTitle).catch((error) => setStatus(error.message, "error")));
       });
       conversationList.querySelectorAll("[data-archive-conversation-id]").forEach((button) => {
         button.addEventListener("click", () => archiveConversation(button.dataset.archiveConversationId).catch((error) => setStatus(error.message, "error")));
@@ -2060,6 +2064,26 @@ DASHBOARD_HTML = """<!doctype html>
       }
       conversationExportText.value = text;
       setStatus("Conversation exported.", "ok");
+    }
+
+    async function renameConversation(conversationId, currentTitle) {
+      const title = window.prompt("Rename conversation", currentTitle || "");
+      if (title === null) {
+        setStatus("Conversation rename cancelled.", "warn");
+        return;
+      }
+      const trimmed = title.trim();
+      if (!trimmed) {
+        setStatus("Conversation title required.", "warn");
+        return;
+      }
+      setStatus("Renaming conversation...");
+      await api(`/conversations/${encodeURIComponent(conversationId)}/rename`, {
+        method: "POST",
+        body: JSON.stringify({ title: trimmed })
+      });
+      await refreshConversations();
+      setStatus("Conversation renamed.", "ok");
     }
 
     async function archiveConversation(conversationId) {

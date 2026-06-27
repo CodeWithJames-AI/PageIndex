@@ -319,6 +319,11 @@ def main() -> None:
     archive_conversation.add_argument("user_id")
     archive_conversation.add_argument("--restore", action="store_true")
 
+    rename_conversation = sub.add_parser("rename-conversation")
+    rename_conversation.add_argument("conversation_id")
+    rename_conversation.add_argument("user_id")
+    rename_conversation.add_argument("title")
+
     conversation_messages = sub.add_parser("conversation-messages")
     conversation_messages.add_argument("conversation_id")
     conversation_messages.add_argument("user_id")
@@ -899,6 +904,15 @@ def main() -> None:
                             args.user_id,
                             archived=not args.restore,
                         )
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.command == "rename-conversation":
+            print(
+                json.dumps(
+                    _conversation_cli(
+                        lambda: store.rename_conversation(args.conversation_id, args.user_id, args.title)
                     ),
                     indent=2,
                 )

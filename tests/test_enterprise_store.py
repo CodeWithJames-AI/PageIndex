@@ -1183,6 +1183,39 @@ class EnterpriseStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.archive_conversation(viewer_conversation["id"], "vivi")
 
+    def test_conversation_rename_updates_title_and_enforces_owner_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EnterpriseStore(Path(tmp) / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "owner")
+            store.add_workspace_member(workspace_id, "vivi", "member")
+            conversation = store.create_conversation(workspace_id, "alice", title="Original title")
+
+            renamed = store.rename_conversation(conversation["id"], "alice", "Renamed title")
+            conversations = store.list_conversations(workspace_id, "alice")
+            markdown_export = store.export_conversation_transcript(conversation["id"], "alice", format="markdown")
+            rename_events = store.list_audit_events(workspace_id, "alice", action="conversation.rename")
+            archived = store.archive_conversation(conversation["id"], "alice")
+
+            self.assertEqual(renamed["title"], "Renamed title")
+            self.assertEqual(conversations[0]["title"], "Renamed title")
+            self.assertIn("# Renamed title", markdown_export)
+            self.assertEqual(rename_events[0]["target_id"], conversation["id"])
+            self.assertEqual(rename_events[0]["details"]["title_length"], len("Renamed title"))
+            self.assertNotIn("Renamed title", json.dumps(rename_events, sort_keys=True))
+            self.assertIsNotNone(archived["archived_at"])
+            with self.assertRaisesRegex(ValueError, "title is required"):
+                store.rename_conversation(conversation["id"], "alice", " ")
+            with self.assertRaisesRegex(PermissionError, "conversation access denied"):
+                store.rename_conversation(conversation["id"], "bob", "Bob title")
+            with self.assertRaisesRegex(PermissionError, "conversation archived"):
+                store.rename_conversation(conversation["id"], "alice", "Archived title")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                viewer = store.create_conversation(workspace_id, "vivi", title="Viewer legacy")
+                store.add_workspace_member(workspace_id, "vivi", "viewer", actor_user_id="alice")
+                store.rename_conversation(viewer["id"], "vivi", "Viewer rename")
+
     def test_conversation_chat_rolls_back_messages_when_query_audit_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1482,6 +1515,16 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            renamed = json.loads(
+                subprocess.run(
+                    [*base, "rename-conversation", conversation["id"], "alice", "CLI renamed"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
             conversations = json.loads(
                 subprocess.run(
                     [*base, "list-conversations", "ws_cli", "alice"],
@@ -1577,15 +1620,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             exported_lines = [json.loads(line) for line in exported_jsonl.splitlines()]
 
-            self.assertEqual(conversations[0]["title"], "CLI chat")
+            self.assertEqual(renamed["title"], "CLI renamed")
+            self.assertEqual(conversations[0]["title"], "CLI renamed")
             self.assertEqual(conversations[0]["message_count"], 2)
             self.assertEqual([message["role"] for message in messages], ["user", "assistant"])
             self.assertEqual(messages[1]["run_id"], chat["result"]["run_id"])
             self.assertTrue(chat["result"]["verification"]["ok"], chat["result"]["verification"]["errors"])
             self.assertTrue(chat["result"]["citations"])
-            self.assertEqual(exported_lines[0]["conversation"]["title"], "CLI chat")
+            self.assertEqual(exported_lines[0]["conversation"]["title"], "CLI renamed")
             self.assertEqual([line["message"]["role"] for line in exported_lines[1:]], ["user", "assistant"])
-            self.assertIn("# CLI chat", exported_markdown)
+            self.assertIn("# CLI renamed", exported_markdown)
             self.assertIn("```text\nrenewal risk\n```", exported_markdown)
             self.assertIsNotNone(archived["archived_at"])
             self.assertEqual(hidden_conversations, [])
@@ -7444,6 +7488,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.add_workspace_member(workspace_id, "bob", "owner")
             store.add_workspace_member(workspace_id, "charlie", "member")
             alice_token = store.create_api_token(workspace_id, "alice", name="alice")["token"]
+            alice_read_token = store.create_api_token(workspace_id, "alice", name="alice-read", scopes=["read"])["token"]
             bob_token = store.create_api_token(workspace_id, "bob", name="bob")["token"]
             charlie_token = store.create_api_token(workspace_id, "charlie", name="charlie")["token"]
             store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Conversation memo")
@@ -7455,6 +7500,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             thread.start()
             base = f"http://127.0.0.1:{server.server_port}"
             alice_headers = {"Authorization": f"Bearer {alice_token}"}
+            alice_read_headers = {"Authorization": f"Bearer {alice_read_token}"}
             bob_headers = {"Authorization": f"Bearer {bob_token}"}
             charlie_headers = {"Authorization": f"Bearer {charlie_token}"}
             try:
@@ -7468,6 +7514,23 @@ class EnterpriseStoreTest(unittest.TestCase):
                     f"{base}/conversations/{conversation['id']}/messages",
                     {"message": "renewal risk"},
                     headers=alice_headers,
+                )
+                renamed = _post_json(
+                    f"{base}/conversations/{conversation['id']}/rename",
+                    {"title": "HTTP renamed"},
+                    headers=alice_headers,
+                )["conversation"]
+                bad_rename = _post_json(
+                    f"{base}/conversations/{conversation['id']}/rename",
+                    {"title": " "},
+                    headers=alice_headers,
+                    status=400,
+                )
+                read_rename = _post_json(
+                    f"{base}/conversations/{conversation['id']}/rename",
+                    {"title": "Read token rename"},
+                    headers=alice_read_headers,
+                    status=403,
                 )
                 alice_conversations = _get_json(f"{base}/conversations", headers=alice_headers)["conversations"]
                 bob_conversations = _get_json(f"{base}/conversations", headers=bob_headers)["conversations"]
@@ -7507,6 +7570,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=alice_headers,
                     status=403,
                 )
+                archived_rename = _post_json(
+                    f"{base}/conversations/{conversation['id']}/rename",
+                    {"title": "archived rename"},
+                    headers=alice_headers,
+                    status=403,
+                )
                 restored = _post_json(
                     f"{base}/conversations/{conversation['id']}/archive",
                     {"archived": False},
@@ -7524,6 +7593,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                 bob_append = _post_json(
                     f"{base}/conversations/{conversation['id']}/messages",
                     {"message": "read alice"},
+                    headers=bob_headers,
+                    status=403,
+                )
+                bob_rename = _post_json(
+                    f"{base}/conversations/{conversation['id']}/rename",
+                    {"title": "Bob rename"},
                     headers=bob_headers,
                     status=403,
                 )
@@ -7547,13 +7622,17 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )
 
                 self.assertEqual(alice_conversations[0]["id"], conversation["id"])
+                self.assertEqual(renamed["title"], "HTTP renamed")
+                self.assertEqual(bad_rename["error"], "title is required")
+                self.assertEqual(read_rename["error"], "api token scope denied")
                 self.assertEqual(bob_conversations, [])
                 self.assertEqual([message["role"] for message in messages], ["user", "assistant"])
                 self.assertEqual(messages[1]["run_id"], chat["result"]["run_id"])
                 self.assertIn("application/x-ndjson", exported_jsonl_type)
                 self.assertIn("text/markdown", exported_markdown_type)
                 self.assertEqual(json.loads(exported_jsonl.splitlines()[0])["conversation"]["id"], conversation["id"])
-                self.assertIn("# HTTP chat", exported_markdown)
+                self.assertEqual(json.loads(exported_jsonl.splitlines()[0])["conversation"]["title"], "HTTP renamed")
+                self.assertIn("# HTTP renamed", exported_markdown)
                 self.assertIn("```text\nrenewal risk\n```", exported_markdown)
                 self.assertIsNotNone(archived["archived_at"])
                 self.assertEqual(hidden_conversations, [])
@@ -7561,6 +7640,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(archived_messages["error"], "conversation archived")
                 self.assertEqual(archived_export["error"], "conversation archived")
                 self.assertEqual(archived_append["error"], "conversation archived")
+                self.assertEqual(archived_rename["error"], "conversation archived")
                 self.assertIsNone(restored["archived_at"])
                 self.assertEqual(visible_conversations[0]["id"], conversation["id"])
                 self.assertEqual(bob_messages["status"], 403)
@@ -7568,6 +7648,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(bob_export["status"], 403)
                 self.assertEqual(bob_export["error"], "conversation access denied")
                 self.assertEqual(bob_append["error"], "conversation access denied")
+                self.assertEqual(bob_rename["error"], "conversation access denied")
                 self.assertEqual(bob_archive["error"], "conversation access denied")
                 self.assertEqual(viewer_create["error"], "workspace role denied")
                 self.assertEqual(viewer_append["error"], "workspace role denied")
@@ -8375,12 +8456,19 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=token_headers,
                     status=403,
                 )
+                token_rename = _post_json(
+                    f"{strict_base}/conversations/{conversation['id']}/rename",
+                    {"title": "cross workspace"},
+                    headers=token_headers,
+                    status=403,
+                )
 
                 self.assertEqual(token_read["status"], 403)
                 self.assertEqual(token_read["error"], "conversation access denied")
                 self.assertEqual(token_export["status"], 403)
                 self.assertEqual(token_export["error"], "conversation access denied")
                 self.assertEqual(token_append["error"], "conversation access denied")
+                self.assertEqual(token_rename["error"], "conversation access denied")
             finally:
                 strict.shutdown()
                 strict.server_close()
@@ -8409,12 +8497,19 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=header_context,
                     status=403,
                 )
+                header_rename = _post_json(
+                    f"{local_base}/conversations/{conversation['id']}/rename",
+                    {"title": "cross workspace"},
+                    headers=header_context,
+                    status=403,
+                )
 
                 self.assertEqual(header_read["status"], 403)
                 self.assertEqual(header_read["error"], "conversation access denied")
                 self.assertEqual(header_export["status"], 403)
                 self.assertEqual(header_export["error"], "conversation access denied")
                 self.assertEqual(header_append["error"], "conversation access denied")
+                self.assertEqual(header_rename["error"], "conversation access denied")
             finally:
                 local.shutdown()
                 local.server_close()
@@ -8952,6 +9047,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("conversationExportFormatInput", body)
                     self.assertIn("conversationExportText", body)
                     self.assertIn("exportConversation", body)
+                    self.assertIn("/rename", body)
+                    self.assertIn("renameConversation", body)
+                    self.assertIn("data-rename-conversation-id", body)
                     self.assertIn("/archive", body)
                     self.assertIn("archiveConversation", body)
                     self.assertIn("data-archive-conversation-id", body)

@@ -422,6 +422,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/conversations":
                 self._create_conversation(payload)
                 return
+            conversation_rename_id = _conversation_rename_path(parsed.path)
+            if conversation_rename_id:
+                self._rename_conversation(conversation_rename_id, payload)
+                return
             conversation_archive_id = _conversation_archive_path(parsed.path)
             if conversation_archive_id:
                 self._archive_conversation(conversation_archive_id, payload)
@@ -674,6 +678,26 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                         conversation_id,
                         user_id,
                         archived=archived,
+                        expected_workspace_id=workspace_id,
+                    )
+                }
+            )
+        finally:
+            store.close()
+
+    def _rename_conversation(self, conversation_id: str, payload: dict[str, Any]) -> None:
+        title = payload.get("title")
+        if not isinstance(title, str):
+            raise ValueError("title is required")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            self._json(
+                {
+                    "conversation": store.rename_conversation(
+                        conversation_id,
+                        user_id,
+                        title,
                         expected_workspace_id=workspace_id,
                     )
                 }
@@ -2045,6 +2069,13 @@ def _conversation_messages_path(path: str) -> str | None:
 def _conversation_archive_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "archive":
+        return parts[1]
+    return None
+
+
+def _conversation_rename_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "rename":
         return parts[1]
     return None
 

@@ -4418,6 +4418,53 @@ class EnterpriseStore:
             allow_archived=True,
         )
 
+    def rename_conversation(
+        self,
+        conversation_id: str,
+        actor_user_id: str,
+        title: str,
+        *,
+        expected_workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        actor_user_id = actor_user_id.strip()
+        if not isinstance(title, str):
+            raise ValueError("title is required")
+        title = title.strip()
+        if not title:
+            raise ValueError("title is required")
+        conversation = self._conversation_for_actor(
+            conversation_id,
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+        )
+        self.require_workspace_role(conversation["workspace_id"], actor_user_id, WORKSPACE_WRITE_ROLES)
+        now = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                UPDATE conversations
+                SET title = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (title, now, conversation["id"]),
+            )
+            self._insert_audit_event(
+                conversation["workspace_id"],
+                actor_user_id,
+                "conversation.rename",
+                target_type="conversation",
+                target_id=conversation["id"],
+                details={
+                    "title_length": len(title),
+                    "previous_title_length": len(conversation["title"]),
+                },
+            )
+        return self._conversation_for_actor(
+            conversation["id"],
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+        )
+
     def list_conversation_messages(
         self,
         conversation_id: str,

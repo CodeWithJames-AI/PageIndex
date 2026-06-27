@@ -9029,6 +9029,17 @@ class EnterpriseStoreTest(unittest.TestCase):
             try:
                 local_report = run_deployment_check(root, require_api_token=False, check_provider=True)
                 ready_report = run_deployment_check(root, require_api_token=True, check_provider=True)
+                tamper_store = EnterpriseStore(root)
+                try:
+                    tampered_event = tamper_store.list_audit_events(workspace_id, "alice", limit=1)[0]
+                    tamper_store.conn.execute(
+                        "UPDATE audit_events SET action = ? WHERE id = ?",
+                        ("deployment.tampered", tampered_event["id"]),
+                    )
+                    tamper_store._commit()
+                finally:
+                    tamper_store.close()
+                tampered_report = run_deployment_check(root, require_api_token=True, check_provider=True)
                 os.environ["PAGEINDEX_LLM_BASE_URL"] = "not-a-url"
                 bad_provider_report = run_deployment_check(root, require_api_token=True, check_provider=True)
                 os.environ["PAGEINDEX_LLM_BASE_URL"] = "https://user:sk-secret-deploy-key@provider.example/v1?api_key=sk-secret-deploy-key"
@@ -9048,12 +9059,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(ready_report["checks"]["root_writable"]["ok"], True)
             self.assertEqual(ready_report["checks"]["schema"]["ok"], True)
             self.assertEqual(ready_report["checks"]["workspace_owner"]["owner_count"], 1)
+            self.assertEqual(ready_report["checks"]["audit_integrity"]["ok"], True)
             self.assertEqual(ready_report["checks"]["active_api_token"]["active_token_count"], 1)
             self.assertEqual(ready_report["checks"]["provider_config"]["ok"], True)
             self.assertEqual(ready_report["checks"]["provider_config"]["api_key_configured"], True)
             self.assertEqual(ready_report["checks"]["provider_config"]["model"], "pageindex-prod-model")
             self.assertNotIn("sk-secret-deploy-key", serialized_ready)
             self.assertNotIn("pit_", serialized_ready)
+            self.assertEqual(tampered_report["ok"], False)
+            self.assertEqual(tampered_report["checks"]["audit_integrity"]["ok"], False)
+            self.assertEqual(tampered_report["checks"]["audit_integrity"]["failing_workspaces"][0]["workspace_id"], workspace_id)
             self.assertEqual(bad_provider_report["ok"], False)
             self.assertEqual(bad_provider_report["checks"]["provider_config"]["ok"], False)
             serialized_secret_url = json.dumps(secret_url_report, sort_keys=True)
@@ -9110,6 +9125,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(bad_bool["error"], "check_provider must be boolean")
             self.assertEqual(strict_report["ok"], True, strict_report)
             self.assertEqual(strict_report["checks"]["strict_http"]["ok"], True)
+            self.assertEqual(strict_report["checks"]["audit_integrity"]["ok"], True)
             self.assertEqual(local_report["ok"], False)
             self.assertEqual(local_report["checks"]["strict_http"]["ok"], False)
             self.assertNotIn("pit_", serialized)

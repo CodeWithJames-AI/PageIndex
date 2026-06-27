@@ -15744,6 +15744,23 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(_release_smoke_exit_code({"ok": False}), 1)
         self.assertEqual(_release_smoke_exit_code({"ok": None}), 1)
 
+    def test_release_smoke_source_metadata_bounds_dirty_paths(self):
+        from scripts.release_smoke import SOURCE_DIRTY_PATH_LIMIT, _source_metadata
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, capture_output=True, text=True, check=True)
+            for index in range(SOURCE_DIRTY_PATH_LIMIT + 5):
+                (repo / f"dirty-{index:02d}.txt").write_text("changed", encoding="utf-8")
+
+            metadata = _source_metadata(repo)
+
+        self.assertEqual(metadata["dirty"], True)
+        self.assertEqual(metadata["dirty_count"], SOURCE_DIRTY_PATH_LIMIT + 5)
+        self.assertEqual(len(metadata["dirty_paths"]), SOURCE_DIRTY_PATH_LIMIT)
+        self.assertEqual(metadata["dirty_paths_truncated"], True)
+        self.assertTrue(all(path.startswith("?? dirty-") for path in metadata["dirty_paths"]))
+
     def test_deployment_check_reports_readiness_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "deployment-root"

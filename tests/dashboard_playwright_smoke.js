@@ -247,6 +247,30 @@ async function waitForAnyText(page, selector, expectedValues) {
     await folderQueryResponse;
     await waitForText(page, "#status", "Trace verified.");
 
+    await page.fill("#conversationTitleInput", "Browser folder scoped chat");
+    const createFolderConversationResponse = page.waitForResponse(
+      (response) => {
+        if (!response.url().endsWith("/conversations") || response.request().method() !== "POST") {
+          return false;
+        }
+        try {
+          const payload = JSON.parse(response.request().postData() || "{}");
+          return payload.folder_id === folderId
+            && !Object.prototype.hasOwnProperty.call(payload, "doc_ids")
+            && !Object.prototype.hasOwnProperty.call(payload, "source_set_id");
+        } catch (_error) {
+          return false;
+        }
+      }
+    );
+    await page.click("#createConversationButton");
+    const folderConversationResponse = await createFolderConversationResponse;
+    const folderConversation = await folderConversationResponse.json();
+    assert(folderConversation.folder_id === folderId, "folder scoped conversation did not return folder id");
+    await waitForText(page, "#status", "Conversation created.");
+    await waitForText(page, "#conversationList", "Browser folder scoped chat");
+    await waitForText(page, "#conversationList", folderId);
+
     const loadFolderAccessResponse = page.waitForResponse(
       (response) => response.url().includes(`/folders/${folderId}/access`) && response.request().method() === "GET"
     );
@@ -740,6 +764,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       groupLifecycleExercised: true,
       folderExercised: true,
       folderQueryExercised: true,
+      folderConversationExercised: true,
       folderLifecycleExercised: true,
       folderMoveExercised: true,
       folderAccessExercised: true,

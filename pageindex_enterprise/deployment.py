@@ -14,6 +14,7 @@ EXPECTED_TABLES = {
     "workspace_members",
     "api_tokens",
     "workspace_provider_configs",
+    "workspace_audit_jsonl_sinks",
     "documents",
     "document_pages",
     "query_runs",

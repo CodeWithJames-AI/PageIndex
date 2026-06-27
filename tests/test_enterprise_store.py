@@ -6280,6 +6280,82 @@ class EnterpriseStoreTest(unittest.TestCase):
             else:
                 os.environ["PAGEINDEX_AUDIT_SINK_JSONL"] = old_sink
 
+    def test_workspace_audit_jsonl_sink_fans_out_committed_events_and_redacts_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            other_workspace_id = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(other_workspace_id, "bob", "owner")
+
+            with self.assertRaisesRegex(ValueError, "must be relative"):
+                store.set_workspace_audit_jsonl_sink_config(
+                    workspace_id,
+                    "alice",
+                    relative_path="/tmp/audit.jsonl",
+                )
+            with self.assertRaisesRegex(ValueError, "stay inside"):
+                store.set_workspace_audit_jsonl_sink_config(
+                    workspace_id,
+                    "alice",
+                    relative_path="../outside.jsonl",
+                )
+            with self.assertRaisesRegex(ValueError, "end in .jsonl"):
+                store.set_workspace_audit_jsonl_sink_config(
+                    workspace_id,
+                    "alice",
+                    relative_path="audit/team.txt",
+                )
+
+            config = store.set_workspace_audit_jsonl_sink_config(
+                workspace_id,
+                "alice",
+                relative_path="audit/team.jsonl",
+            )
+            other_token = store.create_api_token(other_workspace_id, "bob", name="other")
+            token = store.create_api_token(workspace_id, "alice", name="ci")
+            store.record_audit_event(
+                workspace_id,
+                "alice",
+                "custom.secret_probe",
+                target_type="probe",
+                details={
+                    "safe": "kept",
+                    "token": token["token"],
+                    "nested": {"password": "pw_should_not_leave", "note": "kept"},
+                    "message": "Bearer live_header_should_not_leave",
+                    "public": "sk-livekey_should_not_leave",
+                },
+            )
+
+            sink_path = root / "audit" / "team.jsonl"
+            lines = [json.loads(line) for line in sink_path.read_text(encoding="utf-8").splitlines()]
+            serialized = json.dumps(lines, sort_keys=True)
+            lines_before_disable = sink_path.read_text(encoding="utf-8").splitlines()
+            disabled = store.set_workspace_audit_jsonl_sink_config(
+                workspace_id,
+                "alice",
+                relative_path="audit/team.jsonl",
+                enabled=False,
+            )
+            store.create_api_token(workspace_id, "alice", name="disabled")
+            lines_after_disable = sink_path.read_text(encoding="utf-8").splitlines()
+
+            self.assertEqual(config["relative_path"], "audit/team.jsonl")
+            self.assertTrue(config["configured"])
+            self.assertTrue(config["enabled"])
+            self.assertEqual([line["action"] for line in lines], ["audit_sink.config_update", "api_token.create", "custom.secret_probe"])
+            self.assertNotIn(other_token["id"], serialized)
+            self.assertNotIn(token["token"], serialized)
+            self.assertNotIn("pw_should_not_leave", serialized)
+            self.assertNotIn("live_header_should_not_leave", serialized)
+            self.assertNotIn("livekey_should_not_leave", serialized)
+            self.assertEqual(lines[2]["details"], {"message": "[redacted]", "nested": {"note": "kept"}, "public": "[redacted]", "safe": "kept"})
+            self.assertTrue(disabled["configured"])
+            self.assertFalse(disabled["enabled"])
+            self.assertEqual(lines_after_disable, lines_before_disable)
+
     def test_audit_retention_policy_previews_and_purges_old_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = EnterpriseStore(Path(tmp) / "workspace")
@@ -12467,6 +12543,119 @@ class EnterpriseStoreTest(unittest.TestCase):
                 store.close()
             self.assertNotIn(old, remaining_ids)
 
+    def test_http_audit_sink_requires_admin_role_and_audit_write_scopes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "mona", "member", actor_user_id="alice")
+            full_token = store.create_api_token(workspace_id, "alice", name="full")["token"]
+            audit_only_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            write_only_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "mona", name="member")
+            member_token = member_token_record["token"]
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store._commit()
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            local_server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=False)
+            local_thread = threading.Thread(target=local_server.serve_forever, daemon=True)
+            local_thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            local_base = f"http://127.0.0.1:{local_server.server_port}"
+            full_headers = {"Authorization": f"Bearer {full_token}"}
+            audit_headers = {"Authorization": f"Bearer {audit_only_token}"}
+            write_headers = {"Authorization": f"Bearer {write_only_token}"}
+            member_headers = {"Authorization": f"Bearer {member_token}"}
+            legacy_headers = {"X-PageIndex-Workspace": workspace_id, "X-PageIndex-User": "alice"}
+            try:
+                local_header_denied = _get_error(f"{local_base}/audit-sink", headers=legacy_headers)
+                initial = _get_json(f"{base}/audit-sink", headers=audit_headers)
+                write_get_blocked = _get_error(f"{base}/audit-sink", headers=write_headers)
+                audit_write_blocked = _post_json(
+                    f"{base}/audit-sink",
+                    {"relative_path": "audit/http.jsonl"},
+                    headers=audit_headers,
+                    status=403,
+                )
+                write_audit_blocked = _post_json(
+                    f"{base}/audit-sink",
+                    {"relative_path": "audit/http.jsonl"},
+                    headers=write_headers,
+                    status=403,
+                )
+                member_blocked = _post_json(
+                    f"{base}/audit-sink",
+                    {"relative_path": "audit/http.jsonl"},
+                    headers=member_headers,
+                    status=403,
+                )
+                bad_escape = _post_json(
+                    f"{base}/audit-sink",
+                    {"relative_path": "../outside.jsonl"},
+                    headers=full_headers,
+                    status=400,
+                )
+                bad_extension = _post_json(
+                    f"{base}/audit-sink",
+                    {"relative_path": "audit/http.txt"},
+                    headers=full_headers,
+                    status=400,
+                )
+                mixed_clear = _post_json(
+                    f"{base}/audit-sink",
+                    {"clear": True, "relative_path": "audit/http.jsonl"},
+                    headers=full_headers,
+                    status=400,
+                )
+                saved = _post_json(
+                    f"{base}/audit-sink",
+                    {"relative_path": "audit/http.jsonl"},
+                    headers=full_headers,
+                )
+                read_back = _get_json(f"{base}/audit-sink", headers=audit_headers)
+                disabled = _post_json(
+                    f"{base}/audit-sink",
+                    {"relative_path": "audit/http-disabled.jsonl", "enabled": False},
+                    headers=full_headers,
+                )
+                cleared = _post_json(f"{base}/audit-sink", {"clear": True}, headers=full_headers)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+                local_server.shutdown()
+                local_server.server_close()
+                local_thread.join(timeout=5)
+
+            sink_path = root / "audit" / "http.jsonl"
+            lines = [json.loads(line) for line in sink_path.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual(local_header_denied["status"], 403)
+            self.assertEqual(local_header_denied["error"], "api token required")
+            self.assertFalse(initial["configured"])
+            self.assertEqual(write_get_blocked["error"], "api token scope denied")
+            self.assertEqual(audit_write_blocked["error"], "api token scope denied")
+            self.assertEqual(write_audit_blocked["error"], "api token scope denied")
+            self.assertEqual(member_blocked["error"], "workspace role denied")
+            self.assertIn("stay inside", bad_escape["error"])
+            self.assertIn("end in .jsonl", bad_extension["error"])
+            self.assertEqual(mixed_clear["error"], "choose clear or audit sink fields")
+            self.assertEqual(saved["relative_path"], "audit/http.jsonl")
+            self.assertTrue(saved["configured"])
+            self.assertTrue(saved["enabled"])
+            self.assertEqual(read_back["relative_path"], "audit/http.jsonl")
+            self.assertEqual(disabled["relative_path"], "audit/http-disabled.jsonl")
+            self.assertFalse(disabled["enabled"])
+            self.assertFalse(cleared["configured"])
+            self.assertEqual([line["action"] for line in lines], ["audit_sink.config_update"])
+
     def test_http_query_retention_requires_admin_role_and_audit_write_scopes(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -12917,6 +13106,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("clearAuditRetention", body)
                     self.assertIn("previewAuditPurge", body)
                     self.assertIn("purgeAuditEvents", body)
+                    self.assertIn("/audit-sink", body)
+                    self.assertIn("auditSinkPathInput", body)
+                    self.assertIn("auditSinkEnabledInput", body)
+                    self.assertIn("auditSinkSummary", body)
+                    self.assertIn("refreshAuditSinkConfig", body)
+                    self.assertIn("saveAuditSinkConfig", body)
+                    self.assertIn("clearAuditSinkConfig", body)
                     self.assertIn("/query-retention", body)
                     self.assertIn("/query-retention/purge", body)
                     self.assertIn("queryRetentionDaysInput", body)

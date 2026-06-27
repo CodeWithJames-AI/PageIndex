@@ -458,6 +458,36 @@ def _audit_sink_path(root: Path) -> Path | None:
     return path.resolve()
 
 
+def _normalize_audit_sink_relative_path(relative_path: Any) -> str:
+    if not isinstance(relative_path, str):
+        raise ValueError("audit sink path must be a string")
+    raw = relative_path.strip()
+    if not raw:
+        raise ValueError("audit sink path is required")
+    path = Path(raw)
+    if path.is_absolute() or raw.startswith("~"):
+        raise ValueError("audit sink path must be relative")
+    if path.suffix.casefold() != ".jsonl":
+        raise ValueError("audit sink path must end in .jsonl")
+    probe_root = Path("/__pageindex_workspace_root__")
+    resolved = (probe_root / path).resolve()
+    if not _path_is_relative_to(resolved, probe_root):
+        raise ValueError("audit sink path must stay inside the workspace root")
+    return resolved.relative_to(probe_root).as_posix()
+
+
+def _workspace_audit_sink_path(root: Path, relative_path: str) -> Path | None:
+    try:
+        normalized = _normalize_audit_sink_relative_path(relative_path)
+    except ValueError:
+        return None
+    root = root.resolve()
+    path = (root / normalized).resolve()
+    if not _path_is_relative_to(path, root):
+        return None
+    return path
+
+
 def _redact_audit_sink_event(event: dict[str, Any]) -> dict[str, Any]:
     return _redact_audit_sink_mapping(event)
 
@@ -928,6 +958,14 @@ class EnterpriseStore:
               model TEXT NOT NULL,
               api_key_env_var TEXT,
               timeout_seconds REAL,
+              updated_at TEXT NOT NULL,
+              updated_by TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_audit_jsonl_sinks (
+              workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+              relative_path TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
               updated_at TEXT NOT NULL,
               updated_by TEXT NOT NULL
             );
@@ -2599,6 +2637,88 @@ class EnterpriseStore:
             "prefer_env_api_key": False,
         }
 
+    def get_workspace_audit_jsonl_sink_config(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        return self._workspace_audit_jsonl_sink_config(workspace_id)
+
+    def set_workspace_audit_jsonl_sink_config(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        *,
+        relative_path: str,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        normalized_path = _normalize_audit_sink_relative_path(relative_path)
+        updated_at = _now()
+        actor_user_id = actor_user_id.strip()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO workspace_audit_jsonl_sinks (
+                  workspace_id, relative_path, enabled, updated_at, updated_by
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET
+                  relative_path = excluded.relative_path,
+                  enabled = excluded.enabled,
+                  updated_at = excluded.updated_at,
+                  updated_by = excluded.updated_by
+                """,
+                (workspace_id, normalized_path, int(enabled), updated_at, actor_user_id),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "audit_sink.config_update",
+                target_type="audit_sink",
+                target_id=workspace_id,
+                details={"relative_path": normalized_path, "enabled": enabled},
+            )
+        return self._workspace_audit_jsonl_sink_config(workspace_id)
+
+    def clear_workspace_audit_jsonl_sink_config(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        actor_user_id = actor_user_id.strip()
+        with self._atomic():
+            self.conn.execute("DELETE FROM workspace_audit_jsonl_sinks WHERE workspace_id = ?", (workspace_id,))
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "audit_sink.config_clear",
+                target_type="audit_sink",
+                target_id=workspace_id,
+                details={},
+            )
+        return self._workspace_audit_jsonl_sink_config(workspace_id)
+
+    def _workspace_audit_jsonl_sink_config(self, workspace_id: str) -> dict[str, Any]:
+        self._require_workspace(workspace_id)
+        row = self._one(
+            """
+            SELECT workspace_id, relative_path, enabled, updated_at, updated_by
+            FROM workspace_audit_jsonl_sinks
+            WHERE workspace_id = ?
+            """,
+            (workspace_id,),
+        )
+        if not row:
+            return {
+                "workspace_id": workspace_id,
+                "configured": False,
+                "relative_path": None,
+                "enabled": False,
+                "updated_at": None,
+                "updated_by": None,
+            }
+        config = dict(row)
+        config["configured"] = True
+        config["enabled"] = bool(config["enabled"])
+        return config
+
     def _workspace_provider_config_metadata(self, workspace_id: str) -> dict[str, Any]:
         self._require_workspace(workspace_id)
         row = self._one(
@@ -2901,10 +3021,72 @@ class EnterpriseStore:
     def _flush_audit_sink_events(self) -> None:
         events = self._pending_audit_sink_events
         self._pending_audit_sink_events = []
+        if not events:
+            return
+        writes: dict[Path, list[dict[str, Any]]] = {}
+        seen_by_path: dict[Path, set[str]] = {}
+        env_sink_path = _audit_sink_path(self.root)
+        if env_sink_path:
+            for event in events:
+                self._queue_audit_sink_write(writes, seen_by_path, env_sink_path, event)
+        workspace_sinks = self._workspace_audit_sink_paths(events)
+        for event in events:
+            workspace_id = event.get("workspace_id")
+            if not isinstance(workspace_id, str):
+                continue
+            sink_path = workspace_sinks.get(workspace_id)
+            if sink_path:
+                self._queue_audit_sink_write(writes, seen_by_path, sink_path, event)
+        for sink_path, sink_events in writes.items():
+            self._write_audit_sink_events(sink_path, sink_events)
+
+    def _workspace_audit_sink_paths(self, events: list[dict[str, Any]]) -> dict[str, Path]:
+        workspace_ids = sorted(
+            {
+                event["workspace_id"]
+                for event in events
+                if isinstance(event.get("workspace_id"), str) and event.get("workspace_id")
+            }
+        )
+        if not workspace_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in workspace_ids)
         try:
-            sink_path = _audit_sink_path(self.root)
-            if not sink_path or not events:
-                return
+            rows = self.conn.execute(
+                f"""
+                SELECT workspace_id, relative_path
+                FROM workspace_audit_jsonl_sinks
+                WHERE enabled = 1 AND workspace_id IN ({placeholders})
+                """,
+                tuple(workspace_ids),
+            ).fetchall()
+        except sqlite3.Error:
+            return {}
+        sinks: dict[str, Path] = {}
+        for row in rows:
+            sink_path = _workspace_audit_sink_path(self.root, row["relative_path"])
+            if sink_path:
+                sinks[row["workspace_id"]] = sink_path
+        return sinks
+
+    def _queue_audit_sink_write(
+        self,
+        writes: dict[Path, list[dict[str, Any]]],
+        seen_by_path: dict[Path, set[str]],
+        sink_path: Path,
+        event: dict[str, Any],
+    ) -> None:
+        events = writes.setdefault(sink_path, [])
+        seen = seen_by_path.setdefault(sink_path, set())
+        event_id = event.get("id")
+        if isinstance(event_id, str) and event_id in seen:
+            return
+        if isinstance(event_id, str):
+            seen.add(event_id)
+        events.append(event)
+
+    def _write_audit_sink_events(self, sink_path: Path, events: list[dict[str, Any]]) -> None:
+        try:
             sink_path.parent.mkdir(parents=True, exist_ok=True)
             with sink_path.open("a", encoding="utf-8") as sink:
                 for event in events:

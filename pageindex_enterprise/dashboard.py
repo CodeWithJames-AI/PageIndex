@@ -586,6 +586,16 @@ DASHBOARD_HTML = """<!doctype html>
               <input id="auditLegalHoldReasonInput" value="" placeholder="legal hold reason" aria-label="Audit legal hold reason">
               <button id="clearAuditRetentionButton" class="secondary" type="button">Clear retention</button>
               <div id="auditRetentionSummary" class="muted">Retention not loaded.</div>
+              <div class="import-row">
+                <input id="auditSinkPathInput" value="" placeholder="audit sink relative .jsonl path" aria-label="Audit sink relative JSONL path">
+                <label><input id="auditSinkEnabledInput" type="checkbox" checked>enabled</label>
+              </div>
+              <div class="provider-actions">
+                <button id="refreshAuditSinkButton" class="secondary" type="button">Sink</button>
+                <button id="saveAuditSinkButton" type="button">Save sink</button>
+                <button id="clearAuditSinkButton" class="secondary" type="button">Clear sink</button>
+              </div>
+              <div id="auditSinkSummary" class="muted">Sink not loaded.</div>
               <div id="auditIntegritySummary" class="muted">Integrity not checked.</div>
               <pre id="auditIntegrityReportText">{}</pre>
               <div id="auditList" class="audit-list muted">No audit events loaded.</div>
@@ -782,6 +792,9 @@ DASHBOARD_HTML = """<!doctype html>
     const auditRetentionDaysInput = document.getElementById("auditRetentionDaysInput");
     const auditLegalHoldReasonInput = document.getElementById("auditLegalHoldReasonInput");
     const auditRetentionSummary = document.getElementById("auditRetentionSummary");
+    const auditSinkPathInput = document.getElementById("auditSinkPathInput");
+    const auditSinkEnabledInput = document.getElementById("auditSinkEnabledInput");
+    const auditSinkSummary = document.getElementById("auditSinkSummary");
     const auditIntegritySummary = document.getElementById("auditIntegritySummary");
     const auditIntegrityReportText = document.getElementById("auditIntegrityReportText");
     const workspaceExportLink = document.getElementById("workspaceExportLink");
@@ -1926,6 +1939,19 @@ DASHBOARD_HTML = """<!doctype html>
       auditRetentionSummary.textContent = `${policy.retention_days} days | ${holdText}${holdReason} | updated ${policy.updated_at || "unknown"}`;
     }
 
+    function renderAuditSinkConfig(config) {
+      auditSinkPathInput.value = config && config.relative_path ? config.relative_path : "";
+      auditSinkEnabledInput.checked = !config || config.enabled !== false;
+      if (!config || !config.configured) {
+        auditSinkSummary.className = "muted";
+        auditSinkSummary.textContent = "Sink not configured.";
+        return;
+      }
+      auditSinkSummary.className = config.enabled ? "status ok" : "muted";
+      const state = config.enabled ? "enabled" : "disabled";
+      auditSinkSummary.textContent = `${state} | ${config.relative_path || "no path"} | updated ${config.updated_at || "unknown"}`;
+    }
+
     function renderAuditPurgeResult(result) {
       const action = result.dry_run ? "Preview" : "Purge";
       auditRetentionSummary.className = result.purged > 0 ? "status warn" : "muted";
@@ -2487,6 +2513,17 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function refreshAuditSinkConfig(options = {}) {
+      if (!options.quiet) {
+        setStatus("Refreshing audit sink...");
+      }
+      const config = await api("/audit-sink");
+      renderAuditSinkConfig(config);
+      if (!options.quiet) {
+        setStatus("Audit sink refreshed.", "ok");
+      }
+    }
+
     async function verifyAuditIntegrity(options = {}) {
       if (!options.quiet) {
         setStatus("Verifying audit ledger...");
@@ -2592,6 +2629,13 @@ DASHBOARD_HTML = """<!doctype html>
       } catch (error) {
         auditRetentionSummary.className = "muted";
         auditRetentionSummary.textContent = "Retention unavailable.";
+      }
+      try {
+        await refreshAuditSinkConfig({ quiet: true });
+      } catch (error) {
+        renderAuditSinkConfig(null);
+        auditSinkSummary.className = "muted";
+        auditSinkSummary.textContent = "Sink unavailable.";
       }
       try {
         await verifyAuditIntegrity({ quiet: true });
@@ -3403,6 +3447,35 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Audit purged.", "ok");
     }
 
+    async function saveAuditSinkConfig() {
+      const relativePath = auditSinkPathInput.value.trim();
+      if (!relativePath) {
+        setStatus("Enter an audit sink path.", "warn");
+        return;
+      }
+      if (!relativePath.toLowerCase().endsWith(".jsonl")) {
+        setStatus("Audit sink path must end in .jsonl.", "warn");
+        return;
+      }
+      setStatus("Saving audit sink...");
+      const config = await api("/audit-sink", {
+        method: "POST",
+        body: JSON.stringify({ relative_path: relativePath, enabled: auditSinkEnabledInput.checked })
+      });
+      renderAuditSinkConfig(config);
+      setStatus("Audit sink saved.", "ok");
+    }
+
+    async function clearAuditSinkConfig() {
+      setStatus("Clearing audit sink...");
+      const config = await api("/audit-sink", {
+        method: "POST",
+        body: JSON.stringify({ clear: true })
+      });
+      renderAuditSinkConfig(config);
+      setStatus("Audit sink cleared.", "ok");
+    }
+
     async function refreshProviderConfig(options = {}) {
       if (!options.quiet) {
         setStatus("Refreshing provider...");
@@ -3928,6 +4001,9 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("refreshAuditRetentionButton").addEventListener("click", () => refreshAuditRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveAuditRetentionButton").addEventListener("click", () => saveAuditRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearAuditRetentionButton").addEventListener("click", () => clearAuditRetention().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("refreshAuditSinkButton").addEventListener("click", () => refreshAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("saveAuditSinkButton").addEventListener("click", () => saveAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("clearAuditSinkButton").addEventListener("click", () => clearAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("enableAuditLegalHoldButton").addEventListener("click", () => setAuditLegalHold(true).catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearAuditLegalHoldButton").addEventListener("click", () => setAuditLegalHold(false).catch((error) => setStatus(error.message, "error")));
     document.getElementById("previewAuditPurgeButton").addEventListener("click", () => previewAuditPurge().catch((error) => setStatus(error.message, "error")));

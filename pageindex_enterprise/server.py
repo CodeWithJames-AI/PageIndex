@@ -290,6 +290,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            if parsed.path == "/audit-sink":
+                self._get_audit_sink_config()
+                return
             if parsed.path == "/query-retention":
                 store = EnterpriseStore(self.server.root)
                 try:
@@ -579,6 +582,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/audit-retention/purge":
                 self._purge_audit_retention(payload)
+                return
+            if parsed.path == "/audit-sink":
+                self._set_audit_sink_config(payload)
                 return
             if parsed.path == "/query-retention":
                 self._set_query_retention(payload)
@@ -1927,6 +1933,14 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         finally:
             store.close()
 
+    def _get_audit_sink_config(self) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+            self._json(store.get_workspace_audit_jsonl_sink_config(workspace_id, user_id))
+        finally:
+            store.close()
+
     def _deployment_check(self, query: str) -> None:
         params = parse_qs(query)
         store = EnterpriseStore(self.server.root)
@@ -1976,6 +1990,38 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     model=model,
                     api_key_env_var=_optional_str(payload.get("api_key_env_var"), "api_key_env_var"),
                     timeout_seconds=_optional_number(payload.get("timeout_seconds"), "timeout_seconds"),
+                )
+            )
+        finally:
+            store.close()
+
+    def _set_audit_sink_config(self, payload: dict[str, Any]) -> None:
+        clear = payload.get("clear", False)
+        if not isinstance(clear, bool):
+            raise ValueError("clear must be a boolean")
+        has_updates = any(key in payload for key in ("relative_path", "path", "enabled"))
+        if clear and has_updates:
+            raise ValueError("choose clear or audit sink fields")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store, required_scope=("audit", "write"), require_api_token=True
+            )
+            if clear:
+                self._json(store.clear_workspace_audit_jsonl_sink_config(workspace_id, user_id))
+                return
+            relative_path = payload.get("relative_path", payload.get("path"))
+            if not isinstance(relative_path, str) or not relative_path.strip():
+                raise ValueError("relative_path is required")
+            enabled = payload.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled must be a boolean")
+            self._json(
+                store.set_workspace_audit_jsonl_sink_config(
+                    workspace_id,
+                    user_id,
+                    relative_path=relative_path,
+                    enabled=enabled,
                 )
             )
         finally:

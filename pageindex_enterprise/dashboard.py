@@ -656,6 +656,7 @@ DASHBOARD_HTML = """<!doctype html>
             <div id="versionList" class="version-list muted" style="margin-top:12px">No versions loaded.</div>
             <div id="pagePreviewList" class="page-list muted" style="margin-top:12px">No pages loaded.</div>
             <div id="questionSuggestionList" class="page-list muted" style="margin-top:12px">No questions loaded.</div>
+            <label class="checkbox-row" style="margin-top:12px"><input id="documentShareRedactInput" type="checkbox"> Redact share content</label>
             <div id="documentShareList" class="member-list muted" style="margin-top:12px">No document shares loaded.</div>
             <input id="shareUrlOutput" readonly value="" placeholder="latest share URL" aria-label="Latest share URL">
           </section>
@@ -798,6 +799,7 @@ DASHBOARD_HTML = """<!doctype html>
     const pagePreviewList = document.getElementById("pagePreviewList");
     const questionSuggestionList = document.getElementById("questionSuggestionList");
     const documentShareList = document.getElementById("documentShareList");
+    const documentShareRedactInput = document.getElementById("documentShareRedactInput");
     const shareUrlOutput = document.getElementById("shareUrlOutput");
     const folderList = document.getElementById("folderList");
     const virtualNodeList = document.getElementById("virtualNodeList");
@@ -1413,7 +1415,7 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="member-row">
             <div>
               <strong>${escapeHtml(link.active ? "active" : "inactive")}</strong>
-              <div class="muted">${escapeHtml(link.id)}${kind === "conversations" ? ` | ${escapeHtml(link.redact_content ? "redacted" : "raw")}` : ""}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
+              <div class="muted">${escapeHtml(link.id)} | ${escapeHtml(link.redact_content ? "redacted" : "raw")}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
             </div>
             <button class="secondary" type="button" data-revoke-share-kind="${escapeHtml(kind)}" data-revoke-share-target-id="${escapeHtml(link[targetKey] || "")}" data-revoke-share-link-path="${escapeHtml(path)}" data-revoke-share-link-id="${escapeHtml(link.id)}"${link.active ? "" : " disabled"}>Revoke</button>
           </div>
@@ -2104,9 +2106,13 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       setStatus("Creating document share...");
+      const payloadBody = {
+        ...expiry.payload,
+        redact_content: documentShareRedactInput.checked
+      };
       const payload = await api(`/documents/${encodeURIComponent(docId)}/share-links`, {
         method: "POST",
-        body: JSON.stringify(expiry.payload)
+        body: JSON.stringify(payloadBody)
       });
       const link = payload.share_link || {};
       shareUrlOutput.value = link.token ? publicShareUrl("documents", link.token) : "";

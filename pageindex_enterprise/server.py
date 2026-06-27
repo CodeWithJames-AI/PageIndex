@@ -1468,6 +1468,11 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         expires_at = _optional_str(payload.get("expires_at"), "expires_at")
         if payload.get("expires_in_days") is not None:
             expires_at = expires_at_from_days(_optional_positive_int(payload.get("expires_in_days"), "expires_in_days"))
+        redact_content = (
+            _bool_body_value(payload.get("redact_content"), "redact_content")
+            if "redact_content" in payload
+            else False
+        )
         store = EnterpriseStore(self.server.root)
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope="write")
@@ -1476,6 +1481,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 workspace_id=workspace_id,
                 actor_user_id=user_id,
                 expires_at=expires_at,
+                redact_content=redact_content,
             )
             if share_link is None:
                 self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)

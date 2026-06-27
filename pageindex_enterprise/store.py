@@ -726,7 +726,7 @@ def _redact_audit_sink_mapping(data: dict[str, Any]) -> dict[str, Any]:
     return redacted
 
 
-def _redact_conversation_share_content(content: Any) -> str:
+def _redact_public_share_text(content: Any) -> str:
     text = "" if content is None else str(content)
     text = _AUDIT_SINK_SECRET_VALUE.sub("[redacted]", text)
     text = _ABSOLUTE_SOURCE_PATH.sub(lambda match: f"{match.group(1)}[redacted-path]", text)
@@ -738,7 +738,7 @@ def _redact_conversation_share_citation(citation: dict[str, Any]) -> dict[str, A
     redacted = dict(citation)
     for key in ("doc_name", "label"):
         if redacted.get(key) is not None:
-            redacted[key] = _redact_conversation_share_content(redacted[key])
+            redacted[key] = _redact_public_share_text(redacted[key])
     return redacted
 
 
@@ -967,6 +967,7 @@ class EnterpriseStore:
               doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
               created_by TEXT NOT NULL,
               token_hash TEXT NOT NULL UNIQUE,
+              redact_content INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL,
               expires_at TEXT,
               revoked_at TEXT
@@ -1230,6 +1231,7 @@ class EnterpriseStore:
             },
             "document_share_links": {
                 "revoked_at": "TEXT",
+                "redact_content": "INTEGER NOT NULL DEFAULT 0",
             },
             "conversation_share_links": {
                 "revoked_at": "TEXT",
@@ -4472,7 +4474,10 @@ class EnterpriseStore:
         workspace_id: str,
         actor_user_id: str,
         expires_at: str | None = None,
+        redact_content: bool = False,
     ) -> dict[str, Any] | None:
+        if not isinstance(redact_content, bool):
+            raise ValueError("redact_content must be a boolean")
         doc_id = doc_id.strip()
         if not doc_id:
             raise ValueError("Document id is required.")
@@ -4490,9 +4495,10 @@ class EnterpriseStore:
             self.conn.execute(
                 """
                 INSERT INTO document_share_links (
-                  id, workspace_id, doc_id, created_by, token_hash, created_at, expires_at, revoked_at
+                  id, workspace_id, doc_id, created_by, token_hash,
+                  redact_content, created_at, expires_at, revoked_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     share_link_id,
@@ -4500,6 +4506,7 @@ class EnterpriseStore:
                     document["id"],
                     actor_user_id.strip(),
                     _hash_token(token),
+                    1 if redact_content else 0,
                     created_at,
                     expires_at,
                 ),
@@ -4510,7 +4517,11 @@ class EnterpriseStore:
                 "document.share_link_create",
                 target_type="document",
                 target_id=document["id"],
-                details={"share_link_id": share_link_id, "expires_at": expires_at},
+                details={
+                    "share_link_id": share_link_id,
+                    "expires_at": expires_at,
+                    "redact_content": redact_content,
+                },
             )
         link = self._document_share_link(share_link_id)
         assert link is not None
@@ -4533,7 +4544,7 @@ class EnterpriseStore:
         self._require_document_write(document, actor_user_id)
         rows = self.conn.execute(
             """
-            SELECT id, workspace_id, doc_id, created_by, created_at, expires_at, revoked_at
+            SELECT id, workspace_id, doc_id, created_by, redact_content, created_at, expires_at, revoked_at
             FROM document_share_links
             WHERE doc_id = ?
             ORDER BY created_at DESC, id
@@ -4592,7 +4603,7 @@ class EnterpriseStore:
         row = self._one(
             """
             SELECT l.id AS share_link_id, l.workspace_id, l.doc_id, l.created_by,
-                   l.token_hash, l.created_at, l.expires_at, l.revoked_at,
+                   l.token_hash, l.redact_content, l.created_at, l.expires_at, l.revoked_at,
                    d.name, d.description, d.kind, d.access_mode, d.page_count, d.line_count
             FROM document_share_links l
             JOIN documents d ON d.id = l.doc_id
@@ -4607,6 +4618,7 @@ class EnterpriseStore:
         limit = max(1, min(int(limit), 100))
         offset = max(0, int(offset))
         max_chars = max(200, min(int(max_chars), 20000))
+        redact_content = bool(row["redact_content"])
         total_pages = int(
             self.conn.execute(
                 "SELECT COUNT(*) AS count FROM document_pages WHERE doc_id = ?",
@@ -4625,6 +4637,8 @@ class EnterpriseStore:
             (row["doc_id"], limit, offset),
         ):
             content = page["content"]
+            if redact_content:
+                content = _redact_public_share_text(content)
             pages.append(
                 {
                     "page": page["page"],
@@ -4639,6 +4653,7 @@ class EnterpriseStore:
                     "workspace_id": row["workspace_id"],
                     "doc_id": row["doc_id"],
                     "created_by": row["created_by"],
+                    "redact_content": row["redact_content"],
                     "created_at": row["created_at"],
                     "expires_at": row["expires_at"],
                     "revoked_at": row["revoked_at"],
@@ -4647,8 +4662,8 @@ class EnterpriseStore:
             "document": {
                 "id": row["doc_id"],
                 "workspace_id": row["workspace_id"],
-                "name": row["name"],
-                "description": row["description"],
+                "name": _redact_public_share_text(row["name"]) if redact_content else row["name"],
+                "description": _redact_public_share_text(row["description"]) if redact_content else row["description"],
                 "kind": row["kind"],
                 "access_mode": row["access_mode"],
                 "page_count": row["page_count"],
@@ -5991,7 +6006,7 @@ class EnterpriseStore:
             {
                 "id": message["id"],
                 "role": message["role"],
-                "content": _redact_conversation_share_content(message["content"])
+                "content": _redact_public_share_text(message["content"])
                 if redact_content
                 else message["content"],
                 "run_id": message["run_id"],
@@ -6043,7 +6058,7 @@ class EnterpriseStore:
             "conversation": {
                 "id": row["conversation_id"],
                 "workspace_id": row["workspace_id"],
-                "title": _redact_conversation_share_content(row["title"]) if redact_content else row["title"],
+                "title": _redact_public_share_text(row["title"]) if redact_content else row["title"],
                 "created_at": row["conversation_created_at"],
                 "updated_at": row["updated_at"],
             },
@@ -7407,7 +7422,7 @@ class EnterpriseStore:
     def _document_share_link(self, share_link_id: str) -> dict[str, Any] | None:
         row = self._one(
             """
-            SELECT id, workspace_id, doc_id, created_by, created_at, expires_at, revoked_at
+            SELECT id, workspace_id, doc_id, created_by, redact_content, created_at, expires_at, revoked_at
             FROM document_share_links
             WHERE id = ?
             """,
@@ -7547,6 +7562,7 @@ def _content_line_count(content: str) -> int:
 
 def _decorate_document_share_link(link: dict[str, Any]) -> dict[str, Any]:
     decorated = dict(link)
+    decorated["redact_content"] = bool(decorated.get("redact_content"))
     decorated["active"] = decorated.get("revoked_at") is None and not _is_expired(decorated.get("expires_at"))
     return decorated
 

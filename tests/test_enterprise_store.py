@@ -7492,13 +7492,15 @@ class EnterpriseStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             source = tmp_path / "share.txt"
-            source.write_text("Shared diligence evidence.\nSecond page note.", encoding="utf-8")
+            raw_page_content = "Shared diligence evidence Bearer page-secret /Users/alice/page.txt agent@example.com.\nSecond page note."
+            source.write_text(raw_page_content, encoding="utf-8")
+            sensitive_doc_name = "Share memo Bearer doc-secret /Users/alice/doc.pdf owner@example.com"
             store = EnterpriseStore(tmp_path / "workspace")
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
             store.add_workspace_member(workspace_id, "vera", "viewer", actor_user_id="alice")
-            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Share memo")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name=sensitive_doc_name)
             store.set_document_access_mode(
                 doc_id,
                 workspace_id=workspace_id,
@@ -7523,12 +7525,19 @@ class EnterpriseStoreTest(unittest.TestCase):
                 actor_user_id="alice",
                 expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
             )
+            redacted = store.create_document_share_link(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                redact_content=True,
+            )
             listed_before_revoke = store.list_document_share_links(
                 doc_id,
                 workspace_id=workspace_id,
                 actor_user_id="alice",
             )
             resolved = store.resolve_document_share_link(active["token"])
+            redacted_resolution = store.resolve_document_share_link(redacted["token"])
             expired_resolution = store.resolve_document_share_link(expired["token"])
             usage_before_revoke = store.get_workspace_usage_summary(workspace_id, "alice")["share_links"]
             revoked = store.revoke_document_share_link(active["id"], workspace_id=workspace_id, actor_user_id="alice")
@@ -7542,23 +7551,43 @@ class EnterpriseStoreTest(unittest.TestCase):
             audit_events = store.list_audit_events(workspace_id, "alice", limit=10)
 
             serialized_list = json.dumps(listed_before_revoke, sort_keys=True)
+            serialized_redacted = json.dumps(redacted_resolution, sort_keys=True)
             serialized_audit = json.dumps(audit_events, sort_keys=True)
+            listed_by_id = {link["id"]: link for link in listed_before_revoke}
             self.assertTrue(active["token"].startswith("pis_"))
+            self.assertFalse(active["redact_content"])
+            self.assertTrue(redacted["redact_content"])
+            self.assertFalse(listed_by_id[active["id"]]["redact_content"])
+            self.assertTrue(listed_by_id[redacted["id"]]["redact_content"])
             self.assertNotIn("token_hash", active)
             self.assertNotIn(active["token"], serialized_list)
             self.assertNotIn("token_hash", serialized_list)
             self.assertEqual(resolved["document"]["id"], doc_id)
-            self.assertEqual(resolved["document"]["name"], "Share memo")
-            self.assertEqual(resolved["pages"][0]["content"], "Shared diligence evidence.\nSecond page note.")
+            self.assertEqual(resolved["document"]["name"], sensitive_doc_name)
+            self.assertEqual(resolved["pages"][0]["content"], raw_page_content)
+            self.assertTrue(redacted_resolution["share_link"]["redact_content"])
+            self.assertIn("[redacted]", redacted_resolution["document"]["name"])
+            self.assertIn("[redacted-path]", redacted_resolution["document"]["description"])
+            self.assertIn("[redacted-email]", redacted_resolution["pages"][0]["content"])
+            self.assertNotIn("Bearer", serialized_redacted)
+            self.assertNotIn("page-secret", serialized_redacted)
+            self.assertNotIn("doc-secret", serialized_redacted)
+            self.assertNotIn("/Users/alice/page.txt", serialized_redacted)
+            self.assertNotIn("/Users/alice/doc.pdf", serialized_redacted)
+            self.assertNotIn("agent@example.com", serialized_redacted)
+            self.assertNotIn("owner@example.com", serialized_redacted)
             self.assertNotIn("source_path", json.dumps(resolved, sort_keys=True))
             self.assertIsNone(expired_resolution)
-            self.assertEqual(usage_before_revoke["active"], 1)
+            self.assertEqual(usage_before_revoke["active"], 2)
             self.assertEqual(usage_before_revoke["expired"], 1)
             self.assertTrue(revoked)
             self.assertFalse(revoked_again)
             self.assertIsNone(store.resolve_document_share_link(active["token"]))
-            self.assertEqual({link["id"]: link["active"] for link in listed_after_revoke}, {active["id"]: False, expired["id"]: False})
-            self.assertEqual(usage_after_revoke["active"], 0)
+            self.assertEqual(
+                {link["id"]: link["active"] for link in listed_after_revoke},
+                {active["id"]: False, expired["id"]: False, redacted["id"]: True},
+            )
+            self.assertEqual(usage_after_revoke["active"], 1)
             self.assertEqual(usage_after_revoke["revoked"], 1)
             self.assertEqual(usage_after_revoke["expired"], 1)
             self.assertIn("document.share_link_create", [event["action"] for event in audit_events])
@@ -10860,7 +10889,12 @@ class EnterpriseStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             source = tmp_path / "shared-http.txt"
-            source.write_text("HTTP shared page evidence. " + ("z" * 5000), encoding="utf-8")
+            source.write_text(
+                "HTTP shared page evidence Bearer http-page /Users/alice/http-page.txt page@example.com. "
+                + ("z" * 5000),
+                encoding="utf-8",
+            )
+            sensitive_doc_name = "HTTP share Bearer http-doc /Users/alice/http-doc.txt doc@example.com"
             root = tmp_path / "workspace"
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Team")
@@ -10868,7 +10902,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.add_workspace_member(workspace_id, "vera", "viewer", actor_user_id="alice")
             store.add_workspace_member(other_workspace, "mallory", "owner")
-            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="HTTP share")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name=sensitive_doc_name)
             owner_write_token = store.create_api_token(workspace_id, "alice", name="owner-write", scopes=["write"])["token"]
             owner_read_token = store.create_api_token(workspace_id, "alice", name="owner-read", scopes=["read"])["token"]
             viewer_token_record = store.create_api_token(workspace_id, "vera", name="viewer")
@@ -10896,10 +10930,29 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=owner_write_headers,
                     status=201,
                 )["share_link"]
+                redacted_created = _post_json(
+                    url,
+                    {"redact_content": True},
+                    headers=owner_write_headers,
+                    status=201,
+                )["share_link"]
+                bad_redact = _post_json(
+                    url,
+                    {"redact_content": "yes"},
+                    headers=owner_write_headers,
+                    status=400,
+                )
                 listed = _get_json(url, headers=owner_write_headers)["share_links"]
                 public = _get_json(f"{base}/public/documents/{created['token']}?limit=1&max_chars=200")
+                redacted_public = _get_json(
+                    f"{base}/public/documents/{redacted_created['token']}?limit=1&max_chars=200"
+                )
                 public_html, public_html_type = _get_text(
                     f"{base}/public/documents/{created['token']}?limit=1&max_chars=200",
+                    headers={"Accept": "text/html"},
+                )
+                redacted_html, redacted_html_type = _get_text(
+                    f"{base}/public/documents/{redacted_created['token']}?limit=1&max_chars=200",
                     headers={"Accept": "text/html"},
                 )
                 missing_doc = _post_json(
@@ -10923,25 +10976,53 @@ class EnterpriseStoreTest(unittest.TestCase):
                 thread.join(timeout=5)
 
             serialized_public = json.dumps(public, sort_keys=True)
+            serialized_redacted_public = json.dumps(redacted_public, sort_keys=True)
             serialized_list = json.dumps(listed, sort_keys=True)
+            listed_by_id = {link["id"]: link for link in listed}
             self.assertEqual(missing_auth["error"], "api token required")
             self.assertEqual(read_denied["error"], "api token scope denied")
             self.assertEqual(viewer_denied["error"], "workspace role denied")
             self.assertEqual(missing_doc["error"], "document not found")
+            self.assertEqual(bad_redact["error"], "redact_content must be a boolean")
             self.assertTrue(created["token"].startswith("pis_"))
+            self.assertFalse(created["redact_content"])
+            self.assertTrue(redacted_created["redact_content"])
             self.assertNotIn("token_hash", created)
             self.assertNotIn(created["token"], serialized_list)
-            self.assertEqual(listed[0]["id"], created["id"])
-            self.assertTrue(listed[0]["active"])
+            self.assertFalse(listed_by_id[created["id"]]["redact_content"])
+            self.assertTrue(listed_by_id[redacted_created["id"]]["redact_content"])
+            self.assertTrue(listed_by_id[created["id"]]["active"])
             self.assertEqual(public["document"]["id"], doc_id)
-            self.assertEqual(public["document"]["name"], "HTTP share")
+            self.assertEqual(public["document"]["name"], sensitive_doc_name)
             self.assertEqual(public["total_pages"], 1)
-            self.assertTrue(public["pages"][0]["content"].startswith("HTTP shared page evidence."))
+            self.assertTrue(public["pages"][0]["content"].startswith("HTTP shared page evidence"))
+            self.assertIn("[redacted]", redacted_public["document"]["name"])
+            self.assertIn("[redacted-path]", redacted_public["document"]["description"])
+            self.assertIn("[redacted-email]", redacted_public["pages"][0]["content"])
+            self.assertNotIn("Bearer", serialized_redacted_public)
+            self.assertNotIn("http-page", serialized_redacted_public)
+            self.assertNotIn("http-doc", serialized_redacted_public)
+            self.assertNotIn("/Users/alice/http-page.txt", serialized_redacted_public)
+            self.assertNotIn("/Users/alice/http-doc.txt", serialized_redacted_public)
+            self.assertNotIn("page@example.com", serialized_redacted_public)
+            self.assertNotIn("doc@example.com", serialized_redacted_public)
             self.assertLessEqual(len(public["pages"][0]["content"]), 200)
             self.assertTrue(public["pages"][0]["truncated"])
             self.assertIn("text/html", public_html_type)
+            self.assertIn("text/html", redacted_html_type)
             self.assertIn("HTTP share", public_html)
-            self.assertIn("HTTP shared page evidence.", public_html)
+            self.assertIn("Bearer http-doc", public_html)
+            self.assertIn("HTTP shared page evidence", public_html)
+            self.assertIn("[redacted]", redacted_html)
+            self.assertIn("[redacted-path]", redacted_html)
+            self.assertIn("[redacted-email]", redacted_html)
+            self.assertNotIn("Bearer", redacted_html)
+            self.assertNotIn("http-page", redacted_html)
+            self.assertNotIn("http-doc", redacted_html)
+            self.assertNotIn("/Users/alice/http-page.txt", redacted_html)
+            self.assertNotIn("/Users/alice/http-doc.txt", redacted_html)
+            self.assertNotIn("page@example.com", redacted_html)
+            self.assertNotIn("doc@example.com", redacted_html)
             self.assertIn("Page 1", public_html)
             self.assertNotIn(created["token"], public_html)
             self.assertNotIn("token_hash", public_html)
@@ -12377,7 +12458,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("pagePreviewList", body)
                     self.assertIn("shareUrlOutput", body)
                     self.assertIn("documentShareList", body)
+                    self.assertIn("documentShareRedactInput", body)
                     self.assertIn("document-share-links", body)
+                    self.assertIn("redact_content: documentShareRedactInput.checked", body)
                     self.assertIn('publicShareUrl("documents"', body)
                     self.assertIn("createDocumentShareLink", body)
                     self.assertIn("loadDocumentShareLinks", body)

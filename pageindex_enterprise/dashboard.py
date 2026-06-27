@@ -838,6 +838,39 @@ DASHBOARD_HTML = """<!doctype html>
       setQueryDocumentScope("", "");
     }
 
+    function decodeQueryPayload(value) {
+      if (!value) {
+        return {};
+      }
+      try {
+        const decodedValue = decodeURIComponent(value);
+        const padded = decodedValue.replace(/-/g, "+").replace(/_/g, "/");
+        const json = atob(padded + "=".repeat((4 - padded.length % 4) % 4));
+        return JSON.parse(json);
+      } catch (_error) {
+        return {};
+      }
+    }
+
+    function applyQueryPrefillFromLocation() {
+      const params = new URLSearchParams(window.location.search);
+      const payload = decodeQueryPayload(params.get("payload"));
+      const query = payload.prompt || payload.query || params.get("query") || "";
+      const docId = payload.doc_id || payload.docId || params.get("doc_id") || "";
+      const docName = payload.doc_name || payload.docName || params.get("doc_name") || docId;
+      if (query) {
+        queryInput.value = query;
+      }
+      if (docId) {
+        setQueryDocumentScope(docId, docName);
+      } else {
+        renderQueryScope();
+      }
+      if (query || docId) {
+        setStatus("Query prefilled.", "ok");
+      }
+    }
+
     async function api(path, options = {}) {
       const response = await fetch(path, {
         ...options,
@@ -3174,6 +3207,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("saveProviderButton").addEventListener("click", () => saveProviderConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearProviderButton").addEventListener("click", () => clearProviderConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("chatButton").addEventListener("click", () => sendChatMessage().catch((error) => setStatus(error.message, "error")));
+    applyQueryPrefillFromLocation();
   </script>
 </body>
 </html>

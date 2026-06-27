@@ -557,6 +557,7 @@ def main() -> None:
     deployment_check.add_argument("--require-api-token", action="store_true")
     deployment_check.add_argument("--check-provider", action="store_true")
     deployment_check.add_argument("--require-provider-api-key", action="store_true")
+    deployment_check.add_argument("--require-audit-sink", action="store_true")
 
     args = parser.parse_args()
     if args.command == "serve":
@@ -580,6 +581,7 @@ def main() -> None:
                     require_api_token=args.require_api_token,
                     check_provider=args.check_provider,
                     require_provider_api_key=args.require_provider_api_key,
+                    require_audit_sink=args.require_audit_sink,
                 ),
                 indent=2,
             )

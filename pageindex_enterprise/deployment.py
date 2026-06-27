@@ -52,6 +52,7 @@ def run_deployment_check(
     require_api_token: bool = False,
     check_provider: bool = False,
     require_provider_api_key: bool = False,
+    require_audit_sink: bool = False,
 ) -> dict[str, Any]:
     root_path = Path(root).expanduser().resolve()
     root_writable = _root_writable_check(root_path)
@@ -63,7 +64,10 @@ def run_deployment_check(
                 "schema": _check(False, error="store was not opened because root is not writable"),
                 "workspace_owner": _check(False, workspace_count=0, owner_count=0, skipped=True),
                 "audit_integrity": _check(False, workspace_count=0, skipped=True),
-                "audit_sink_delivery": _check(True, workspace_count=0, configured_count=0, skipped=True),
+                "audit_sink_delivery": _unavailable_audit_sink_delivery_check(
+                    require_audit_sink,
+                    reason="store was not opened because root is not writable",
+                ),
                 "strict_http": _strict_http_check(require_api_token),
                 "active_api_token": _check(False, active_token_count=0, skipped=True),
                 "provider_config": _provider_config_check(
@@ -82,7 +86,10 @@ def run_deployment_check(
                 "schema": _check(False, error=str(exc)),
                 "workspace_owner": _check(False, workspace_count=0, owner_count=0, skipped=True),
                 "audit_integrity": _check(False, workspace_count=0, skipped=True),
-                "audit_sink_delivery": _check(True, workspace_count=0, configured_count=0, skipped=True),
+                "audit_sink_delivery": _unavailable_audit_sink_delivery_check(
+                    require_audit_sink,
+                    reason="store was not opened",
+                ),
                 "strict_http": _strict_http_check(require_api_token),
                 "active_api_token": _check(False, active_token_count=0, skipped=True),
                 "provider_config": _provider_config_check(
@@ -97,7 +104,7 @@ def run_deployment_check(
             "schema": _schema_check(store),
             "workspace_owner": _workspace_owner_check(store),
             "audit_integrity": _audit_integrity_check(store),
-            "audit_sink_delivery": _audit_sink_delivery_check(store),
+            "audit_sink_delivery": _audit_sink_delivery_check(store, require_audit_sink=require_audit_sink),
             "strict_http": _strict_http_check(require_api_token),
             "active_api_token": _active_api_token_check(store),
             "provider_config": _provider_config_check(
@@ -197,10 +204,36 @@ def _audit_integrity_check(store: EnterpriseStore) -> dict[str, Any]:
     )
 
 
-def _audit_sink_delivery_check(store: EnterpriseStore) -> dict[str, Any]:
+def _unavailable_audit_sink_delivery_check(require_audit_sink: bool, *, reason: str) -> dict[str, Any]:
+    return _check(
+        not require_audit_sink,
+        required=require_audit_sink,
+        workspace_count=0,
+        configured_count=0,
+        enabled_count=0,
+        healthy_count=0,
+        disabled_count=0,
+        unconfigured_count=0,
+        skipped=not require_audit_sink,
+        reason=reason,
+    )
+
+
+def _audit_sink_delivery_check(store: EnterpriseStore, *, require_audit_sink: bool = False) -> dict[str, Any]:
     workspace_ids = [row["id"] for row in store.conn.execute("SELECT id FROM workspaces ORDER BY id")]
     if not workspace_ids:
-        return _check(True, workspace_count=0, configured_count=0, healthy_count=0, skipped=True)
+        return _check(
+            not require_audit_sink,
+            required=require_audit_sink,
+            workspace_count=0,
+            configured_count=0,
+            enabled_count=0,
+            healthy_count=0,
+            disabled_count=0,
+            unconfigured_count=0,
+            skipped=not require_audit_sink,
+            reason="no workspaces",
+        )
     admin_by_workspace = _admin_actor_by_workspace(store)
     reports: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
@@ -226,6 +259,15 @@ def _audit_sink_delivery_check(store: EnterpriseStore) -> dict[str, Any]:
             format_counts[sink_format] += 1
         if not config.get("enabled"):
             disabled_count += 1
+            if require_audit_sink:
+                failures.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "reason": "disabled",
+                        "relative_path": config.get("relative_path"),
+                        "format": sink_format,
+                    }
+                )
             reports.append(
                 {
                     "workspace_id": workspace_id,
@@ -268,8 +310,14 @@ def _audit_sink_delivery_check(store: EnterpriseStore) -> dict[str, Any]:
             {"workspace_id": workspace_id, "reason": "missing owner/admin member"}
             for workspace_id in missing_operators
         )
+    if require_audit_sink:
+        failures.extend(
+            {"workspace_id": workspace_id, "reason": "not_configured"}
+            for workspace_id in unconfigured
+        )
     return _check(
         not failures,
+        required=require_audit_sink,
         workspace_count=len(workspace_ids),
         configured_count=configured_count,
         enabled_count=enabled_count,
@@ -277,7 +325,7 @@ def _audit_sink_delivery_check(store: EnterpriseStore) -> dict[str, Any]:
         disabled_count=disabled_count,
         unconfigured_count=len(unconfigured),
         format_counts=format_counts,
-        skipped=configured_count == 0,
+        skipped=configured_count == 0 and not require_audit_sink,
         sink_reports=reports[:10],
         unconfigured_workspace_ids=unconfigured[:10],
         failing_workspaces=failures[:10],

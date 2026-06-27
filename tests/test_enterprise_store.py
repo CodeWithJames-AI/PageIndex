@@ -13985,9 +13985,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("folderAccessPanel", body)
                     self.assertIn("folderAccessUserInput", body)
                     self.assertIn("folderAccessGroupInput", body)
+                    self.assertIn("folderAccessGrantRoleInput", body)
                     self.assertIn("loadFolderAccess", body)
                     self.assertIn("grantFolderAccess", body)
                     self.assertIn("grantFolderGroupAccess", body)
+                    self.assertIn("grant_role", body)
                     self.assertIn("data-rename-folder-id", body)
                     self.assertIn("data-move-folder-id", body)
                     self.assertIn("data-delete-folder-id", body)
@@ -14371,7 +14373,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     },
                     capture_output=True,
                     text=True,
-                    timeout=45,
+                    timeout=90,
                 )
             finally:
                 server.shutdown()

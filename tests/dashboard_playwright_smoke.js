@@ -280,15 +280,18 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#folderAccessPanel", "No direct folder grants.");
 
     await page.fill("#folderAccessUserInput", "alice");
+    await page.selectOption("#folderAccessGrantRoleInput", "write");
     const grantFolderAccessResponse = page.waitForResponse(
       (response) => response.url().includes(`/folders/${folderId}/access`)
         && response.request().method() === "POST"
         && (response.request().postData() || "").includes("grant_user_id")
+        && (response.request().postData() || "").includes('"grant_role":"write"')
     );
     await page.click("#grantFolderAccessButton");
     await grantFolderAccessResponse;
     await waitForText(page, "#status", "Folder access granted.");
     await waitForText(page, "#folderAccessPanel", "alice");
+    await waitForText(page, "#folderAccessPanel", "write");
 
     const revokeFolderAccessResponse = page.waitForResponse(
       (response) => response.url().includes(`/folders/${folderId}/access`)

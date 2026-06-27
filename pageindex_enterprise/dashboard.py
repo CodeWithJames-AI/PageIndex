@@ -378,6 +378,10 @@ DASHBOARD_HTML = """<!doctype html>
               <div id="folderList" class="folder-list muted">No folders loaded.</div>
               <div class="access-actions">
                 <input id="folderAccessUserInput" value="" placeholder="user id" aria-label="Folder access user id">
+                <select id="folderAccessGrantRoleInput" aria-label="Folder access grant role">
+                  <option value="read">read</option>
+                  <option value="write">write</option>
+                </select>
                 <button id="grantFolderAccessButton" type="button">Grant user</button>
                 <button id="revokeFolderAccessButton" class="secondary" type="button">Revoke user</button>
               </div>
@@ -1969,7 +1973,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderAuditSinkConfig(config) {
       auditSinkPathInput.value = config && config.relative_path ? config.relative_path : "";
-      auditSinkEnabledInput.checked = !config || config.enabled !== false;
+      auditSinkEnabledInput.checked = !config || !config.configured || config.enabled !== false;
       if (!config || !config.configured) {
         auditSinkSummary.className = "muted";
         auditSinkSummary.textContent = "Sink not configured.";
@@ -2346,6 +2350,7 @@ DASHBOARD_HTML = """<!doctype html>
     async function grantFolderAccess() {
       const folderId = selectedFolderId();
       const input = document.getElementById("folderAccessUserInput");
+      const roleInput = document.getElementById("folderAccessGrantRoleInput");
       const userId = input.value.trim();
       if (!folderId) {
         setStatus("Select a folder.", "warn");
@@ -2355,7 +2360,7 @@ DASHBOARD_HTML = """<!doctype html>
         setStatus("Enter a user id.", "warn");
         return;
       }
-      await updateFolderAccess(folderId, { grant_user_id: userId }, "Folder access granted.");
+      await updateFolderAccess(folderId, { grant_user_id: userId, grant_role: roleInput.value }, "Folder access granted.");
     }
 
     async function revokeFolderAccess(userId = "") {
@@ -2376,6 +2381,7 @@ DASHBOARD_HTML = """<!doctype html>
     async function grantFolderGroupAccess() {
       const folderId = selectedFolderId();
       const input = document.getElementById("folderAccessGroupInput");
+      const roleInput = document.getElementById("folderAccessGrantRoleInput");
       const groupId = input.value.trim();
       if (!folderId) {
         setStatus("Select a folder.", "warn");
@@ -2385,7 +2391,7 @@ DASHBOARD_HTML = """<!doctype html>
         setStatus("Enter a group id.", "warn");
         return;
       }
-      await updateFolderAccess(folderId, { grant_group_id: groupId }, "Folder group access granted.");
+      await updateFolderAccess(folderId, { grant_group_id: groupId, grant_role: roleInput.value }, "Folder group access granted.");
     }
 
     async function revokeFolderGroupAccess(groupId = "") {

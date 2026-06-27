@@ -666,7 +666,11 @@ DASHBOARD_HTML = """<!doctype html>
               <button id="previewQueryPurgeButton" class="secondary" type="button">Preview</button>
               <button id="purgeQueryRunsButton" class="secondary" type="button">Purge</button>
             </div>
-            <button id="clearQueryRetentionButton" class="secondary" type="button">Clear retention</button>
+            <div class="provider-actions">
+              <button id="clearQueryRetentionButton" class="secondary" type="button">Clear retention</button>
+              <button id="enableQueryLegalHoldButton" class="secondary" type="button">Hold</button>
+              <button id="clearQueryLegalHoldButton" class="secondary" type="button">Release</button>
+            </div>
             <div id="queryRetentionSummary" class="muted">Retention not loaded.</div>
             <div id="queryRunList" class="query-run-list muted">No query runs loaded.</div>
             <textarea id="queryRunExportText" readonly placeholder="query run export output" aria-label="Query run export output"></textarea>
@@ -1122,15 +1126,16 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function renderQueryRetention(policy) {
+      const holdText = policy && policy.legal_hold ? "legal hold on" : "legal hold off";
       if (!policy || policy.retention_days == null) {
         queryRetentionDaysInput.value = "";
-        queryRetentionSummary.className = "muted";
-        queryRetentionSummary.textContent = "Retention not set.";
+        queryRetentionSummary.className = policy && policy.legal_hold ? "status warn" : "muted";
+        queryRetentionSummary.textContent = `Retention not set. | ${holdText}`;
         return;
       }
       queryRetentionDaysInput.value = String(policy.retention_days);
-      queryRetentionSummary.className = "muted";
-      queryRetentionSummary.textContent = `${policy.retention_days} days | updated ${policy.updated_at || "unknown"}`;
+      queryRetentionSummary.className = policy.legal_hold ? "status warn" : "muted";
+      queryRetentionSummary.textContent = `${policy.retention_days} days | ${holdText} | updated ${policy.updated_at || "unknown"}`;
     }
 
     function renderQueryPurgeResult(result) {
@@ -2732,6 +2737,16 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Query retention cleared.", "ok");
     }
 
+    async function setQueryLegalHold(enabled) {
+      setStatus(enabled ? "Enabling query legal hold..." : "Releasing query legal hold...");
+      const policy = await api("/query-retention", {
+        method: "POST",
+        body: JSON.stringify({ legal_hold: enabled })
+      });
+      renderQueryRetention(policy);
+      setStatus(enabled ? "Query legal hold enabled." : "Query legal hold released.", "ok");
+    }
+
     async function previewQueryPurge() {
       setStatus("Previewing query purge...");
       const result = await api("/query-retention/purge", {
@@ -2819,6 +2834,8 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("refreshQueryRetentionButton").addEventListener("click", () => refreshQueryRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveQueryRetentionButton").addEventListener("click", () => saveQueryRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearQueryRetentionButton").addEventListener("click", () => clearQueryRetention().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("enableQueryLegalHoldButton").addEventListener("click", () => setQueryLegalHold(true).catch((error) => setStatus(error.message, "error")));
+    document.getElementById("clearQueryLegalHoldButton").addEventListener("click", () => setQueryLegalHold(false).catch((error) => setStatus(error.message, "error")));
     document.getElementById("previewQueryPurgeButton").addEventListener("click", () => previewQueryPurge().catch((error) => setStatus(error.message, "error")));
     document.getElementById("purgeQueryRunsButton").addEventListener("click", () => purgeQueryRuns().catch((error) => setStatus(error.message, "error")));
     document.getElementById("createConversationButton").addEventListener("click", () => createConversation().catch((error) => setStatus(error.message, "error")));

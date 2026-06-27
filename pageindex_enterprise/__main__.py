@@ -278,6 +278,8 @@ def main() -> None:
     query_retention.add_argument("user_id")
     query_retention.add_argument("--retention-days", type=_positive_int)
     query_retention.add_argument("--clear", action="store_true")
+    query_retention.add_argument("--legal-hold", action="store_true")
+    query_retention.add_argument("--clear-legal-hold", action="store_true")
 
     query_purge = sub.add_parser("query-purge")
     query_purge.add_argument("workspace_id")
@@ -794,14 +796,18 @@ def main() -> None:
         elif args.command == "query-retention":
             if args.retention_days is not None and args.clear:
                 raise SystemExit("choose --retention-days or --clear")
-            if args.retention_days is None and not args.clear:
+            if args.legal_hold and args.clear_legal_hold:
+                raise SystemExit("choose --legal-hold or --clear-legal-hold")
+            has_legal_hold_change = args.legal_hold or args.clear_legal_hold
+            if args.retention_days is None and not args.clear and not has_legal_hold_change:
                 policy = _workspace_member_cli(lambda: store.get_query_retention_policy(args.workspace_id, args.user_id))
             else:
                 policy = _workspace_member_cli(
                     lambda: store.set_query_retention_policy(
                         args.workspace_id,
                         args.user_id,
-                        retention_days=None if args.clear else args.retention_days,
+                        retention_days=None if args.clear else (args.retention_days if args.retention_days is not None else _UNSET),
+                        legal_hold=(True if args.legal_hold else False) if has_legal_hold_change else _UNSET,
                     )
                 )
             print(json.dumps(policy, indent=2))

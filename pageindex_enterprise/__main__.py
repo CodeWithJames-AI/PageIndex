@@ -318,6 +318,7 @@ def main() -> None:
     create_conversation.add_argument("user_id")
     create_conversation.add_argument("--title")
     create_conversation.add_argument("--source-set-id")
+    create_conversation.add_argument("--folder-id")
 
     list_conversations = sub.add_parser("list-conversations")
     list_conversations.add_argument("workspace_id")
@@ -959,6 +960,7 @@ def main() -> None:
                             args.user_id,
                             title=args.title,
                             source_set_id=args.source_set_id,
+                            folder_id=args.folder_id,
                         )
                     ),
                     indent=2,

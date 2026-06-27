@@ -232,6 +232,14 @@ def _optional_source_set_id(source_set_id: str | None) -> str | None:
     return source_set_id.strip() or None
 
 
+def _optional_folder_id(folder_id: str | None) -> str | None:
+    if folder_id is None:
+        return None
+    if not isinstance(folder_id, str):
+        raise ValueError("folder_id must be a string")
+    return folder_id.strip() or None
+
+
 def _normalize_source_set_doc_ids(doc_ids: list[str] | None) -> list[str]:
     if not doc_ids:
         raise ValueError("At least one document id is required.")
@@ -1003,6 +1011,7 @@ class EnterpriseStore:
               created_by TEXT NOT NULL,
               title TEXT NOT NULL,
               source_set_id TEXT REFERENCES query_source_sets(id) ON DELETE SET NULL,
+              folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               archived_at TEXT
@@ -1176,6 +1185,7 @@ class EnterpriseStore:
             },
             "conversations": {
                 "source_set_id": "TEXT REFERENCES query_source_sets(id) ON DELETE SET NULL",
+                "folder_id": "TEXT REFERENCES folders(id) ON DELETE SET NULL",
                 "archived_at": "TEXT",
             },
             "virtual_nodes": {
@@ -3147,7 +3157,7 @@ class EnterpriseStore:
             "conversations.jsonl": _rows(
                 self.conn.execute(
                     """
-                    SELECT id, workspace_id, created_by, title, source_set_id, created_at, updated_at, archived_at
+                    SELECT id, workspace_id, created_by, title, source_set_id, folder_id, created_at, updated_at, archived_at
                     FROM conversations
                     WHERE workspace_id = ?
                     ORDER BY created_at, id
@@ -5404,21 +5414,27 @@ class EnterpriseStore:
         actor_user_id: str,
         title: str | None = None,
         source_set_id: str | None = None,
+        folder_id: str | None = None,
     ) -> dict[str, Any]:
         actor_user_id = actor_user_id.strip()
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_WRITE_ROLES)
         title = (title or "New conversation").strip() or "New conversation"
         normalized_source_set_id = _optional_source_set_id(source_set_id)
+        normalized_folder_id = _optional_folder_id(folder_id)
+        if normalized_source_set_id and normalized_folder_id:
+            raise ValueError("Use source_set_id or folder_id, not both")
         if normalized_source_set_id:
             self.resolve_query_source_set_doc_ids(workspace_id, actor_user_id, normalized_source_set_id)
+        if normalized_folder_id:
+            self.resolve_query_folder_scope(workspace_id, actor_user_id, normalized_folder_id)
         conversation_id = f"conv_{uuid.uuid4().hex}"
         now = _now()
         self.conn.execute(
             """
-            INSERT INTO conversations (id, workspace_id, created_by, title, source_set_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO conversations (id, workspace_id, created_by, title, source_set_id, folder_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (conversation_id, workspace_id, actor_user_id, title, normalized_source_set_id, now, now),
+            (conversation_id, workspace_id, actor_user_id, title, normalized_source_set_id, normalized_folder_id, now, now),
         )
         self._commit()
         return {
@@ -5427,6 +5443,7 @@ class EnterpriseStore:
             "created_by": actor_user_id,
             "title": title,
             "source_set_id": normalized_source_set_id,
+            "folder_id": normalized_folder_id,
             "created_at": now,
             "updated_at": now,
             "archived_at": None,
@@ -5920,10 +5937,12 @@ class EnterpriseStore:
                 ),
             )
             source_set_id = conversation.get("source_set_id") if doc_ids is None else None
+            folder_id = conversation.get("folder_id") if doc_ids is None and not source_set_id else None
             result = self.query_corpus(
                 retrieval_query,
                 doc_ids=doc_ids,
                 source_set_id=source_set_id,
+                folder_id=folder_id,
                 expert_hints=expert_hints,
                 workspace_id=conversation["workspace_id"],
                 limit=limit,

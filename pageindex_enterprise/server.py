@@ -785,6 +785,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                         payload.get("source_set_id", payload.get("sourceSetId")),
                         "source_set_id",
                     ),
+                    folder_id=_optional_str(
+                        payload.get("folder_id", payload.get("folderId")),
+                        "folder_id",
+                    ),
                 ),
                 HTTPStatus.CREATED,
             )

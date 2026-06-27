@@ -5460,6 +5460,69 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("audit_sink.config_update", [event["action"] for event in events])
             self.assertIn("audit_sink.config_clear", [event["action"] for event in events])
 
+    def test_audit_sink_cli_sets_siem_jsonl_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run(
+                [*base, "workspace", "Team", "--workspace-id", "ws_cli_siem"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_cli_siem", "alice", "--role", "owner"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            saved = json.loads(
+                subprocess.run(
+                    [
+                        *base,
+                        "audit-sink",
+                        "ws_cli_siem",
+                        "alice",
+                        "--relative-path",
+                        "audit/cli-siem.jsonl",
+                        "--format",
+                        "siem-jsonl",
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            status = json.loads(
+                subprocess.run(
+                    [*base, "audit-sink", "ws_cli_siem", "alice", "--status"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+
+            sink_path = root / "audit" / "cli-siem.jsonl"
+            lines = [json.loads(line) for line in sink_path.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual(saved["format"], "siem-jsonl")
+            self.assertEqual(status["format"], "siem-jsonl")
+            self.assertEqual(status["last_event"]["action"], "audit_sink.config_update")
+            self.assertEqual([line["event"]["action"] for line in lines], ["audit_sink.config_update"])
+            self.assertEqual(lines[0]["event"]["dataset"], "pageindex.audit")
+
     def test_workspace_export_cli_writes_redacted_zip_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -7263,6 +7326,70 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(disabled["configured"])
             self.assertFalse(disabled["enabled"])
             self.assertEqual(lines_after_disable, lines_before_disable)
+
+    def test_workspace_audit_jsonl_sink_can_emit_siem_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+
+            with self.assertRaisesRegex(ValueError, "jsonl or siem-jsonl"):
+                store.set_workspace_audit_jsonl_sink_config(
+                    workspace_id,
+                    "alice",
+                    relative_path="audit/siem.jsonl",
+                    format="xml",
+                )
+
+            config = store.set_workspace_audit_jsonl_sink_config(
+                workspace_id,
+                "alice",
+                relative_path="audit/siem.jsonl",
+                format="siem-jsonl",
+            )
+            token = store.create_api_token(workspace_id, "alice", name="siem")
+            store.record_audit_event(
+                workspace_id,
+                "alice",
+                "custom.secret_probe",
+                target_type="probe",
+                target_id="probe_siem",
+                details={
+                    "safe": "kept",
+                    "token": token["token"],
+                    "nested": {"secret": "secret_should_not_leave", "note": "kept"},
+                    "message": "Bearer header_should_not_leave",
+                },
+            )
+            status = store.get_workspace_audit_jsonl_sink_status(workspace_id, "alice")
+
+            sink_path = root / "audit" / "siem.jsonl"
+            lines = [json.loads(line) for line in sink_path.read_text(encoding="utf-8").splitlines()]
+            serialized = json.dumps(lines, sort_keys=True)
+
+            self.assertEqual(config["format"], "siem-jsonl")
+            self.assertEqual([line["event"]["action"] for line in lines], ["audit_sink.config_update", "api_token.create", "custom.secret_probe"])
+            self.assertEqual(lines[0]["event"]["dataset"], "pageindex.audit")
+            self.assertEqual(lines[2]["user"]["id"], "alice")
+            self.assertEqual(lines[2]["pageindex"]["workspace_id"], workspace_id)
+            self.assertEqual(lines[2]["pageindex"]["target"], {"id": "probe_siem", "type": "probe"})
+            self.assertEqual(
+                lines[2]["pageindex"]["audit"]["details"],
+                {
+                    "message": "[redacted]",
+                    "nested": {"note": "kept"},
+                    "safe": "kept",
+                },
+            )
+            self.assertEqual(status["format"], "siem-jsonl")
+            self.assertEqual(status["line_count"], 3)
+            self.assertEqual(status["last_event"]["action"], "custom.secret_probe")
+            self.assertEqual(status["last_event"]["target_type"], "probe")
+            self.assertNotIn(token["token"], serialized)
+            self.assertNotIn("secret_should_not_leave", serialized)
+            self.assertNotIn("header_should_not_leave", serialized)
+            self.assertNotIn("token_hash", serialized)
 
     def test_audit_retention_policy_previews_and_purges_old_events(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14264,6 +14391,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=full_headers,
                     status=400,
                 )
+                bad_format = _post_json(
+                    f"{base}/audit-sink",
+                    {"relative_path": "audit/http.jsonl", "format": "xml"},
+                    headers=full_headers,
+                    status=400,
+                )
                 mixed_clear = _post_json(
                     f"{base}/audit-sink",
                     {"clear": True, "relative_path": "audit/http.jsonl"},
@@ -14272,7 +14405,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )
                 saved = _post_json(
                     f"{base}/audit-sink",
-                    {"relative_path": "audit/http.jsonl"},
+                    {"relative_path": "audit/http.jsonl", "format": "siem-jsonl"},
                     headers=full_headers,
                 )
                 checked = _get_json(f"{base}/audit-sink/check", headers=audit_headers)
@@ -14309,14 +14442,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(member_blocked["error"], "workspace role denied")
             self.assertIn("stay inside", bad_escape["error"])
             self.assertIn("end in .jsonl", bad_extension["error"])
+            self.assertIn("jsonl or siem-jsonl", bad_format["error"])
             self.assertEqual(mixed_clear["error"], "choose clear or audit sink fields")
             self.assertEqual(saved["relative_path"], "audit/http.jsonl")
+            self.assertEqual(saved["format"], "siem-jsonl")
             self.assertTrue(saved["configured"])
             self.assertTrue(saved["enabled"])
             self.assertTrue(checked["ok"])
+            self.assertEqual(checked["format"], "siem-jsonl")
             self.assertEqual(checked["reason"], "ok")
             self.assertTrue(checked["checks"]["target_not_directory"])
             self.assertTrue(status["ok"])
+            self.assertEqual(status["format"], "siem-jsonl")
             self.assertTrue(status["sink_exists"])
             self.assertGreater(status["byte_size"], 0)
             self.assertEqual(status["line_count"], 1)
@@ -14324,10 +14461,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(status["last_event"]["action"], "audit_sink.config_update")
             self.assertNotIn("details", status["last_event"])
             self.assertEqual(read_back["relative_path"], "audit/http.jsonl")
+            self.assertEqual(read_back["format"], "siem-jsonl")
             self.assertEqual(disabled["relative_path"], "audit/http-disabled.jsonl")
+            self.assertEqual(disabled["format"], "siem-jsonl")
             self.assertFalse(disabled["enabled"])
             self.assertFalse(cleared["configured"])
-            self.assertEqual([line["action"] for line in lines], ["audit_sink.config_update"])
+            self.assertEqual([line["event"]["action"] for line in lines], ["audit_sink.config_update"])
+            self.assertEqual(lines[0]["event"]["dataset"], "pageindex.audit")
+            self.assertEqual(lines[0]["pageindex"]["audit"]["details"]["format"], "siem-jsonl")
 
     def test_http_query_retention_requires_admin_role_and_audit_write_scopes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14815,6 +14956,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("purgeAuditEvents", body)
                     self.assertIn("/audit-sink", body)
                     self.assertIn("auditSinkPathInput", body)
+                    self.assertIn("auditSinkFormatInput", body)
                     self.assertIn("auditSinkEnabledInput", body)
                     self.assertIn("auditSinkSummary", body)
                     self.assertIn("refreshAuditSinkConfig", body)

@@ -2110,7 +2110,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         clear = payload.get("clear", False)
         if not isinstance(clear, bool):
             raise ValueError("clear must be a boolean")
-        has_updates = any(key in payload for key in ("relative_path", "path", "enabled"))
+        has_updates = any(key in payload for key in ("relative_path", "path", "format", "enabled"))
         if clear and has_updates:
             raise ValueError("choose clear or audit sink fields")
         store = EnterpriseStore(self.server.root)
@@ -2132,6 +2132,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     workspace_id,
                     user_id,
                     relative_path=relative_path,
+                    format=_optional_str(payload.get("format"), "format"),
                     enabled=enabled,
                 )
             )

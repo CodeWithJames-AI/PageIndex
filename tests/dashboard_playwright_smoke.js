@@ -603,6 +603,7 @@ async function waitForAnyText(page, selector, expectedValues) {
 
     await waitForText(page, "#auditSinkSummary", "Sink not configured.");
     await page.fill("#auditSinkPathInput", "audit/browser.jsonl");
+    await page.selectOption("#auditSinkFormatInput", "siem-jsonl");
     assert(await page.isChecked("#auditSinkEnabledInput"), "audit sink enabled checkbox should default on");
     const saveAuditSinkResponse = page.waitForResponse(
       (response) => response.url().endsWith("/audit-sink") && response.request().method() === "POST"
@@ -610,7 +611,7 @@ async function waitForAnyText(page, selector, expectedValues) {
     await page.click("#saveAuditSinkButton");
     await saveAuditSinkResponse;
     await waitForText(page, "#status", "Audit sink saved.");
-    await waitForText(page, "#auditSinkSummary", "enabled | audit/browser.jsonl");
+    await waitForText(page, "#auditSinkSummary", "enabled | siem-jsonl | audit/browser.jsonl");
 
     const refreshAuditSinkResponse = page.waitForResponse(
       (response) => response.url().endsWith("/audit-sink") && response.request().method() === "GET"
@@ -618,7 +619,7 @@ async function waitForAnyText(page, selector, expectedValues) {
     await page.click("#refreshAuditSinkButton");
     await refreshAuditSinkResponse;
     await waitForText(page, "#status", "Audit sink refreshed.");
-    await waitForText(page, "#auditSinkSummary", "enabled | audit/browser.jsonl");
+    await waitForText(page, "#auditSinkSummary", "enabled | siem-jsonl | audit/browser.jsonl");
 
     const clearAuditSinkResponse = page.waitForResponse(
       (response) => response.url().endsWith("/audit-sink") && response.request().method() === "POST"

@@ -29,6 +29,7 @@ WORKSPACE_ROLE_RANK = {"viewer": 0, "member": 1, "admin": 2, "owner": 3}
 DOCUMENT_ACCESS_MODES = {"workspace", "restricted"}
 DOCUMENT_ACCESS_GRANT_ROLES = {"read", "write", "deny"}
 API_TOKEN_SCOPES = ("read", "write", "audit")
+AUDIT_SINK_FORMATS = ("jsonl", "siem-jsonl")
 MAX_CONVERSATION_MESSAGE_CHARS = 4000
 MAX_CONVERSATION_TITLE_CHARS = 72
 DEFAULT_CONVERSATION_TITLE = "New conversation"
@@ -498,6 +499,17 @@ def _workspace_audit_sink_path(root: Path, relative_path: str) -> Path | None:
     return path
 
 
+def _normalize_audit_sink_format(format: Any | None) -> str:
+    if format is None:
+        return "jsonl"
+    if not isinstance(format, str):
+        raise ValueError("audit sink format must be a string")
+    normalized = format.strip().casefold()
+    if normalized not in AUDIT_SINK_FORMATS:
+        raise ValueError("audit sink format must be jsonl or siem-jsonl")
+    return normalized
+
+
 def _redact_audit_sink_event(event: dict[str, Any]) -> dict[str, Any]:
     return _redact_audit_sink_mapping(event)
 
@@ -615,6 +627,30 @@ def _siem_audit_event_types(action: str) -> list[str]:
     if suffix in {"archive", "move", "rename", "restore", "rotate", "set", "update"}:
         return ["change"]
     return ["info"]
+
+
+def _audit_sink_status_event_summary(event: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(event.get("event"), dict) and isinstance(event.get("pageindex"), dict):
+        pageindex = event["pageindex"]
+        audit = pageindex.get("audit") if isinstance(pageindex.get("audit"), dict) else {}
+        user = event.get("user") if isinstance(event.get("user"), dict) else {}
+        target = pageindex.get("target") if isinstance(pageindex.get("target"), dict) else {}
+        return {
+            "id": event["event"].get("id"),
+            "action": event["event"].get("action"),
+            "user_id": user.get("id"),
+            "target_type": target.get("type"),
+            "created_at": event.get("@timestamp"),
+            "integrity_hash": audit.get("integrity_hash"),
+        }
+    return {
+        "id": event.get("id"),
+        "action": event.get("action"),
+        "user_id": event.get("user_id"),
+        "target_type": event.get("target_type"),
+        "created_at": event.get("created_at"),
+        "integrity_hash": event.get("integrity_hash"),
+    }
 
 
 def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
@@ -1034,6 +1070,7 @@ class EnterpriseStore:
             CREATE TABLE IF NOT EXISTS workspace_audit_jsonl_sinks (
               workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
               relative_path TEXT NOT NULL,
+              format TEXT NOT NULL DEFAULT 'jsonl',
               enabled INTEGER NOT NULL DEFAULT 1,
               updated_at TEXT NOT NULL,
               updated_by TEXT NOT NULL
@@ -1401,6 +1438,9 @@ class EnterpriseStore:
                 "timeout_seconds": "REAL",
                 "updated_at": "TEXT",
                 "updated_by": "TEXT",
+            },
+            "workspace_audit_jsonl_sinks": {
+                "format": "TEXT NOT NULL DEFAULT 'jsonl'",
             },
             "document_versions": {
                 "workspace_id": "TEXT",
@@ -3179,14 +3219,7 @@ class EnterpriseStore:
             status["last_line_valid"] = False
             return status
         status["last_line_valid"] = True
-        status["last_event"] = {
-            "id": event.get("id"),
-            "action": event.get("action"),
-            "user_id": event.get("user_id"),
-            "target_type": event.get("target_type"),
-            "created_at": event.get("created_at"),
-            "integrity_hash": event.get("integrity_hash"),
-        }
+        status["last_event"] = _audit_sink_status_event_summary(event)
         return status
 
     def set_workspace_audit_jsonl_sink_config(
@@ -3195,28 +3228,38 @@ class EnterpriseStore:
         actor_user_id: str,
         *,
         relative_path: str,
+        format: str | None = None,
         enabled: bool = True,
     ) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         if not isinstance(enabled, bool):
             raise ValueError("enabled must be a boolean")
         normalized_path = _normalize_audit_sink_relative_path(relative_path)
+        current_format = None
+        if format is None:
+            row = self._one(
+                "SELECT format FROM workspace_audit_jsonl_sinks WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+            current_format = row["format"] if row else None
+        normalized_format = _normalize_audit_sink_format(format if format is not None else current_format)
         updated_at = _now()
         actor_user_id = actor_user_id.strip()
         with self._atomic():
             self.conn.execute(
                 """
                 INSERT INTO workspace_audit_jsonl_sinks (
-                  workspace_id, relative_path, enabled, updated_at, updated_by
+                  workspace_id, relative_path, format, enabled, updated_at, updated_by
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id) DO UPDATE SET
                   relative_path = excluded.relative_path,
+                  format = excluded.format,
                   enabled = excluded.enabled,
                   updated_at = excluded.updated_at,
                   updated_by = excluded.updated_by
                 """,
-                (workspace_id, normalized_path, int(enabled), updated_at, actor_user_id),
+                (workspace_id, normalized_path, normalized_format, int(enabled), updated_at, actor_user_id),
             )
             self._insert_audit_event(
                 workspace_id,
@@ -3224,7 +3267,7 @@ class EnterpriseStore:
                 "audit_sink.config_update",
                 target_type="audit_sink",
                 target_id=workspace_id,
-                details={"relative_path": normalized_path, "enabled": enabled},
+                details={"relative_path": normalized_path, "format": normalized_format, "enabled": enabled},
             )
         return self._workspace_audit_jsonl_sink_config(workspace_id)
 
@@ -3247,7 +3290,7 @@ class EnterpriseStore:
         self._require_workspace(workspace_id)
         row = self._one(
             """
-            SELECT workspace_id, relative_path, enabled, updated_at, updated_by
+            SELECT workspace_id, relative_path, format, enabled, updated_at, updated_by
             FROM workspace_audit_jsonl_sinks
             WHERE workspace_id = ?
             """,
@@ -3258,12 +3301,14 @@ class EnterpriseStore:
                 "workspace_id": workspace_id,
                 "configured": False,
                 "relative_path": None,
+                "format": "jsonl",
                 "enabled": False,
                 "updated_at": None,
                 "updated_by": None,
             }
         config = dict(row)
         config["configured"] = True
+        config["format"] = _normalize_audit_sink_format(config.get("format"))
         config["enabled"] = bool(config["enabled"])
         return config
 
@@ -3571,24 +3616,25 @@ class EnterpriseStore:
         self._pending_audit_sink_events = []
         if not events:
             return
-        writes: dict[Path, list[dict[str, Any]]] = {}
-        seen_by_path: dict[Path, set[str]] = {}
+        writes: dict[tuple[Path, str], list[dict[str, Any]]] = {}
+        seen_by_path: dict[tuple[Path, str], set[str]] = {}
         env_sink_path = _audit_sink_path(self.root)
         if env_sink_path:
             for event in events:
-                self._queue_audit_sink_write(writes, seen_by_path, env_sink_path, event)
+                self._queue_audit_sink_write(writes, seen_by_path, env_sink_path, "jsonl", event)
         workspace_sinks = self._workspace_audit_sink_paths(events)
         for event in events:
             workspace_id = event.get("workspace_id")
             if not isinstance(workspace_id, str):
                 continue
-            sink_path = workspace_sinks.get(workspace_id)
-            if sink_path:
-                self._queue_audit_sink_write(writes, seen_by_path, sink_path, event)
-        for sink_path, sink_events in writes.items():
-            self._write_audit_sink_events(sink_path, sink_events)
+            sink_config = workspace_sinks.get(workspace_id)
+            if sink_config:
+                sink_path, sink_format = sink_config
+                self._queue_audit_sink_write(writes, seen_by_path, sink_path, sink_format, event)
+        for (sink_path, sink_format), sink_events in writes.items():
+            self._write_audit_sink_events(sink_path, sink_events, format=sink_format)
 
-    def _workspace_audit_sink_paths(self, events: list[dict[str, Any]]) -> dict[str, Path]:
+    def _workspace_audit_sink_paths(self, events: list[dict[str, Any]]) -> dict[str, tuple[Path, str]]:
         workspace_ids = sorted(
             {
                 event["workspace_id"]
@@ -3602,7 +3648,7 @@ class EnterpriseStore:
         try:
             rows = self.conn.execute(
                 f"""
-                SELECT workspace_id, relative_path
+                SELECT workspace_id, relative_path, format
                 FROM workspace_audit_jsonl_sinks
                 WHERE enabled = 1 AND workspace_id IN ({placeholders})
                 """,
@@ -3610,22 +3656,28 @@ class EnterpriseStore:
             ).fetchall()
         except sqlite3.Error:
             return {}
-        sinks: dict[str, Path] = {}
+        sinks: dict[str, tuple[Path, str]] = {}
         for row in rows:
             sink_path = _workspace_audit_sink_path(self.root, row["relative_path"])
             if sink_path:
-                sinks[row["workspace_id"]] = sink_path
+                try:
+                    sink_format = _normalize_audit_sink_format(row["format"])
+                except ValueError:
+                    sink_format = "jsonl"
+                sinks[row["workspace_id"]] = (sink_path, sink_format)
         return sinks
 
     def _queue_audit_sink_write(
         self,
-        writes: dict[Path, list[dict[str, Any]]],
-        seen_by_path: dict[Path, set[str]],
+        writes: dict[tuple[Path, str], list[dict[str, Any]]],
+        seen_by_path: dict[tuple[Path, str], set[str]],
         sink_path: Path,
+        format: str,
         event: dict[str, Any],
     ) -> None:
-        events = writes.setdefault(sink_path, [])
-        seen = seen_by_path.setdefault(sink_path, set())
+        key = (sink_path, format)
+        events = writes.setdefault(key, [])
+        seen = seen_by_path.setdefault(key, set())
         event_id = event.get("id")
         if isinstance(event_id, str) and event_id in seen:
             return
@@ -3633,12 +3685,15 @@ class EnterpriseStore:
             seen.add(event_id)
         events.append(event)
 
-    def _write_audit_sink_events(self, sink_path: Path, events: list[dict[str, Any]]) -> None:
+    def _write_audit_sink_events(self, sink_path: Path, events: list[dict[str, Any]], *, format: str = "jsonl") -> None:
         try:
+            sink_format = _normalize_audit_sink_format(format)
             sink_path.parent.mkdir(parents=True, exist_ok=True)
             with sink_path.open("a", encoding="utf-8") as sink:
                 for event in events:
-                    sink.write(json.dumps(_redact_audit_sink_event(event), sort_keys=True) + "\n")
+                    redacted = _redact_audit_sink_event(event)
+                    payload = _siem_audit_export_event(redacted) if sink_format == "siem-jsonl" else redacted
+                    sink.write(json.dumps(payload, sort_keys=True) + "\n")
         except OSError:
             return
 

@@ -247,6 +247,7 @@ def main() -> None:
     audit_sink.add_argument("workspace_id")
     audit_sink.add_argument("user_id")
     audit_sink.add_argument("--relative-path")
+    audit_sink.add_argument("--format", choices=["jsonl", "siem-jsonl"])
     audit_sink.add_argument("--disable", action="store_true")
     audit_sink.add_argument("--clear", action="store_true")
     audit_sink.add_argument("--check", action="store_true")
@@ -894,7 +895,7 @@ def main() -> None:
                 )
             print(json.dumps(config, indent=2))
         elif args.command == "audit-sink":
-            has_update = args.relative_path is not None or args.disable
+            has_update = args.relative_path is not None or args.format is not None or args.disable
             selected_actions = [args.clear, args.check, args.status, has_update]
             if sum(1 for selected in selected_actions if selected) > 1:
                 raise SystemExit("choose only one audit sink action")
@@ -912,13 +913,16 @@ def main() -> None:
                 )
             elif has_update:
                 relative_path = args.relative_path
-                if args.disable and relative_path is None:
+                audit_sink_format = args.format
+                if (args.disable or audit_sink_format is not None) and relative_path is None:
                     current = _workspace_member_cli(
                         lambda: store.get_workspace_audit_jsonl_sink_config(args.workspace_id, args.user_id)
                     )
                     relative_path = current["relative_path"]
+                    if audit_sink_format is None:
+                        audit_sink_format = current["format"]
                     if not current["configured"] or relative_path is None:
-                        raise SystemExit("--relative-path is required when disabling an unconfigured audit sink")
+                        raise SystemExit("--relative-path is required when updating an unconfigured audit sink")
                 if relative_path is None:
                     raise SystemExit("--relative-path is required when setting audit sink")
                 config = _workspace_member_cli(
@@ -926,6 +930,7 @@ def main() -> None:
                         args.workspace_id,
                         args.user_id,
                         relative_path=relative_path,
+                        format=audit_sink_format,
                         enabled=not args.disable,
                     )
                 )

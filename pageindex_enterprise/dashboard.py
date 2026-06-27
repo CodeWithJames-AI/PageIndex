@@ -594,6 +594,10 @@ DASHBOARD_HTML = """<!doctype html>
               <div id="auditRetentionSummary" class="muted">Retention not loaded.</div>
               <div class="import-row">
                 <input id="auditSinkPathInput" value="" placeholder="audit sink relative .jsonl path" aria-label="Audit sink relative JSONL path">
+                <select id="auditSinkFormatInput" aria-label="Audit sink format">
+                  <option value="jsonl">jsonl</option>
+                  <option value="siem-jsonl">siem jsonl</option>
+                </select>
                 <label><input id="auditSinkEnabledInput" type="checkbox" checked>enabled</label>
               </div>
               <div class="provider-actions">
@@ -820,6 +824,7 @@ DASHBOARD_HTML = """<!doctype html>
     const auditLegalHoldReasonInput = document.getElementById("auditLegalHoldReasonInput");
     const auditRetentionSummary = document.getElementById("auditRetentionSummary");
     const auditSinkPathInput = document.getElementById("auditSinkPathInput");
+    const auditSinkFormatInput = document.getElementById("auditSinkFormatInput");
     const auditSinkEnabledInput = document.getElementById("auditSinkEnabledInput");
     const auditSinkSummary = document.getElementById("auditSinkSummary");
     const auditIntegritySummary = document.getElementById("auditIntegritySummary");
@@ -2056,6 +2061,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderAuditSinkConfig(config) {
       auditSinkPathInput.value = config && config.relative_path ? config.relative_path : "";
+      auditSinkFormatInput.value = config && config.format ? config.format : "jsonl";
       auditSinkEnabledInput.checked = !config || !config.configured || config.enabled !== false;
       if (!config || !config.configured) {
         auditSinkSummary.className = "muted";
@@ -2064,9 +2070,10 @@ DASHBOARD_HTML = """<!doctype html>
       }
       auditSinkSummary.className = config.enabled ? "status ok" : "muted";
       const state = config.enabled ? "enabled" : "disabled";
+      const format = config.format || "jsonl";
       const delivery = Number.isFinite(Number(config.line_count)) ? ` | lines ${config.line_count}` : "";
       const lastEvent = config.last_event && config.last_event.action ? ` | last ${config.last_event.action}` : "";
-      auditSinkSummary.textContent = `${state} | ${config.relative_path || "no path"}${delivery}${lastEvent} | updated ${config.updated_at || "unknown"}`;
+      auditSinkSummary.textContent = `${state} | ${format} | ${config.relative_path || "no path"}${delivery}${lastEvent} | updated ${config.updated_at || "unknown"}`;
     }
 
     function renderAuditPurgeResult(result) {
@@ -3684,7 +3691,11 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Saving audit sink...");
       const config = await api("/audit-sink", {
         method: "POST",
-        body: JSON.stringify({ relative_path: relativePath, enabled: auditSinkEnabledInput.checked })
+        body: JSON.stringify({
+          relative_path: relativePath,
+          format: auditSinkFormatInput.value,
+          enabled: auditSinkEnabledInput.checked
+        })
       });
       renderAuditSinkConfig(config);
       setStatus("Audit sink saved.", "ok");

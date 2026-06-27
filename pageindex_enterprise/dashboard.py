@@ -436,7 +436,10 @@ DASHBOARD_HTML = """<!doctype html>
                 </select>
                 <button id="exportConversationButton" class="secondary" type="button">Export</button>
               </div>
-              <button id="refreshConversationsButton" class="secondary" type="button">Refresh chats</button>
+              <div class="provider-actions">
+                <button id="refreshConversationsButton" class="secondary" type="button">Refresh chats</button>
+                <label class="checkbox-row"><input id="conversationIncludeArchivedInput" type="checkbox"> Archived</label>
+              </div>
               <div id="conversationList" class="conversation-list muted">No conversations loaded.</div>
               <textarea id="conversationExportText" readonly placeholder="conversation export output" aria-label="Conversation export output"></textarea>
             </div>
@@ -696,6 +699,7 @@ DASHBOARD_HTML = """<!doctype html>
     const fileNameInput = document.getElementById("fileNameInput");
     const structureInput = document.getElementById("structureInput");
     const conversationTitleInput = document.getElementById("conversationTitleInput");
+    const conversationIncludeArchivedInput = document.getElementById("conversationIncludeArchivedInput");
     const conversationExportFormatInput = document.getElementById("conversationExportFormatInput");
     const conversationExportText = document.getElementById("conversationExportText");
     const memberUserInput = document.getElementById("memberUserInput");
@@ -1180,11 +1184,11 @@ DASHBOARD_HTML = """<!doctype html>
         <article class="conversation ${conversation.id === activeConversationId ? "active" : ""}">
           <button class="secondary" type="button" data-conversation-id="${escapeHtml(conversation.id)}">
             <strong>${escapeHtml(conversation.title)}</strong>
-            <div class="muted">${escapeHtml(conversation.message_count || 0)} messages</div>
+            <div class="muted">${escapeHtml(conversation.message_count || 0)} messages${conversation.archived_at ? " | archived" : ""}</div>
           </button>
           <div class="doc-actions">
             <button class="secondary" type="button" data-rename-conversation-id="${escapeHtml(conversation.id)}" data-conversation-title="${escapeHtml(conversation.title)}">Rename</button>
-            <button class="secondary" type="button" data-archive-conversation-id="${escapeHtml(conversation.id)}">Archive</button>
+            <button class="secondary" type="button" data-archive-conversation-id="${escapeHtml(conversation.id)}" data-archive-state="${conversation.archived_at ? "restore" : "archive"}">${conversation.archived_at ? "Restore" : "Archive"}</button>
           </div>
         </article>
       `).join("");
@@ -1195,7 +1199,7 @@ DASHBOARD_HTML = """<!doctype html>
         button.addEventListener("click", () => renameConversation(button.dataset.renameConversationId, button.dataset.conversationTitle).catch((error) => setStatus(error.message, "error")));
       });
       conversationList.querySelectorAll("[data-archive-conversation-id]").forEach((button) => {
-        button.addEventListener("click", () => archiveConversation(button.dataset.archiveConversationId).catch((error) => setStatus(error.message, "error")));
+        button.addEventListener("click", () => archiveConversation(button.dataset.archiveConversationId, button.dataset.archiveState === "restore").catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -1685,7 +1689,12 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function refreshConversations() {
       setStatus("Refreshing chats...");
-      const payload = await api("/conversations");
+      const params = new URLSearchParams();
+      if (conversationIncludeArchivedInput.checked) {
+        params.set("include_archived", "true");
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      const payload = await api(`/conversations${suffix}`);
       const conversations = payload.conversations || [];
       if (activeConversationId && !conversations.some((conversation) => conversation.id === activeConversationId)) {
         activeConversationId = "";
@@ -2086,22 +2095,22 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Conversation renamed.", "ok");
     }
 
-    async function archiveConversation(conversationId) {
-      if (!window.confirm("Archive this conversation?")) {
-        setStatus("Archive cancelled.", "warn");
+    async function archiveConversation(conversationId, restore = false) {
+      if (!window.confirm(restore ? "Restore this conversation?" : "Archive this conversation?")) {
+        setStatus(restore ? "Restore cancelled." : "Archive cancelled.", "warn");
         return;
       }
-      setStatus("Archiving conversation...");
+      setStatus(restore ? "Restoring conversation..." : "Archiving conversation...");
       await api(`/conversations/${encodeURIComponent(conversationId)}/archive`, {
         method: "POST",
-        body: JSON.stringify({ archived: true })
+        body: JSON.stringify({ archived: !restore })
       });
-      if (activeConversationId === conversationId) {
+      if (!restore && activeConversationId === conversationId) {
         activeConversationId = "";
         renderMessages([]);
       }
       await refreshConversations();
-      setStatus("Conversation archived.", "ok");
+      setStatus(restore ? "Conversation restored." : "Conversation archived.", "ok");
     }
 
     async function saveMember() {
@@ -2998,6 +3007,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("createConversationButton").addEventListener("click", () => createConversation().catch((error) => setStatus(error.message, "error")));
     document.getElementById("exportConversationButton").addEventListener("click", () => exportConversation().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshConversationsButton").addEventListener("click", () => refreshConversations().catch((error) => setStatus(error.message, "error")));
+    conversationIncludeArchivedInput.addEventListener("change", () => refreshConversations().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveMemberButton").addEventListener("click", () => saveMember().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshMembersButton").addEventListener("click", () => refreshMembers().catch((error) => setStatus(error.message, "error")));
     document.getElementById("createGroupButton").addEventListener("click", () => createGroup().catch((error) => setStatus(error.message, "error")));

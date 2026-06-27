@@ -551,12 +551,26 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "invitation expired"):
                 store.accept_workspace_invitation(expired_invitation["id"], "dave@example.com")
+            stale_invitation = store.create_workspace_invitation(
+                workspace_id,
+                "alice",
+                "erin@example.com",
+                role="member",
+                expires_at=past,
+            )
+            reinvited = store.create_workspace_invitation(
+                workspace_id,
+                "alice",
+                "erin@example.com",
+                role="viewer",
+                expires_at=future,
+            )
+            expired = store.list_workspace_invitations(workspace_id, "alice", status="expired")
             events = store.list_audit_events(workspace_id, "alice", limit=20)
             actions = [event["action"] for event in events]
-            invitations_by_email = {
-                invitation["email"]: invitation
-                for invitation in store.list_workspace_invitations(workspace_id, "alice")
-            }
+            invitations = store.list_workspace_invitations(workspace_id, "alice")
+            invitations_by_id = {invitation["id"]: invitation for invitation in invitations}
+            reinvite_event = next(event for event in events if event["target_id"] == reinvited["id"])
 
             self.assertEqual(invitation["email"], "bob@example.com")
             self.assertEqual(invitation["status"], "pending")
@@ -567,8 +581,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(store.user_can_access_workspace(workspace_id, "bob@example.com"))
             self.assertTrue(revoked)
             self.assertFalse(revoked_again)
-            self.assertEqual(invitations_by_email["carol@example.com"]["status"], "revoked")
-            self.assertEqual(invitations_by_email["dave@example.com"]["status"], "pending")
+            self.assertEqual(invitations_by_id[revoked_invitation["id"]]["status"], "revoked")
+            self.assertEqual(invitations_by_id[expired_invitation["id"]]["status"], "expired")
+            self.assertEqual(invitations_by_id[stale_invitation["id"]]["status"], "expired")
+            self.assertEqual(invitations_by_id[reinvited["id"]]["status"], "pending")
+            self.assertEqual([invitation["id"] for invitation in expired], [stale_invitation["id"], expired_invitation["id"]])
+            self.assertEqual(reinvite_event["details"]["expired_invitation_count"], 1)
             self.assertIn("workspace_invitation.create", actions)
             self.assertIn("workspace_invitation.accept", actions)
             self.assertIn("workspace_invitation.revoke", actions)

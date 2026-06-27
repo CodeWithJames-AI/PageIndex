@@ -192,7 +192,7 @@ def main() -> None:
     list_invitations = sub.add_parser("list-invitations")
     list_invitations.add_argument("workspace_id")
     list_invitations.add_argument("actor_user_id")
-    list_invitations.add_argument("--status", choices=["pending", "accepted", "revoked"])
+    list_invitations.add_argument("--status", choices=["pending", "accepted", "revoked", "expired"])
 
     accept_invitation = sub.add_parser("accept-invitation")
     accept_invitation.add_argument("invitation_id")

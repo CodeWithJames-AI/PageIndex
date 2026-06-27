@@ -25,6 +25,7 @@ WORKSPACE_WRITE_ROLES = {"owner", "admin", "member"}
 WORKSPACE_ADMIN_ROLES = {"owner", "admin"}
 WORKSPACE_ROLES = {"owner", "admin", "member", "viewer"}
 WORKSPACE_INVITATION_ROLES = {"admin", "member", "viewer"}
+WORKSPACE_INVITATION_STATUSES = {"pending", "accepted", "revoked", "expired"}
 WORKSPACE_ROLE_RANK = {"viewer": 0, "member": 1, "admin": 2, "owner": 3}
 DOCUMENT_ACCESS_MODES = {"workspace", "restricted"}
 DOCUMENT_ACCESS_GRANT_ROLES = {"read", "write", "deny"}
@@ -1694,17 +1695,18 @@ class EnterpriseStore:
         email = _normalize_invitation_email(email)
         role = _normalize_workspace_role(role, invitation=True)
         expires_at = _normalize_expires_at(expires_at)
-        if self._one(
-            """
-            SELECT id FROM workspace_invitations
-            WHERE workspace_id = ? AND email = ? AND status = 'pending'
-            """,
-            (workspace_id, email),
-        ):
-            raise ValueError("pending invitation already exists")
         invitation_id = f"inv_{uuid.uuid4().hex}"
         created_at = _now()
         with self._atomic():
+            expired_invitation_count = self._expire_workspace_invitations(workspace_id, email=email)
+            if self._one(
+                """
+                SELECT id FROM workspace_invitations
+                WHERE workspace_id = ? AND email = ? AND status = 'pending'
+                """,
+                (workspace_id, email),
+            ):
+                raise ValueError("pending invitation already exists")
             self.conn.execute(
                 """
                 INSERT INTO workspace_invitations (
@@ -1720,7 +1722,12 @@ class EnterpriseStore:
                 "workspace_invitation.create",
                 target_type="workspace_invitation",
                 target_id=invitation_id,
-                details={"email": email, "role": role, "expires_at": expires_at},
+                details={
+                    "email": email,
+                    "role": role,
+                    "expires_at": expires_at,
+                    "expired_invitation_count": expired_invitation_count,
+                },
             )
         return self._workspace_invitation(invitation_id)
 
@@ -1732,11 +1739,13 @@ class EnterpriseStore:
         status: str | None = None,
     ) -> list[dict[str, Any]]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        if self._expire_workspace_invitations(workspace_id):
+            self._commit()
         params: list[Any] = [workspace_id]
         where = "workspace_id = ?"
         if status is not None:
             status = status.strip().casefold()
-            if status not in {"pending", "accepted", "revoked"}:
+            if status not in WORKSPACE_INVITATION_STATUSES:
                 raise ValueError("Unsupported invitation status")
             where += " AND status = ?"
             params.append(status)
@@ -1763,6 +1772,8 @@ class EnterpriseStore:
         if invitation["status"] != "pending":
             raise ValueError("invitation is not pending")
         if _is_expired(invitation["expires_at"]):
+            with self._atomic():
+                self._expire_workspace_invitations(invitation["workspace_id"], invitation_id=invitation_id)
             raise ValueError("invitation expired")
         if invitation["email"] != user_id:
             raise PermissionError("invitation does not match user")
@@ -1835,6 +1846,36 @@ class EnterpriseStore:
                 details={"email": invitation["email"], "role": invitation["role"]},
             )
         return True
+
+    def _expire_workspace_invitations(
+        self,
+        workspace_id: str,
+        *,
+        email: str | None = None,
+        invitation_id: str | None = None,
+    ) -> int:
+        where = [
+            "workspace_id = ?",
+            "status = 'pending'",
+            "expires_at IS NOT NULL",
+            "expires_at <= ?",
+        ]
+        args: list[Any] = [workspace_id, _now()]
+        if email is not None:
+            where.append("email = ?")
+            args.append(email)
+        if invitation_id is not None:
+            where.append("id = ?")
+            args.append(invitation_id)
+        cursor = self.conn.execute(
+            f"""
+            UPDATE workspace_invitations
+            SET status = 'expired'
+            WHERE {' AND '.join(where)}
+            """,
+            args,
+        )
+        return max(0, cursor.rowcount)
 
     def _workspace_invitation(self, invitation_id: str) -> dict[str, Any] | None:
         row = self._one(

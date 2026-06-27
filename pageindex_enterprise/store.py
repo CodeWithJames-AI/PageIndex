@@ -7530,6 +7530,18 @@ class EnterpriseStore:
         document_access_grant_count = 0
         document_group_access_grant_count = 0
         document_version_count = 0
+        evidence_count = int(
+            self._one("SELECT COUNT(*) AS count FROM evidence WHERE doc_id = ?", (doc_id,))["count"]
+        )
+        citation_count = int(
+            self._one("SELECT COUNT(*) AS count FROM citations WHERE doc_id = ?", (doc_id,))["count"]
+        )
+        virtual_node_doc_count = int(
+            self._one("SELECT COUNT(*) AS count FROM virtual_node_docs WHERE doc_id = ?", (doc_id,))["count"]
+        )
+        virtual_node_count = int(
+            self._one("SELECT COUNT(*) AS count FROM virtual_nodes WHERE doc_id = ?", (doc_id,))["count"]
+        )
         if document["workspace_id"]:
             share_link_count = int(
                 self._one(
@@ -7587,6 +7599,10 @@ class EnterpriseStore:
                         "document_access_grant_count": document_access_grant_count,
                         "document_group_access_grant_count": document_group_access_grant_count,
                         "document_version_count": document_version_count,
+                        "evidence_count": evidence_count,
+                        "citation_count": citation_count,
+                        "virtual_node_doc_count": virtual_node_doc_count,
+                        "virtual_node_count": virtual_node_count,
                     },
                 )
         return deleted

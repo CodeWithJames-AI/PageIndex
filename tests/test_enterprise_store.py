@@ -4641,7 +4641,15 @@ class EnterpriseStoreTest(unittest.TestCase):
                 0,
             )
             self.assertEqual(
+                store.conn.execute("SELECT COUNT(*) AS count FROM citations WHERE doc_id = ?", (doc_id,)).fetchone()["count"],
+                0,
+            )
+            self.assertEqual(
                 store.conn.execute("SELECT COUNT(*) AS count FROM virtual_node_docs WHERE doc_id = ?", (doc_id,)).fetchone()["count"],
+                0,
+            )
+            self.assertEqual(
+                store.conn.execute("SELECT COUNT(*) AS count FROM virtual_nodes WHERE doc_id = ?", (doc_id,)).fetchone()["count"],
                 0,
             )
             self.assertEqual(
@@ -4671,6 +4679,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                     "document_access_grant_count": 1,
                     "document_group_access_grant_count": 1,
                     "document_version_count": 1,
+                    "evidence_count": 1,
+                    "citation_count": 1,
+                    "virtual_node_doc_count": 2,
+                    "virtual_node_count": 0,
                 },
             )
             self.assertNotIn(str(source), serialized)

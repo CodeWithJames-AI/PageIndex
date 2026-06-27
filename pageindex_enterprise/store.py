@@ -960,6 +960,7 @@ class EnterpriseStore:
               workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
               name TEXT NOT NULL,
               description TEXT NOT NULL DEFAULT '',
+              shared INTEGER NOT NULL DEFAULT 0,
               created_by TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
@@ -1145,6 +1146,9 @@ class EnterpriseStore:
             "query_runs": {
                 "workspace_id": "TEXT",
                 "actor_user_id": "TEXT",
+            },
+            "query_source_sets": {
+                "shared": "INTEGER NOT NULL DEFAULT 0",
             },
             "api_tokens": {
                 "expires_at": "TEXT",
@@ -3115,7 +3119,7 @@ class EnterpriseStore:
             "query_source_sets.jsonl": _rows(
                 self.conn.execute(
                     """
-                    SELECT id, workspace_id, name, description, created_by, created_at, updated_at
+                    SELECT id, workspace_id, name, description, shared, created_by, created_at, updated_at
                     FROM query_source_sets
                     WHERE workspace_id = ?
                     ORDER BY updated_at, id
@@ -3670,6 +3674,18 @@ class EnterpriseStore:
             raise PermissionError("conversation access denied")
         if conversation.get("archived_at") and not allow_archived:
             raise PermissionError("conversation archived")
+        return self._conversation_with_visible_scope(conversation, actor_user_id)
+
+    def _conversation_with_visible_scope(self, conversation: dict[str, Any], actor_user_id: str) -> dict[str, Any]:
+        source_set_id = conversation.get("source_set_id")
+        if source_set_id:
+            source_set = self._query_source_set_row(conversation["workspace_id"], source_set_id)
+            if source_set is None or not self._can_use_query_source_set(
+                conversation["workspace_id"],
+                actor_user_id,
+                source_set,
+            ):
+                conversation = {**conversation, "source_set_id": None}
         return conversation
 
     def _require_workspace(self, workspace_id: str | None) -> None:
@@ -4824,13 +4840,31 @@ class EnterpriseStore:
     def _query_source_set_row(self, workspace_id: str, source_set_id: str) -> dict[str, Any] | None:
         row = self._one(
             """
-            SELECT id, workspace_id, name, description, created_by, created_at, updated_at
+            SELECT id, workspace_id, name, description, shared, created_by, created_at, updated_at
             FROM query_source_sets
             WHERE workspace_id = ? AND id = ?
             """,
             (workspace_id, source_set_id.strip()),
         )
-        return dict(row) if row else None
+        if not row:
+            return None
+        source_set = dict(row)
+        source_set["shared"] = bool(source_set.get("shared"))
+        return source_set
+
+    def _can_use_query_source_set(self, workspace_id: str, actor_user_id: str, source_set: dict[str, Any]) -> bool:
+        role = self.workspace_role(workspace_id, actor_user_id)
+        return role in WORKSPACE_ADMIN_ROLES or bool(source_set.get("shared"))
+
+    def _require_query_source_set_access(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        source_set: dict[str, Any],
+    ) -> None:
+        self.require_workspace_access(workspace_id, actor_user_id)
+        if not self._can_use_query_source_set(workspace_id, actor_user_id, source_set):
+            raise PermissionError("query source set access denied")
 
     def _readable_documents_by_id(
         self,
@@ -4881,10 +4915,11 @@ class EnterpriseStore:
         actor_user_id: str,
         source_set_id: str,
     ) -> dict[str, Any] | None:
-        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        self.require_workspace_access(workspace_id, actor_user_id)
         source_set = self._query_source_set_row(workspace_id, source_set_id)
         if not source_set:
             return None
+        self._require_query_source_set_access(workspace_id, actor_user_id, source_set)
         documents = self._query_source_set_documents(workspace_id, source_set["id"], actor_user_id)
         return {
             **source_set,
@@ -4894,12 +4929,15 @@ class EnterpriseStore:
         }
 
     def list_query_source_sets(self, workspace_id: str, actor_user_id: str) -> list[dict[str, Any]]:
-        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        self.require_workspace_access(workspace_id, actor_user_id)
+        role = self.workspace_role(workspace_id, actor_user_id)
+        shared_filter = "" if role in WORKSPACE_ADMIN_ROLES else "AND shared = 1"
         rows = self.conn.execute(
-            """
-            SELECT id, workspace_id, name, description, created_by, created_at, updated_at
+            f"""
+            SELECT id, workspace_id, name, description, shared, created_by, created_at, updated_at
             FROM query_source_sets
             WHERE workspace_id = ?
+              {shared_filter}
             ORDER BY updated_at DESC, name, id
             """,
             (workspace_id,),
@@ -4907,6 +4945,7 @@ class EnterpriseStore:
         source_sets = []
         for row in rows:
             source_set = dict(row)
+            source_set["shared"] = bool(source_set.get("shared"))
             documents = self._query_source_set_documents(workspace_id, source_set["id"], actor_user_id)
             source_sets.append(
                 {
@@ -4926,8 +4965,11 @@ class EnterpriseStore:
         doc_ids: list[str] | None,
         *,
         description: str | None = None,
+        shared: bool = False,
     ) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        if not isinstance(shared, bool):
+            raise ValueError("shared must be a boolean")
         normalized_name = _normalize_source_set_name(name)
         normalized_description = _normalize_source_set_description(description)
         normalized_doc_ids = _normalize_source_set_doc_ids(doc_ids)
@@ -4945,10 +4987,19 @@ class EnterpriseStore:
             self.conn.execute(
                 """
                 INSERT INTO query_source_sets
-                  (id, workspace_id, name, description, created_by, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                  (id, workspace_id, name, description, shared, created_by, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (source_set_id, workspace_id, normalized_name, normalized_description, actor_user_id, now, now),
+                (
+                    source_set_id,
+                    workspace_id,
+                    normalized_name,
+                    normalized_description,
+                    int(shared),
+                    actor_user_id,
+                    now,
+                    now,
+                ),
             )
             for position, doc_id in enumerate(normalized_doc_ids):
                 self.conn.execute(
@@ -4964,7 +5015,7 @@ class EnterpriseStore:
                 "query_source_set.create",
                 target_type="query_source_set",
                 target_id=source_set_id,
-                details={"name": normalized_name, "document_count": len(normalized_doc_ids)},
+                details={"name": normalized_name, "document_count": len(normalized_doc_ids), "shared": shared},
             )
         created = self.get_query_source_set(workspace_id, actor_user_id, source_set_id)
         if created is None:
@@ -4980,12 +5031,13 @@ class EnterpriseStore:
         name: str | object = _UNSET,
         description: str | None | object = _UNSET,
         doc_ids: list[str] | None | object = _UNSET,
+        shared: bool | object = _UNSET,
     ) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         source_set = self._query_source_set_row(workspace_id, source_set_id)
         if not source_set:
             raise ValueError("Query source set not found.")
-        if name is _UNSET and description is _UNSET and doc_ids is _UNSET:
+        if name is _UNSET and description is _UNSET and doc_ids is _UNSET and shared is _UNSET:
             raise ValueError("At least one source set update is required.")
         if name is _UNSET:
             normalized_name = source_set["name"]
@@ -4999,6 +5051,12 @@ class EnterpriseStore:
             raise ValueError("Source set description must be a string.")
         else:
             normalized_description = _normalize_source_set_description(description)
+        if shared is _UNSET:
+            normalized_shared = bool(source_set["shared"])
+        elif not isinstance(shared, bool):
+            raise ValueError("shared must be a boolean")
+        else:
+            normalized_shared = shared
         normalized_doc_ids: list[str] | None = None
         if doc_ids is not _UNSET:
             if doc_ids is not None and not isinstance(doc_ids, list):
@@ -5018,10 +5076,10 @@ class EnterpriseStore:
             self.conn.execute(
                 """
                 UPDATE query_source_sets
-                SET name = ?, description = ?, updated_at = ?
+                SET name = ?, description = ?, shared = ?, updated_at = ?
                 WHERE id = ? AND workspace_id = ?
                 """,
-                (normalized_name, normalized_description, now, source_set["id"], workspace_id),
+                (normalized_name, normalized_description, int(normalized_shared), now, source_set["id"], workspace_id),
             )
             if normalized_doc_ids is not None:
                 self.conn.execute(
@@ -5046,6 +5104,8 @@ class EnterpriseStore:
                     "name": normalized_name,
                     "previous_name": source_set["name"],
                     "document_count": len(normalized_doc_ids) if normalized_doc_ids is not None else None,
+                    "shared": normalized_shared,
+                    "previous_shared": bool(source_set["shared"]),
                 },
             )
         updated = self.get_query_source_set(workspace_id, actor_user_id, source_set["id"])
@@ -5080,6 +5140,7 @@ class EnterpriseStore:
         source_set = self._query_source_set_row(workspace_id, source_set_id)
         if source_set is None:
             raise ValueError("Query source set not found.")
+        self._require_query_source_set_access(workspace_id, actor_user_id, source_set)
         documents = self._query_source_set_documents(workspace_id, source_set["id"], actor_user_id)
         return [document["id"] for document in documents]
 
@@ -5492,7 +5553,7 @@ class EnterpriseStore:
             """,
             (workspace_id, actor_user_id, int(include_archived), limit),
         )
-        return [dict(row) for row in rows]
+        return [self._conversation_with_visible_scope(dict(row), actor_user_id) for row in rows]
 
     def archive_conversation(
         self,

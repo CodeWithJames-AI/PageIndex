@@ -1222,12 +1222,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "Diligence set",
                 [public_doc_id, secret_doc_id],
                 description="Cross-document diligence pack",
+                shared=True,
             )
             secret_only_set = store.create_query_source_set(
                 workspace_id,
                 "alice",
                 "Secret-only set",
                 [secret_doc_id],
+                shared=True,
             )
 
             admin_result = store.query_corpus(
@@ -1260,6 +1262,61 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(hidden_result["trace"]["scope"]["doc_ids"], [])
             self.assertEqual(hidden_result["trace"]["scope"]["source_set_document_count"], 0)
 
+    def test_query_source_set_sharing_controls_member_discovery_and_query_use(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            public_source = tmp_path / "shared-source-set-public.txt"
+            secret_source = tmp_path / "shared-source-set-secret.txt"
+            private_source = tmp_path / "private-source-set.txt"
+            public_source.write_text("Shared source set public renewal evidence.", encoding="utf-8")
+            secret_source.write_text("Shared source set restricted diligence evidence.", encoding="utf-8")
+            private_source.write_text("Private source set strategy evidence.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            public_doc_id = store.ingest_file(public_source, workspace_id=workspace_id, actor_user_id="alice", name="Shared public memo")
+            secret_doc_id = store.ingest_file(secret_source, workspace_id=workspace_id, actor_user_id="alice", name="Shared secret memo")
+            private_doc_id = store.ingest_file(private_source, workspace_id=workspace_id, actor_user_id="alice", name="Private strategy memo")
+            store.set_document_access_mode(secret_doc_id, access_mode="restricted", workspace_id=workspace_id, actor_user_id="alice")
+            private_set = store.create_query_source_set(workspace_id, "alice", "Private strategy", [private_doc_id])
+            shared_set = store.create_query_source_set(
+                workspace_id,
+                "alice",
+                "Shared diligence",
+                [public_doc_id, secret_doc_id],
+                shared=True,
+            )
+
+            owner_sets = store.list_query_source_sets(workspace_id, "alice")
+            member_sets = store.list_query_source_sets(workspace_id, "bob")
+            member_query = store.query_corpus(
+                "shared source set evidence",
+                workspace_id=workspace_id,
+                actor_user_id="bob",
+                source_set_id=shared_set["id"],
+            )
+
+            with self.assertRaisesRegex(PermissionError, "query source set access denied"):
+                store.get_query_source_set(workspace_id, "bob", private_set["id"])
+            with self.assertRaisesRegex(PermissionError, "query source set access denied"):
+                store.query_corpus(
+                    "private source set evidence",
+                    workspace_id=workspace_id,
+                    actor_user_id="bob",
+                    source_set_id=private_set["id"],
+                )
+
+            self.assertEqual(private_set["shared"], False)
+            self.assertEqual(shared_set["shared"], True)
+            self.assertEqual([source_set["id"] for source_set in owner_sets], [shared_set["id"], private_set["id"]])
+            self.assertEqual([source_set["id"] for source_set in member_sets], [shared_set["id"]])
+            self.assertEqual(member_sets[0]["doc_ids"], [public_doc_id])
+            self.assertEqual(member_query["trace"]["scope"]["source_set_id"], shared_set["id"])
+            self.assertEqual(member_query["trace"]["scope"]["doc_ids"], [public_doc_id])
+            self.assertEqual(member_query["trace"]["scope"]["source_set_document_count"], 1)
+            self.assertNotIn(secret_doc_id, json.dumps(member_query["trace"]["scope"]))
+
     def test_query_source_set_creation_rejects_missing_or_foreign_docs(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1276,8 +1333,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             alpha_doc_id = store.ingest_file(alpha_source, workspace_id=alpha_workspace, actor_user_id="alice", name="Alpha memo")
             beta_doc_id = store.ingest_file(beta_source, workspace_id=beta_workspace, actor_user_id="mallory", name="Beta memo")
 
-            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
-                store.list_query_source_sets(alpha_workspace, "bob")
+            self.assertEqual(store.list_query_source_sets(alpha_workspace, "bob"), [])
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.create_query_source_set(alpha_workspace, "bob", "Member set", [alpha_doc_id])
             with self.assertRaisesRegex(ValueError, "Source set documents must belong"):
@@ -1371,6 +1427,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Team", workspace_id="ws_source_set_cli")
             store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
             doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="CLI source set memo")
             replacement_doc_id = store.ingest_file(
                 replacement_source,
@@ -1382,7 +1439,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
 
             created = subprocess.run(
-                [*base, "query-source-set", workspace_id, "alice", "--create", "CLI scope", "--doc-id", doc_id],
+                [*base, "query-source-set", workspace_id, "alice", "--create", "CLI scope", "--doc-id", doc_id, "--shared"],
                 cwd=repo_root,
                 env=env,
                 capture_output=True,
@@ -1408,6 +1465,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     doc_id,
                     "--doc-id",
                     replacement_doc_id,
+                    "--private",
                 ],
                 cwd=repo_root,
                 env=env,
@@ -1417,6 +1475,30 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             listed = subprocess.run(
                 [*base, "query-source-set", workspace_id, "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            bob_listed_private = subprocess.run(
+                [*base, "query-source-set", workspace_id, "bob"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            reshared = subprocess.run(
+                [*base, "query-source-set", workspace_id, "alice", "--update", created_source_set["id"], "--shared"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            bob_listed_shared = subprocess.run(
+                [*base, "query-source-set", workspace_id, "bob"],
                 cwd=repo_root,
                 env=env,
                 capture_output=True,
@@ -1471,14 +1553,22 @@ class EnterpriseStoreTest(unittest.TestCase):
 
             updated_source_set = json.loads(updated.stdout)
             listed_source_sets = json.loads(listed.stdout)
+            bob_private_source_sets = json.loads(bob_listed_private.stdout)
+            reshared_source_set = json.loads(reshared.stdout)
+            bob_shared_source_sets = json.loads(bob_listed_shared.stdout)
             query_result = json.loads(queried.stdout)
             delete_result = json.loads(deleted.stdout)
+            self.assertEqual(created_source_set["shared"], True)
             self.assertEqual(created_source_set["doc_ids"], [doc_id])
             self.assertEqual(updated_source_set["id"], created_source_set["id"])
             self.assertEqual(updated_source_set["name"], "Updated CLI scope")
+            self.assertEqual(updated_source_set["shared"], False)
             self.assertEqual(updated_source_set["doc_ids"], [replacement_doc_id, doc_id])
             self.assertEqual(listed_source_sets[0]["id"], created_source_set["id"])
             self.assertEqual(listed_source_sets[0]["doc_ids"], [replacement_doc_id, doc_id])
+            self.assertEqual(bob_private_source_sets, [])
+            self.assertEqual(reshared_source_set["shared"], True)
+            self.assertEqual(bob_shared_source_sets[0]["id"], created_source_set["id"])
             self.assertEqual(query_result["trace"]["scope"]["source_set_id"], created_source_set["id"])
             self.assertIn(replacement_doc_id, {citation["doc_id"] for citation in query_result["citations"]})
             self.assertNotEqual(conflict.returncode, 0)
@@ -1958,6 +2048,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "alice",
                 "Pinned chat scope",
                 [public_doc_id, secret_doc_id],
+                shared=True,
             )
 
             conversation = store.create_conversation(
@@ -1975,6 +2066,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                 limit=4,
             )
             listed = store.list_conversations(workspace_id, "bob")
+            private_source_set = store.update_query_source_set(
+                workspace_id,
+                "alice",
+                source_set["id"],
+                shared=False,
+            )
+            listed_after_revoke = store.list_conversations(workspace_id, "bob")
+            fallback_chat = store.chat_message(conversation["id"], "bob", "renewal", limit=4)
 
             self.assertEqual(conversation["source_set_id"], source_set["id"])
             self.assertEqual(listed[0]["source_set_id"], source_set["id"])
@@ -1985,6 +2084,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(default_chat["result"]["citations"][0]["doc_id"], public_doc_id)
             self.assertNotIn("source_set_id", override_chat["result"]["trace"]["scope"])
             self.assertEqual(override_chat["result"]["trace"]["scope"]["doc_ids"], [override_doc_id])
+            self.assertEqual(private_source_set["shared"], False)
+            self.assertIsNone(listed_after_revoke[0]["source_set_id"])
+            self.assertIsNone(fallback_chat["conversation"]["source_set_id"])
+            self.assertNotIn("source_set_id", fallback_chat["result"]["trace"]["scope"])
+            self.assertIn(public_doc_id, {citation["doc_id"] for citation in fallback_chat["result"]["citations"]})
             with self.assertRaisesRegex(ValueError, "Query source set not found"):
                 store.create_conversation(
                     workspace_id,
@@ -5355,13 +5459,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
             audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
             write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
-            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
-            store.conn.execute(
-                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
-                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
-            )
-            store._commit()
-            member_token = member_token_record["token"]
+            member_token = store.create_api_token(workspace_id, "bob", name="member-read", scopes=["read"])["token"]
             store.close()
 
             server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
@@ -5379,13 +5477,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                     status=403,
                 )
                 write_list_denied = _get_error(url, headers={"Authorization": f"Bearer {write_token}"})
-                member_list_denied = _get_error(url, headers={"Authorization": f"Bearer {member_token}"})
+                member_list_empty = _get_json(url, headers={"Authorization": f"Bearer {member_token}"})
                 created = _post_json(
                     url,
-                    {"name": "Reusable scope", "description": "HTTP source set", "doc_ids": [doc_id]},
+                    {"name": "Reusable scope", "description": "HTTP source set", "doc_ids": [doc_id], "shared": True},
                     headers=owner_headers,
                     status=201,
                 )
+                member_list_shared = _get_json(url, headers={"Authorization": f"Bearer {member_token}"})
                 audit_update_denied = _put_json(
                     f"{url}/{created['id']}",
                     {"name": "Denied", "doc_ids": [replacement_doc_id]},
@@ -5398,10 +5497,23 @@ class EnterpriseStoreTest(unittest.TestCase):
                         "name": "Reusable replacement scope",
                         "description": "Updated HTTP source set",
                         "doc_ids": [replacement_doc_id, doc_id, replacement_doc_id],
+                        "shared": False,
                     },
                     headers=owner_headers,
                 )
                 listed = _get_json(url, headers=owner_headers)
+                member_list_private = _get_json(url, headers={"Authorization": f"Bearer {member_token}"})
+                member_query_private = _post_json(
+                    f"{base}/query",
+                    {"query": "replacement source set evidence", "source_set_id": created["id"]},
+                    headers={"Authorization": f"Bearer {member_token}"},
+                    status=403,
+                )
+                reshared = _put_json(
+                    f"{url}/{created['id']}",
+                    {"shared": True},
+                    headers=owner_headers,
+                )
                 conflict = _post_json(
                     f"{base}/query",
                     {"query": "source set evidence", "doc_ids": [doc_id], "source_set_id": created["id"]},
@@ -5412,6 +5524,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     f"{base}/query",
                     {"query": "replacement source set evidence", "source_set_id": created["id"]},
                     headers=owner_headers,
+                )
+                member_queried = _post_json(
+                    f"{base}/query",
+                    {"query": "replacement source set evidence", "source_set_id": created["id"]},
+                    headers={"Authorization": f"Bearer {member_token}"},
                 )
                 deleted = _delete_json(f"{url}/{created['id']}", headers=owner_headers)
                 deleted_again = _delete_json(f"{url}/{created['id']}", headers=owner_headers)
@@ -5424,19 +5541,27 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(audit_create_denied["error"], "api token scope denied")
             self.assertEqual(audit_update_denied["error"], "api token scope denied")
             self.assertEqual(write_list_denied["error"], "api token scope denied")
-            self.assertEqual(member_list_denied["error"], "workspace role denied")
+            self.assertEqual(member_list_empty["source_sets"], [])
             self.assertEqual(created["name"], "Reusable scope")
+            self.assertEqual(created["shared"], True)
             self.assertEqual(created["doc_ids"], [doc_id])
+            self.assertEqual(member_list_shared["source_sets"][0]["id"], created["id"])
             self.assertEqual(updated["id"], created["id"])
             self.assertEqual(updated["name"], "Reusable replacement scope")
             self.assertEqual(updated["description"], "Updated HTTP source set")
+            self.assertEqual(updated["shared"], False)
             self.assertEqual(updated["doc_ids"], [replacement_doc_id, doc_id])
             self.assertEqual(listed["source_sets"][0]["id"], created["id"])
             self.assertEqual(listed["source_sets"][0]["doc_ids"], [replacement_doc_id, doc_id])
+            self.assertEqual(member_list_private["source_sets"], [])
+            self.assertEqual(member_query_private["error"], "query source set access denied")
+            self.assertEqual(reshared["shared"], True)
             self.assertEqual(conflict["error"], "use doc_ids or source_set_id, not both")
             self.assertEqual(queried["trace"]["scope"]["source_set_id"], created["id"])
             self.assertEqual(queried["trace"]["scope"]["doc_ids"], [replacement_doc_id, doc_id])
             self.assertIn(replacement_doc_id, {citation["doc_id"] for citation in queried["citations"]})
+            self.assertEqual(member_queried["trace"]["scope"]["source_set_id"], created["id"])
+            self.assertEqual(member_queried["trace"]["scope"]["doc_ids"], [replacement_doc_id, doc_id])
             self.assertTrue(deleted["deleted"])
             self.assertFalse(deleted_again["deleted"])
 

@@ -457,6 +457,8 @@ def main() -> None:
     query_source_set.add_argument("--name")
     query_source_set.add_argument("--description")
     query_source_set.add_argument("--doc-id", action="append", dest="doc_ids")
+    query_source_set.add_argument("--shared", action="store_true")
+    query_source_set.add_argument("--private", action="store_true")
     query_source_set.add_argument("--delete")
 
     query_tree = sub.add_parser("query-tree")
@@ -1286,14 +1288,16 @@ def main() -> None:
             selected_actions = [bool(args.create), bool(args.update), bool(args.delete)]
             if sum(selected_actions) > 1:
                 raise SystemExit("use --create, --update, or --delete, not more than one")
+            if args.shared and args.private:
+                raise SystemExit("use --shared or --private, not both")
             if args.delete:
                 deleted = _workspace_member_cli(
                     lambda: store.delete_query_source_set(args.workspace_id, args.user_id, args.delete)
                 )
                 print(json.dumps({"deleted": deleted}, indent=2))
             elif args.update:
-                if args.name is None and args.description is None and args.doc_ids is None:
-                    raise SystemExit("use --name, --description, or --doc-id with --update")
+                if args.name is None and args.description is None and args.doc_ids is None and not args.shared and not args.private:
+                    raise SystemExit("use --name, --description, --doc-id, --shared, or --private with --update")
                 source_set = _workspace_member_cli(
                     lambda: store.update_query_source_set(
                         args.workspace_id,
@@ -1302,6 +1306,7 @@ def main() -> None:
                         name=args.name if args.name is not None else _UNSET,
                         description=args.description if args.description is not None else _UNSET,
                         doc_ids=args.doc_ids if args.doc_ids is not None else _UNSET,
+                        shared=True if args.shared else False if args.private else _UNSET,
                     )
                 )
                 print(json.dumps(source_set, indent=2))
@@ -1313,6 +1318,7 @@ def main() -> None:
                         args.create,
                         args.doc_ids,
                         description=args.description,
+                        shared=args.shared,
                     )
                 )
                 print(json.dumps(source_set, indent=2))

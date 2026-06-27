@@ -1994,7 +1994,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         store = EnterpriseStore(self.server.root)
         try:
             workspace_id, user_id = self._workspace_context(
-                store, required_scope="audit", require_api_token=True
+                store, required_scope="read", require_api_token=True
             )
             self._json({"source_sets": store.list_query_source_sets(workspace_id, user_id)})
         finally:
@@ -2019,6 +2019,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     name,
                     _list_or_none(payload.get("doc_ids")),
                     description=description,
+                    shared=_bool_body_value(payload.get("shared"), "shared") if "shared" in payload else False,
                 ),
                 HTTPStatus.CREATED,
             )
@@ -2029,6 +2030,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         name = _optional_str(payload.get("name"), "name") if "name" in payload else _UNSET
         description = _optional_str(payload.get("description"), "description") if "description" in payload else _UNSET
         doc_ids = _list_or_none(payload.get("doc_ids")) if "doc_ids" in payload else _UNSET
+        shared = _bool_body_value(payload.get("shared"), "shared") if "shared" in payload else _UNSET
         store = EnterpriseStore(self.server.root)
         try:
             workspace_id, user_id = self._workspace_context(
@@ -2042,6 +2044,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     name=name,
                     description=description,
                     doc_ids=doc_ids,
+                    shared=shared,
                 )
             )
         finally:

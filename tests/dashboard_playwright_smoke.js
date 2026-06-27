@@ -93,6 +93,17 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#status", "Access refreshed.");
     await waitForText(page, "#documentAccessPanel", "mode workspace");
 
+    await page.fill("#documentEffectiveAccessUserInput", "alice");
+    const effectiveAccessResponse = page.waitForResponse(
+      (response) => response.url().includes("/documents/")
+        && response.url().includes("/access?effective_user_id=alice")
+        && response.request().method() === "GET"
+    );
+    await page.click("#previewDocumentEffectiveAccessButton");
+    await effectiveAccessResponse;
+    await waitForText(page, "#status", "Effective access refreshed.");
+    await waitForText(page, "#documentEffectiveAccessPanel", "workspace_admin");
+
     await page.selectOption("#documentAccessModeInput", "restricted");
     const saveAccessModeResponse = page.waitForResponse(
       (response) => response.url().includes("/documents/")

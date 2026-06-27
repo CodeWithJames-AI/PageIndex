@@ -1306,6 +1306,23 @@ DASHBOARD_HTML = """<!doctype html>
       }
       const grants = access.grants || [];
       const groupGrants = access.group_grants || [];
+      const effective = access.effective_access || null;
+      const effectiveMatches = effective && effective.matched_grants ? effective.matched_grants : [];
+      const effectiveMatchesHtml = effectiveMatches.length
+        ? effectiveMatches.map((grant) => {
+          const principal = grant.principal_name || grant.principal_id || "unknown";
+          const scope = grant.scope === "folder" ? `folder ${grant.folder_path || grant.folder_id || ""}` : "document";
+          return `<li>${escapeHtml(grant.role || "read")} | ${escapeHtml(scope)} | ${escapeHtml(grant.principal_type || "user")} ${escapeHtml(principal)}</li>`;
+        }).join("")
+        : "";
+      const effectiveHtml = effective
+        ? `
+          <div class="status ${effective.denied ? "warn" : (effective.can_read ? "ok" : "warn")}">
+            ${escapeHtml(effective.user_id)} | ${escapeHtml(effective.decision)} | read ${effective.can_read ? "yes" : "no"} | write ${effective.can_write ? "yes" : "no"}
+          </div>
+          ${effectiveMatchesHtml ? `<ul class="muted">${effectiveMatchesHtml}</ul>` : `<div class="muted">No matching grants.</div>`}
+        `
+        : `<div class="muted">No effective access preview.</div>`;
       const grantsHtml = grants.length
         ? grants.map((grant) => `
           <article class="member">
@@ -1359,6 +1376,11 @@ DASHBOARD_HTML = """<!doctype html>
             <button id="grantDocumentGroupAccessButton" type="button">Grant group</button>
             <button id="revokeDocumentGroupAccessButton" class="secondary" type="button">Revoke group</button>
           </div>
+          <div class="access-actions">
+            <input id="documentEffectiveAccessUserInput" value="${escapeHtml(effective ? effective.user_id : "")}" placeholder="effective user id" aria-label="Effective access user id">
+            <button id="previewDocumentEffectiveAccessButton" class="secondary" type="button">Preview effective</button>
+          </div>
+          <div id="documentEffectiveAccessPanel">${effectiveHtml}</div>
         </article>
         <div class="member-list">
           <strong>Direct grants</strong>
@@ -1374,6 +1396,7 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById("revokeDocumentAccessButton").addEventListener("click", () => revokeDocumentAccess(docId).catch((error) => setStatus(error.message, "error")));
       document.getElementById("grantDocumentGroupAccessButton").addEventListener("click", () => grantDocumentGroupAccess(docId).catch((error) => setStatus(error.message, "error")));
       document.getElementById("revokeDocumentGroupAccessButton").addEventListener("click", () => revokeDocumentGroupAccess(docId).catch((error) => setStatus(error.message, "error")));
+      document.getElementById("previewDocumentEffectiveAccessButton").addEventListener("click", () => previewDocumentEffectiveAccess(docId).catch((error) => setStatus(error.message, "error")));
       documentAccessPanel.querySelectorAll("[data-revoke-access-doc-id]").forEach((button) => {
         button.addEventListener("click", () => revokeDocumentAccess(button.dataset.revokeAccessDocId, button.dataset.revokeAccessUserId).catch((error) => setStatus(error.message, "error")));
       });
@@ -2271,6 +2294,18 @@ DASHBOARD_HTML = """<!doctype html>
       const payload = await api(`/documents/${encodeURIComponent(docId)}/access`);
       renderDocumentAccess(docId, payload.access);
       setStatus("Access refreshed.", "ok");
+    }
+
+    async function previewDocumentEffectiveAccess(docId) {
+      const input = document.getElementById("documentEffectiveAccessUserInput");
+      const userId = input.value.trim();
+      if (!userId) {
+        setStatus("Enter a user id.", "warn");
+        return;
+      }
+      const payload = await api(`/documents/${encodeURIComponent(docId)}/access?effective_user_id=${encodeURIComponent(userId)}`);
+      renderDocumentAccess(docId, payload.access);
+      setStatus("Effective access refreshed.", "ok");
     }
 
     async function updateDocumentAccess(docId, payload, message) {

@@ -8226,6 +8226,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                 name="Bob-updated secret memo",
             )
             bob_pages_after_write = store.list_document_pages(restricted_id, workspace_id=workspace_id, actor_user_id="bob")
+            effective_after_write = store.explain_document_access(
+                restricted_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                target_user_id="bob",
+            )
             deny_access = store.grant_document_access(
                 restricted_id,
                 workspace_id=workspace_id,
@@ -8236,6 +8242,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             bob_documents_after_deny = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
             bob_query_after_deny = store.query_corpus("secret merger", workspace_id=workspace_id, actor_user_id="bob")
             bob_pages_after_deny = store.list_document_pages(restricted_id, workspace_id=workspace_id, actor_user_id="bob")
+            effective_after_deny = store.explain_document_access(
+                restricted_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                target_user_id="bob",
+            )
             with self.assertRaisesRegex(PermissionError, "document write access denied"):
                 store.reindex_document_file(restricted_id, replacement, workspace_id=workspace_id, actor_user_id="bob")
             revoked = store.revoke_document_access(
@@ -8261,10 +8273,17 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(write_access["grants"][0]["role"], "write")
             self.assertEqual(bob_reindex["name"], "Bob-updated secret memo")
             self.assertEqual(bob_pages_after_write["pages"][0]["content"], "Secret merger write-grant replacement evidence.")
+            self.assertEqual(effective_after_write["decision"], "write")
+            self.assertTrue(effective_after_write["can_read"])
+            self.assertTrue(effective_after_write["can_write"])
             self.assertEqual(deny_access["grants"][0]["role"], "deny")
             self.assertEqual([doc["id"] for doc in bob_documents_after_deny], [public_id])
             self.assertEqual(bob_query_after_deny["citations"], [])
             self.assertEqual(bob_pages_after_deny["pages"], [])
+            self.assertEqual(effective_after_deny["decision"], "deny")
+            self.assertTrue(effective_after_deny["denied"])
+            self.assertFalse(effective_after_deny["can_read"])
+            self.assertFalse(effective_after_deny["can_write"])
             self.assertTrue(revoked)
             self.assertEqual(bob_query_after_revoke["citations"], [])
             self.assertIn("document.access_mode", actions)
@@ -12674,7 +12693,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=member_headers,
                 )
                 member_pages_after_write = _get_json(f"{base}/documents/{doc_id}/pages", headers=member_headers)
+                effective_write = _get_json(f"{access_url}?effective_user_id=bob", headers=audit_headers)
                 denied = _post_json(access_url, {"grant_user_id": "bob", "grant_role": "deny"}, headers=owner_headers)
+                effective_deny = _get_json(f"{access_url}?effective_user_id=bob", headers=audit_headers)
                 denied_pages = _get_json(f"{base}/documents/{doc_id}/pages", headers=member_headers)
                 denied_reindex = _put_json(
                     f"{base}/documents/{doc_id}",
@@ -12704,7 +12725,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(write_reindex["updated"])
             self.assertEqual(write_reindex["document"]["name"], "Access write memo")
             self.assertEqual(member_pages_after_write["pages"][0]["content"], "Document access write grant evidence.")
+            self.assertEqual(effective_write["access"]["effective_access"]["decision"], "write")
+            self.assertTrue(effective_write["access"]["effective_access"]["can_write"])
             self.assertEqual(denied["access"]["grants"][0]["role"], "deny")
+            self.assertEqual(effective_deny["access"]["effective_access"]["decision"], "deny")
+            self.assertFalse(effective_deny["access"]["effective_access"]["can_read"])
             self.assertEqual(denied_pages["pages"], [])
             self.assertEqual(denied_reindex["error"], "document write access denied")
             self.assertTrue(revoked["revoked"])
@@ -14075,6 +14100,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("grantFolderGroupAccess", body)
                     self.assertIn("grant_role", body)
                     self.assertIn('<option value="deny">deny</option>', body)
+                    self.assertIn("documentEffectiveAccessUserInput", body)
+                    self.assertIn("previewDocumentEffectiveAccess", body)
+                    self.assertIn("effective_access", body)
                     self.assertIn("data-rename-folder-id", body)
                     self.assertIn("data-move-folder-id", body)
                     self.assertIn("data-delete-folder-id", body)

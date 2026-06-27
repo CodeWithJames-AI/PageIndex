@@ -6236,6 +6236,157 @@ class EnterpriseStore:
             "group_grants": [dict(row) for row in group_rows],
         }
 
+    def explain_document_access(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        target_user_id: str,
+    ) -> dict[str, Any] | None:
+        document = self.get_document(doc_id.strip())
+        if not document or document["workspace_id"] != workspace_id:
+            return None
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        target_user_id = target_user_id.strip()
+        if not target_user_id:
+            raise ValueError("target_user_id is required.")
+        workspace_role = self.workspace_role(workspace_id, target_user_id)
+        matched_grants: list[dict[str, Any]] = []
+        row = self._one(
+            """
+            SELECT role, granted_by, created_at
+            FROM document_access_grants
+            WHERE doc_id = ? AND user_id = ?
+            """,
+            (document["id"], target_user_id),
+        )
+        if row:
+            matched_grants.append(
+                {
+                    "scope": "document",
+                    "principal_type": "user",
+                    "principal_id": target_user_id,
+                    **dict(row),
+                }
+            )
+        for group_row in self.conn.execute(
+            """
+            SELECT dg.role, dg.granted_by, dg.created_at, g.id AS group_id, g.name AS group_name
+            FROM document_group_access_grants dg
+            JOIN workspace_groups g ON g.id = dg.group_id
+            JOIN workspace_group_members wgm ON wgm.group_id = dg.group_id
+            WHERE dg.doc_id = ?
+              AND wgm.workspace_id = ?
+              AND wgm.user_id = ?
+            ORDER BY g.name, g.id
+            """,
+            (document["id"], workspace_id, target_user_id),
+        ):
+            matched_grants.append(
+                {
+                    "scope": "document",
+                    "principal_type": "group",
+                    "principal_id": group_row["group_id"],
+                    "principal_name": group_row["group_name"],
+                    "role": group_row["role"],
+                    "granted_by": group_row["granted_by"],
+                    "created_at": group_row["created_at"],
+                }
+            )
+        folder_id = document.get("folder_id")
+        if folder_id:
+            for folder_row in self.conn.execute(
+                """
+                SELECT fag.role, fag.granted_by, fag.created_at,
+                       granted_folder.id AS folder_id, granted_folder.path AS folder_path
+                FROM folder_access_grants fag
+                JOIN folders granted_folder ON granted_folder.id = fag.folder_id
+                JOIN folders document_folder ON document_folder.id = ?
+                WHERE fag.workspace_id = ?
+                  AND fag.user_id = ?
+                  AND (
+                    document_folder.path = granted_folder.path
+                    OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                  )
+                ORDER BY length(granted_folder.path) DESC, granted_folder.path
+                """,
+                (folder_id, workspace_id, target_user_id),
+            ):
+                matched_grants.append(
+                    {
+                        "scope": "folder",
+                        "principal_type": "user",
+                        "principal_id": target_user_id,
+                        "folder_id": folder_row["folder_id"],
+                        "folder_path": folder_row["folder_path"],
+                        "role": folder_row["role"],
+                        "granted_by": folder_row["granted_by"],
+                        "created_at": folder_row["created_at"],
+                    }
+                )
+            for folder_group_row in self.conn.execute(
+                """
+                SELECT fgag.role, fgag.granted_by, fgag.created_at,
+                       granted_folder.id AS folder_id, granted_folder.path AS folder_path,
+                       g.id AS group_id, g.name AS group_name
+                FROM folder_group_access_grants fgag
+                JOIN folders granted_folder ON granted_folder.id = fgag.folder_id
+                JOIN folders document_folder ON document_folder.id = ?
+                JOIN workspace_groups g ON g.id = fgag.group_id
+                JOIN workspace_group_members wgm ON wgm.group_id = fgag.group_id
+                WHERE fgag.workspace_id = ?
+                  AND wgm.workspace_id = ?
+                  AND wgm.user_id = ?
+                  AND (
+                    document_folder.path = granted_folder.path
+                    OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                  )
+                ORDER BY length(granted_folder.path) DESC, granted_folder.path, g.name, g.id
+                """,
+                (folder_id, workspace_id, workspace_id, target_user_id),
+            ):
+                matched_grants.append(
+                    {
+                        "scope": "folder",
+                        "principal_type": "group",
+                        "principal_id": folder_group_row["group_id"],
+                        "principal_name": folder_group_row["group_name"],
+                        "folder_id": folder_group_row["folder_id"],
+                        "folder_path": folder_group_row["folder_path"],
+                        "role": folder_group_row["role"],
+                        "granted_by": folder_group_row["granted_by"],
+                        "created_at": folder_group_row["created_at"],
+                    }
+                )
+        denied = bool(workspace_role and workspace_role not in WORKSPACE_ADMIN_ROLES and self._document_access_deny_exists(document, target_user_id))
+        can_read = bool(workspace_role and self._can_read_document(document, target_user_id))
+        can_write = bool(workspace_role and self._can_write_document(document, target_user_id))
+        if not workspace_role:
+            decision = "workspace_not_member"
+        elif workspace_role in WORKSPACE_ADMIN_ROLES:
+            decision = "workspace_admin"
+        elif denied:
+            decision = "deny"
+        elif can_write:
+            decision = "write"
+        elif can_read:
+            decision = "read"
+        else:
+            decision = "no_access"
+        return {
+            "doc_id": document["id"],
+            "workspace_id": workspace_id,
+            "user_id": target_user_id,
+            "workspace_role": workspace_role,
+            "access_mode": document.get("access_mode", "workspace"),
+            "can_read": can_read,
+            "can_write": can_write,
+            "denied": denied,
+            "decision": decision,
+            "matched_grants": matched_grants,
+        }
+
     def set_document_access_mode(
         self,
         doc_id: str,

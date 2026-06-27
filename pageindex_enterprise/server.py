@@ -382,7 +382,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             document_access_id = _document_access_path(parsed.path)
             if document_access_id:
-                self._get_document_access(document_access_id)
+                self._get_document_access(document_access_id, parse_qs(parsed.query))
                 return
             folder_access_id = _folder_access_path(parsed.path)
             if folder_access_id:
@@ -1734,7 +1734,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         finally:
             store.close()
 
-    def _get_document_access(self, doc_id: str) -> None:
+    def _get_document_access(self, doc_id: str, params: dict[str, list[str]] | None = None) -> None:
         store = EnterpriseStore(self.server.root)
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
@@ -1742,6 +1742,14 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if access is None:
                 self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)
                 return
+            effective_user_id = _str_param(params or {}, "effective_user_id")
+            if effective_user_id:
+                access["effective_access"] = store.explain_document_access(
+                    doc_id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                    target_user_id=effective_user_id,
+                )
             self._json({"access": access})
         finally:
             store.close()

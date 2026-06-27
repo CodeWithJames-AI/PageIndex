@@ -107,8 +107,19 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
             manifest_output = manifest_output.expanduser().resolve()
             manifest_output.parent.mkdir(parents=True, exist_ok=True)
             manifest_output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        checks = {
+            "wheel_built": wheel.name == f"{PACKAGE_NAME}-{VERSION}-py3-none-any.whl",
+            "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
+            "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
+            "dependency_inventory": bool(manifest["dependencies"]),
+            "dependency_pins": manifest["dependency_policy"]["direct_dependencies_pinned"],
+            "wheel_content_policy": manifest["artifacts"][0]["content"]["ok"],
+            "wheel_record_hashes": manifest["artifacts"][0]["record"]["ok"],
+            "eval_command": eval_report.get("ok") is True,
+            "eval_checks": eval_report.get("summary", {}),
+        }
         return {
-            "ok": eval_report.get("ok") is True,
+            "ok": _release_checks_ok(checks),
             "wheel": wheel.name,
             "manifest": {
                 "artifact_count": len(manifest["artifacts"]),
@@ -122,17 +133,7 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
                 "wheel_sha256": manifest["artifacts"][0]["sha256"],
                 "wheel_size_bytes": manifest["artifacts"][0]["size_bytes"],
             },
-            "checks": {
-                "wheel_built": wheel.name == f"{PACKAGE_NAME}-{VERSION}-py3-none-any.whl",
-                "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
-                "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
-                "dependency_inventory": bool(manifest["dependencies"]),
-                "dependency_pins": manifest["dependency_policy"]["direct_dependencies_pinned"],
-                "wheel_content_policy": manifest["artifacts"][0]["content"]["ok"],
-                "wheel_record_hashes": manifest["artifacts"][0]["record"]["ok"],
-                "eval_command": eval_report.get("ok") is True,
-                "eval_checks": eval_report.get("summary", {}),
-            },
+            "checks": checks,
         }
 
 
@@ -141,6 +142,13 @@ def _single_wheel(wheel_dir: Path) -> Path:
     if len(wheels) != 1:
         raise AssertionError(f"expected one {PACKAGE_NAME} wheel, found {[wheel.name for wheel in wheels]}")
     return wheels[0]
+
+
+def _release_checks_ok(checks: dict[str, Any]) -> bool:
+    bool_checks_ok = all(value is True for value in checks.values() if isinstance(value, bool))
+    eval_checks = checks.get("eval_checks")
+    eval_summary_ok = isinstance(eval_checks, dict) and eval_checks.get("failed") == 0
+    return bool_checks_ok and eval_summary_ok
 
 
 def _inspect_wheel(wheel: Path) -> None:

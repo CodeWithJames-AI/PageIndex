@@ -15703,6 +15703,27 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertTrue(all(dependency_pins.values()))
         self.assertEqual(manifest["dependency_policy"], {"direct_dependencies_pinned": True, "unpinned": []})
 
+    def test_release_smoke_ok_requires_all_release_checks(self):
+        from scripts.release_smoke import _release_checks_ok
+
+        checks = {
+            "wheel_built": True,
+            "console_script": True,
+            "manifest_generated": True,
+            "dependency_inventory": True,
+            "dependency_pins": True,
+            "wheel_content_policy": True,
+            "wheel_record_hashes": True,
+            "eval_command": True,
+            "eval_checks": {"failed": 0},
+        }
+        bad_record = {**checks, "wheel_record_hashes": False}
+        bad_eval_summary = {**checks, "eval_checks": {"failed": 1}}
+
+        self.assertEqual(_release_checks_ok(checks), True)
+        self.assertEqual(_release_checks_ok(bad_record), False)
+        self.assertEqual(_release_checks_ok(bad_eval_summary), False)
+
     def test_deployment_check_reports_readiness_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "deployment-root"

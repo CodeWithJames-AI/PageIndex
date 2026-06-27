@@ -279,11 +279,17 @@ def _run_strict_http_eval(
         provider_thread.start()
         old_env = {
             name: os.environ.get(name)
-            for name in ("PAGEINDEX_LLM_BASE_URL", "PAGEINDEX_LLM_API_KEY", "PAGEINDEX_LLM_MODEL")
+            for name in (
+                "PAGEINDEX_LLM_BASE_URL",
+                "PAGEINDEX_LLM_API_KEY",
+                "PAGEINDEX_LLM_MODEL",
+                "PAGEINDEX_EVAL_WORKSPACE_PROVIDER_KEY",
+            )
         }
         os.environ["PAGEINDEX_LLM_BASE_URL"] = f"http://127.0.0.1:{provider_server.server_port}/v1"
         os.environ["PAGEINDEX_LLM_API_KEY"] = "eval-secret-key"
         os.environ["PAGEINDEX_LLM_MODEL"] = "pageindex-eval-provider"
+        os.environ["PAGEINDEX_EVAL_WORKSPACE_PROVIDER_KEY"] = "eval-workspace-secret-key"
         try:
             provider_completion = _http_post_json(
                 f"{base}/chat/completions",
@@ -308,6 +314,18 @@ def _run_strict_http_eval(
                 },
                 headers=headers,
             )
+            workspace_provider_saved = _http_post_json(
+                f"{base}/provider-config",
+                {
+                    "base_url": f"http://127.0.0.1:{provider_server.server_port}/v1",
+                    "model": "pageindex-eval-workspace-provider",
+                    "api_key_env_var": "PAGEINDEX_EVAL_WORKSPACE_PROVIDER_KEY",
+                    "timeout_seconds": 2.0,
+                },
+                headers=headers,
+            )
+            workspace_provider_check = _http_get_json(f"{base}/provider-config/check", headers=headers)
+            workspace_provider_probe = _http_post_json(f"{base}/provider-config/probe", {}, headers=headers)
         finally:
             for name, value in old_env.items():
                 if value is None:
@@ -319,6 +337,7 @@ def _run_strict_http_eval(
             provider_thread.join(timeout=5)
         provider_docs = {citation["doc_id"] for citation in provider_completion.get("pageindex", {}).get("citations", [])}
         provider_request = provider_server.requests[0] if provider_server.requests else {}
+        provider_probe_request = provider_server.requests[2] if len(provider_server.requests) > 2 else {}
         provider_prompt = "\n".join(
             message.get("content", "")
             for message in provider_request.get("payload", {}).get("messages", [])
@@ -336,6 +355,21 @@ def _run_strict_http_eval(
             cited_docs=sorted(provider_docs),
             provider_request_count=len(provider_server.requests),
             run_id=provider_completion.get("pageindex", {}).get("run_id"),
+        )
+
+        checks["workspace_provider_probe"] = _check(
+            workspace_provider_saved.get("api_key_configured") is True
+            and workspace_provider_check.get("ok") is True
+            and workspace_provider_probe.get("ok") is True
+            and workspace_provider_probe.get("probe", {}).get("ok") is True
+            and workspace_provider_probe.get("probe", {}).get("duration_ms", -1) >= 0
+            and provider_probe_request.get("authorization") == "Bearer eval-workspace-secret-key"
+            and provider_probe_request.get("payload", {}).get("model") == "pageindex-eval-workspace-provider"
+            and provider_probe_request.get("payload", {}).get("max_tokens") == 3,
+            model=workspace_provider_probe.get("probe", {}).get("model"),
+            duration_ms=workspace_provider_probe.get("probe", {}).get("duration_ms"),
+            answer_chars=workspace_provider_probe.get("probe", {}).get("answer_chars"),
+            provider_request_count=len(provider_server.requests),
         )
 
         provider_stream_chunks = [json.loads(event) for event in provider_stream_events if event != "[DONE]"]

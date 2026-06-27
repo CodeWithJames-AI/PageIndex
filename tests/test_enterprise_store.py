@@ -15240,6 +15240,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(report["checks"]["strict_http_audit_integrity"]["ok"], True)
             self.assertEqual(report["checks"]["chat_completions_api"]["ok"], True)
             self.assertEqual(report["checks"]["provider_chat_completions_api"]["ok"], True)
+            self.assertEqual(report["checks"]["workspace_provider_probe"]["ok"], True)
+            self.assertGreaterEqual(report["checks"]["workspace_provider_probe"]["duration_ms"], 0)
             self.assertEqual(report["checks"]["provider_streaming_chat_completions_api"]["ok"], True)
             self.assertGreater(report["checks"]["provider_streaming_chat_completions_api"]["streamed_chars"], 0)
             self.assertEqual(report["checks"]["streaming_chat_completions_api"]["ok"], True)
@@ -15249,6 +15251,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("pit_", serialized_report)
             self.assertNotIn("Bearer ", serialized_report)
             self.assertNotIn("Authorization", serialized_report)
+            self.assertNotIn("eval-secret-key", serialized_report)
+            self.assertNotIn("eval-workspace-secret-key", serialized_report)
 
     def test_enterprise_eval_cli_uses_isolated_root_from_any_cwd(self):
         with tempfile.TemporaryDirectory() as tmp:

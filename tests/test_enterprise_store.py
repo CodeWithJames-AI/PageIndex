@@ -2275,6 +2275,67 @@ class EnterpriseStoreTest(unittest.TestCase):
                 store.add_workspace_member(workspace_id, "vivi", "viewer", actor_user_id="alice")
                 store.rename_conversation(viewer["id"], "vivi", "Viewer rename")
 
+    def test_conversation_generates_title_from_first_default_chat_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "generated-title.txt"
+            source.write_text("Generated title evidence for renewal risk.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Generated title memo")
+            default_conversation = store.create_conversation(workspace_id, "alice")
+            custom_conversation = store.create_conversation(workspace_id, "alice", title="Pinned title")
+            sentinel_custom_conversation = store.create_conversation(workspace_id, "alice", title="New conversation")
+            renamed_sentinel_conversation = store.create_conversation(workspace_id, "alice", title="Temporary title")
+            renamed_sentinel_conversation = store.rename_conversation(
+                renamed_sentinel_conversation["id"],
+                "alice",
+                "New conversation",
+            )
+
+            first = store.chat_message(
+                default_conversation["id"],
+                "alice",
+                "   summarize renewal risk for the enterprise account?   ",
+                limit=4,
+            )
+            second = store.chat_message(default_conversation["id"], "alice", "what changed next", limit=4)
+            custom = store.chat_message(custom_conversation["id"], "alice", "should keep title", limit=4)
+            sentinel_custom = store.chat_message(
+                sentinel_custom_conversation["id"],
+                "alice",
+                "do not rename this explicit default-looking title",
+                limit=4,
+            )
+            renamed_sentinel = store.chat_message(
+                renamed_sentinel_conversation["id"],
+                "alice",
+                "do not rename this manual rename either",
+                limit=4,
+            )
+            listed = store.list_conversations(workspace_id, "alice")
+
+            default_listed = next(item for item in listed if item["id"] == default_conversation["id"])
+            custom_listed = next(item for item in listed if item["id"] == custom_conversation["id"])
+            sentinel_custom_listed = next(item for item in listed if item["id"] == sentinel_custom_conversation["id"])
+            renamed_sentinel_listed = next(item for item in listed if item["id"] == renamed_sentinel_conversation["id"])
+
+            self.assertEqual(default_conversation["title"], "New conversation")
+            self.assertEqual(default_conversation["auto_title_pending"], 1)
+            self.assertEqual(first["conversation"]["title"], "Summarize renewal risk for the enterprise account")
+            self.assertEqual(first["conversation"]["auto_title_pending"], 0)
+            self.assertEqual(second["conversation"]["title"], "Summarize renewal risk for the enterprise account")
+            self.assertEqual(default_listed["title"], "Summarize renewal risk for the enterprise account")
+            self.assertEqual(custom["conversation"]["title"], "Pinned title")
+            self.assertEqual(custom_listed["title"], "Pinned title")
+            self.assertEqual(sentinel_custom["conversation"]["title"], "New conversation")
+            self.assertEqual(sentinel_custom["conversation"]["auto_title_pending"], 0)
+            self.assertEqual(sentinel_custom_listed["title"], "New conversation")
+            self.assertEqual(renamed_sentinel["conversation"]["title"], "New conversation")
+            self.assertEqual(renamed_sentinel["conversation"]["auto_title_pending"], 0)
+            self.assertEqual(renamed_sentinel_listed["title"], "New conversation")
+
     def test_document_suggested_questions_respect_access_and_keywords(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -9628,7 +9689,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Stateful stream memo")
-            conversation = store.create_conversation(workspace_id, "alice", title="Stateful stream")
+            conversation = store.create_conversation(workspace_id, "alice")
             token = store.create_api_token(workspace_id, "alice", name="chat-writer", scopes=["read", "write"])["token"]
             store.close()
 
@@ -9670,6 +9731,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("Stateful stream memo", text)
             self.assertEqual(finish["choices"][0]["finish_reason"], "stop")
             self.assertEqual(finish["pageindex"]["conversation"]["id"], conversation["id"])
+            self.assertEqual(finish["pageindex"]["conversation"]["title"], "Stateful stream retention")
             self.assertEqual(finish["pageindex"]["conversation"]["history_user_message_count"], 0)
             self.assertEqual([row["role"] for row in rows], ["user", "assistant"])
             self.assertEqual(rows[0]["content"], "stateful stream retention")

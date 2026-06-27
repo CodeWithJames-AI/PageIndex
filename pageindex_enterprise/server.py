@@ -2103,6 +2103,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 query = chat_result["retrieval"]["query"]
                 conversation_metadata = {
                     "id": chat_result["conversation"]["id"],
+                    "title": chat_result["conversation"]["title"],
                     "source_set_id": chat_result["conversation"].get("source_set_id"),
                     "folder_id": chat_result["conversation"].get("folder_id"),
                     "user_message_id": chat_result["user_message"]["id"],

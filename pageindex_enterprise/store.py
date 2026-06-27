@@ -29,6 +29,8 @@ DOCUMENT_ACCESS_MODES = {"workspace", "restricted"}
 DOCUMENT_ACCESS_GRANT_ROLES = {"read", "write"}
 API_TOKEN_SCOPES = ("read", "write", "audit")
 MAX_CONVERSATION_MESSAGE_CHARS = 4000
+MAX_CONVERSATION_TITLE_CHARS = 72
+DEFAULT_CONVERSATION_TITLE = "New conversation"
 MAX_LEGAL_HOLD_REASON_CHARS = 500
 CHAT_TRACE_QUERY = "[conversation message redacted]"
 QUESTION_SUGGESTION_STOPWORDS = {
@@ -1010,6 +1012,7 @@ class EnterpriseStore:
               workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
               created_by TEXT NOT NULL,
               title TEXT NOT NULL,
+              auto_title_pending INTEGER NOT NULL DEFAULT 0,
               source_set_id TEXT REFERENCES query_source_sets(id) ON DELETE SET NULL,
               folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
               created_at TEXT NOT NULL,
@@ -1184,6 +1187,7 @@ class EnterpriseStore:
                 "line_count": "INTEGER",
             },
             "conversations": {
+                "auto_title_pending": "INTEGER NOT NULL DEFAULT 0",
                 "source_set_id": "TEXT REFERENCES query_source_sets(id) ON DELETE SET NULL",
                 "folder_id": "TEXT REFERENCES folders(id) ON DELETE SET NULL",
                 "archived_at": "TEXT",
@@ -3157,7 +3161,8 @@ class EnterpriseStore:
             "conversations.jsonl": _rows(
                 self.conn.execute(
                     """
-                    SELECT id, workspace_id, created_by, title, source_set_id, folder_id, created_at, updated_at, archived_at
+                    SELECT id, workspace_id, created_by, title, auto_title_pending,
+                           source_set_id, folder_id, created_at, updated_at, archived_at
                     FROM conversations
                     WHERE workspace_id = ?
                     ORDER BY created_at, id
@@ -5418,7 +5423,8 @@ class EnterpriseStore:
     ) -> dict[str, Any]:
         actor_user_id = actor_user_id.strip()
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_WRITE_ROLES)
-        title = (title or "New conversation").strip() or "New conversation"
+        auto_title_pending = not (isinstance(title, str) and title.strip())
+        title = (title or DEFAULT_CONVERSATION_TITLE).strip() or DEFAULT_CONVERSATION_TITLE
         normalized_source_set_id = _optional_source_set_id(source_set_id)
         normalized_folder_id = _optional_folder_id(folder_id)
         if normalized_source_set_id and normalized_folder_id:
@@ -5431,10 +5437,22 @@ class EnterpriseStore:
         now = _now()
         self.conn.execute(
             """
-            INSERT INTO conversations (id, workspace_id, created_by, title, source_set_id, folder_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO conversations (
+              id, workspace_id, created_by, title, auto_title_pending, source_set_id, folder_id, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (conversation_id, workspace_id, actor_user_id, title, normalized_source_set_id, normalized_folder_id, now, now),
+            (
+                conversation_id,
+                workspace_id,
+                actor_user_id,
+                title,
+                int(auto_title_pending),
+                normalized_source_set_id,
+                normalized_folder_id,
+                now,
+                now,
+            ),
         )
         self._commit()
         return {
@@ -5442,6 +5460,7 @@ class EnterpriseStore:
             "workspace_id": workspace_id,
             "created_by": actor_user_id,
             "title": title,
+            "auto_title_pending": int(auto_title_pending),
             "source_set_id": normalized_source_set_id,
             "folder_id": normalized_folder_id,
             "created_at": now,
@@ -5544,7 +5563,7 @@ class EnterpriseStore:
             self.conn.execute(
                 """
                 UPDATE conversations
-                SET title = ?, updated_at = ?
+                SET title = ?, auto_title_pending = 0, updated_at = ?
                 WHERE id = ?
                 """,
                 (title, now, conversation["id"]),
@@ -6047,10 +6066,17 @@ class EnterpriseStore:
                     assistant_message["created_at"],
                 ),
             )
-            self.conn.execute(
-                "UPDATE conversations SET updated_at = ? WHERE id = ?",
-                (assistant_message["created_at"], conversation["id"]),
+            generated_title = (
+                _conversation_generated_title(message)
+                if not history and bool(conversation.get("auto_title_pending"))
+                else conversation["title"]
             )
+            self.conn.execute(
+                "UPDATE conversations SET title = ?, auto_title_pending = 0, updated_at = ? WHERE id = ?",
+                (generated_title, assistant_message["created_at"], conversation["id"]),
+            )
+            conversation["title"] = generated_title
+            conversation["auto_title_pending"] = 0
             conversation["updated_at"] = assistant_message["created_at"]
         return {
             "conversation": conversation,
@@ -7397,3 +7423,16 @@ def _markdown_fence(value: str) -> str:
 def _conversation_query_text(message: str, history: list[str]) -> str:
     parts = [part.strip() for part in [*history[-3:], message] if part and part.strip()]
     return " ".join(parts)[-2000:]
+
+
+def _conversation_generated_title(message: str) -> str:
+    title = " ".join(str(message).split()).strip(" \t\r\n.,;:!?")
+    if not title:
+        return DEFAULT_CONVERSATION_TITLE
+    title = title[:1].upper() + title[1:]
+    if len(title) <= MAX_CONVERSATION_TITLE_CHARS:
+        return title
+    truncated = title[:MAX_CONVERSATION_TITLE_CHARS].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0].rstrip(".,;:!?")
+    return truncated or title[:MAX_CONVERSATION_TITLE_CHARS].rstrip(".,;:!?")

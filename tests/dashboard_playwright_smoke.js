@@ -566,6 +566,21 @@ async function waitForAnyText(page, selector, expectedValues) {
     await page.locator("[data-add-query-doc-id]").first().click();
     await waitForText(page, "#queryScopeLabel", `Doc: ${expectedDocument}`);
 
+    await page.fill("#sourceSetNameInput", "Browser source set");
+    await page.fill("#sourceSetDescriptionInput", "Browser scoped query");
+    const saveSourceSetResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/query-source-sets") && response.request().method() === "POST"
+    );
+    await page.click("#saveSourceSetButton");
+    const sourceSetResponse = await saveSourceSetResponse;
+    const sourceSet = await sourceSetResponse.json();
+    await waitForText(page, "#status", "Source set saved.");
+    await waitForText(page, "#sourceSetList", "Browser source set");
+    await waitForText(page, "#queryScopeLabel", "Set: Browser source set");
+
+    await page.click(`[data-use-source-set-id="${sourceSet.id}"]`);
+    await waitForText(page, "#queryScopeLabel", "Set: Browser source set");
+
     await page.fill("#queryInput", query);
     await page.fill("#hintInput", "");
     const queryResponse = page.waitForResponse(
@@ -575,7 +590,7 @@ async function waitForAnyText(page, selector, expectedValues) {
         }
         try {
           const payload = JSON.parse(response.request().postData() || "{}");
-          return Array.isArray(payload.doc_ids) && payload.doc_ids.length === 1;
+          return payload.source_set_id === sourceSet.id && !Object.prototype.hasOwnProperty.call(payload, "doc_ids");
         } catch (_error) {
           return false;
         }
@@ -592,6 +607,7 @@ async function waitForAnyText(page, selector, expectedValues) {
 
     assert(answer.includes(expectedAnswer), `answer panel did not include expected text: ${expectedAnswer}`);
     assert(citations.includes(expectedDocument), "citation panel did not render expected document");
+    assert(trace.scope && trace.scope.source_set_id === sourceSet.id, "trace did not include source set scope");
     assert(trace.scope && trace.scope.query_tree, "trace did not include query tree scope");
     assert(trace.scope.hybrid_policy, "trace did not include hybrid policy scope");
     assert(Array.isArray(trace.evidence) && trace.evidence.length > 0, "trace did not include evidence");
@@ -612,6 +628,16 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#status", "Query trace loaded.");
     const historicalTrace = JSON.parse((await page.textContent("#traceText")) || "{}");
     assert(historicalTrace.id === trace.id, "loaded query run trace did not match the selected run");
+
+    page.once("dialog", async (dialog) => {
+      await dialog.accept();
+    });
+    const deleteSourceSetResponse = page.waitForResponse(
+      (response) => response.url().includes(`/query-source-sets/${sourceSet.id}`) && response.request().method() === "DELETE"
+    );
+    await page.click(`[data-delete-source-set-id="${sourceSet.id}"]`);
+    await deleteSourceSetResponse;
+    await waitForText(page, "#status", "Source set deleted.");
 
     if (screenshotPath) {
       await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -645,6 +671,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       readinessExercised: true,
       providerExercised: true,
       queryHistoryExercised: true,
+      sourceSetExercised: true,
       screenshotPath: screenshotPath || null
     }));
   } finally {

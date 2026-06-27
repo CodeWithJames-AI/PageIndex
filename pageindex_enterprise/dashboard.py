@@ -628,6 +628,18 @@ DASHBOARD_HTML = """<!doctype html>
             </div>
           </section>
           <section>
+            <h2 class="section-title">Source sets</h2>
+            <div class="stack">
+              <input id="sourceSetNameInput" value="" placeholder="source set name" aria-label="Source set name">
+              <input id="sourceSetDescriptionInput" value="" placeholder="description" aria-label="Source set description">
+              <div class="provider-actions">
+                <button id="refreshSourceSetsButton" class="secondary" type="button">Refresh</button>
+                <button id="saveSourceSetButton" type="button">Save scope</button>
+              </div>
+              <div id="sourceSetList" class="member-list muted">No source sets loaded.</div>
+            </div>
+          </section>
+          <section>
             <h2 class="section-title">Documents</h2>
             <div id="documentList" class="doc-list muted">No documents loaded.</div>
             <div id="documentAccessPanel" class="muted" style="margin-top:12px">No document access loaded.</div>
@@ -805,11 +817,17 @@ DASHBOARD_HTML = """<!doctype html>
     const queryRetentionDaysInput = document.getElementById("queryRetentionDaysInput");
     const queryLegalHoldReasonInput = document.getElementById("queryLegalHoldReasonInput");
     const queryRetentionSummary = document.getElementById("queryRetentionSummary");
+    const sourceSetNameInput = document.getElementById("sourceSetNameInput");
+    const sourceSetDescriptionInput = document.getElementById("sourceSetDescriptionInput");
+    const sourceSetList = document.getElementById("sourceSetList");
     let activeConversationId = "";
     let activeFolderId = "";
     let activeQueryDocs = [];
+    let activeQuerySourceSetId = "";
+    let activeQuerySourceSetName = "";
     let workspaceExportUrl = "";
     let currentFolders = [];
+    let currentSourceSets = [];
 
     function headers() {
       return {
@@ -846,6 +864,10 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function renderQueryScope() {
+      if (activeQuerySourceSetId) {
+        queryScopeLabel.textContent = `Set: ${activeQuerySourceSetName || activeQuerySourceSetId} (${activeQueryDocs.length} docs)`;
+        return;
+      }
       if (!activeQueryDocs.length) {
         queryScopeLabel.textContent = "Workspace";
         return;
@@ -872,6 +894,8 @@ DASHBOARD_HTML = """<!doctype html>
 
     function setQueryDocumentScope(docId, docName) {
       const queryDoc = normalizeQueryDocument(docId, docName);
+      activeQuerySourceSetId = "";
+      activeQuerySourceSetName = "";
       activeQueryDocs = queryDoc ? [queryDoc] : [];
       renderQueryScope();
       queryInput.focus();
@@ -884,6 +908,8 @@ DASHBOARD_HTML = """<!doctype html>
         setStatus("Document not found.", "warn");
         return;
       }
+      activeQuerySourceSetId = "";
+      activeQuerySourceSetName = "";
       const existingIndex = activeQueryDocs.findIndex((doc) => doc.id === queryDoc.id);
       if (existingIndex >= 0) {
         activeQueryDocs = activeQueryDocs.map((doc, index) => index === existingIndex ? { ...doc, name: queryDoc.name || doc.name } : doc);
@@ -899,6 +925,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function clearQueryScope() {
+      activeQuerySourceSetId = "";
+      activeQuerySourceSetName = "";
       setQueryDocumentScope("", "");
     }
 
@@ -934,6 +962,8 @@ DASHBOARD_HTML = """<!doctype html>
       const query = payload.prompt || payload.query || params.get("query") || "";
       const docId = payload.doc_id || payload.docId || params.get("doc_id") || "";
       const docName = payload.doc_name || payload.docName || params.get("doc_name") || docId;
+      const sourceSetId = payload.source_set_id || payload.sourceSetId || params.get("source_set_id") || "";
+      const sourceSetName = payload.source_set_name || payload.sourceSetName || params.get("source_set_name") || sourceSetId;
       const payloadDocIds = Array.isArray(payload.doc_ids) ? payload.doc_ids : (Array.isArray(payload.docIds) ? payload.docIds : []);
       const payloadDocNames = Array.isArray(payload.doc_names) ? payload.doc_names : (Array.isArray(payload.docNames) ? payload.docNames : []);
       const repeatedDocIds = params.getAll("doc_id").map((value) => value.trim()).filter(Boolean);
@@ -942,7 +972,14 @@ DASHBOARD_HTML = """<!doctype html>
       if (query) {
         queryInput.value = query;
       }
-      if (docIds.length) {
+      if (sourceSetId) {
+        activeQuerySourceSetId = String(sourceSetId).trim();
+        activeQuerySourceSetName = String(sourceSetName || sourceSetId).trim();
+        activeQueryDocs = [];
+        renderQueryScope();
+      } else if (docIds.length) {
+        activeQuerySourceSetId = "";
+        activeQuerySourceSetName = "";
         activeQueryDocs = docIds.map((id, index) => normalizeQueryDocument(id, payloadDocNames[index] || id)).filter(Boolean);
         renderQueryScope();
       } else if (docId) {
@@ -950,7 +987,7 @@ DASHBOARD_HTML = """<!doctype html>
       } else {
         renderQueryScope();
       }
-      if (query || docId || docIds.length) {
+      if (query || docId || docIds.length || sourceSetId) {
         setStatus("Query prefilled.", "ok");
       }
     }
@@ -1039,6 +1076,60 @@ DASHBOARD_HTML = """<!doctype html>
       documentList.querySelectorAll("[data-delete-doc-id]").forEach((button) => {
         button.addEventListener("click", () => deleteDocument(button.dataset.deleteDocId).catch((error) => setStatus(error.message, "error")));
       });
+    }
+
+    function sourceSetDocuments(sourceSet) {
+      const docs = Array.isArray(sourceSet.documents) ? sourceSet.documents : [];
+      if (docs.length) {
+        return docs.map((doc) => normalizeQueryDocument(doc.id, doc.name)).filter(Boolean);
+      }
+      return (sourceSet.doc_ids || []).map((docId) => normalizeQueryDocument(docId, docId)).filter(Boolean);
+    }
+
+    function renderSourceSets(sourceSets) {
+      currentSourceSets = sourceSets || [];
+      if (!currentSourceSets.length) {
+        sourceSetList.className = "member-list muted";
+        sourceSetList.textContent = "No source sets loaded.";
+        return;
+      }
+      sourceSetList.className = "member-list";
+      sourceSetList.innerHTML = currentSourceSets.map((sourceSet) => {
+        const docs = sourceSetDocuments(sourceSet);
+        const preview = docs.slice(0, 3).map((doc) => doc.name || doc.id).join(", ");
+        return `
+          <article class="member">
+            <strong>${escapeHtml(sourceSet.name)}</strong>
+            <div class="muted">${escapeHtml(sourceSet.id)} | ${docs.length} docs</div>
+            ${sourceSet.description ? `<div class="muted">${escapeHtml(sourceSet.description)}</div>` : ""}
+            ${preview ? `<div class="muted">${escapeHtml(preview)}${docs.length > 3 ? ", ..." : ""}</div>` : ""}
+            <div class="doc-actions">
+              <button class="secondary" type="button" data-use-source-set-id="${escapeHtml(sourceSet.id)}">Use</button>
+              <button class="secondary" type="button" data-delete-source-set-id="${escapeHtml(sourceSet.id)}">Delete</button>
+            </div>
+          </article>
+        `;
+      }).join("");
+      sourceSetList.querySelectorAll("[data-use-source-set-id]").forEach((button) => {
+        button.addEventListener("click", () => useQuerySourceSet(button.dataset.useSourceSetId));
+      });
+      sourceSetList.querySelectorAll("[data-delete-source-set-id]").forEach((button) => {
+        button.addEventListener("click", () => deleteQuerySourceSet(button.dataset.deleteSourceSetId).catch((error) => setStatus(error.message, "error")));
+      });
+    }
+
+    function useQuerySourceSet(sourceSetId) {
+      const sourceSet = currentSourceSets.find((item) => item.id === sourceSetId);
+      if (!sourceSet) {
+        setStatus("Source set not found.", "warn");
+        return;
+      }
+      activeQuerySourceSetId = sourceSet.id;
+      activeQuerySourceSetName = sourceSet.name || sourceSet.id;
+      activeQueryDocs = sourceSetDocuments(sourceSet);
+      renderQueryScope();
+      queryInput.focus();
+      setStatus(`Query scoped to ${activeQuerySourceSetName}.`, "ok");
     }
 
     function renderDocumentAccess(docId, access) {
@@ -1754,6 +1845,64 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Documents refreshed.", "ok");
     }
 
+    async function refreshQuerySourceSets(options = {}) {
+      if (!options.quiet) {
+        setStatus("Refreshing source sets...");
+      }
+      const payload = await api("/query-source-sets");
+      renderSourceSets(payload.source_sets || []);
+      if (!options.quiet) {
+        setStatus("Source sets refreshed.", "ok");
+      }
+    }
+
+    async function saveQuerySourceSet() {
+      const name = sourceSetNameInput.value.trim();
+      if (!name) {
+        setStatus("Source set name is required.", "warn");
+        return;
+      }
+      const docIds = activeQueryDocs.map((doc) => doc.id);
+      if (!docIds.length) {
+        setStatus("Choose one or more scoped documents first.", "warn");
+        return;
+      }
+      setStatus("Saving source set...");
+      const payload = await api("/query-source-sets", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          description: sourceSetDescriptionInput.value.trim(),
+          doc_ids: docIds
+        })
+      });
+      sourceSetNameInput.value = "";
+      sourceSetDescriptionInput.value = "";
+      renderSourceSets([payload, ...currentSourceSets.filter((sourceSet) => sourceSet.id !== payload.id)]);
+      useQuerySourceSet(payload.id);
+      setStatus("Source set saved.", "ok");
+    }
+
+    async function deleteQuerySourceSet(sourceSetId) {
+      if (!sourceSetId) {
+        setStatus("Source set not found.", "warn");
+        return;
+      }
+      if (!window.confirm("Delete this source set?")) {
+        setStatus("Source set delete cancelled.", "warn");
+        return;
+      }
+      setStatus("Deleting source set...");
+      const result = await api(`/query-source-sets/${encodeURIComponent(sourceSetId)}`, {
+        method: "DELETE"
+      });
+      await refreshQuerySourceSets({ quiet: true });
+      if (activeQuerySourceSetId === sourceSetId) {
+        clearQueryScope();
+      }
+      setStatus(result.deleted ? "Source set deleted." : "Source set not found.", result.deleted ? "ok" : "warn");
+    }
+
     async function loadDocumentVersions(docId) {
       if (!docId) {
         setStatus("Document not found.", "warn");
@@ -2192,6 +2341,12 @@ DASHBOARD_HTML = """<!doctype html>
         virtualNodeList.textContent = "Virtual nodes unavailable.";
       }
       await refreshDocuments();
+      try {
+        await refreshQuerySourceSets({ quiet: true });
+      } catch (error) {
+        sourceSetList.className = "member-list muted";
+        sourceSetList.textContent = "Source sets unavailable.";
+      }
       await refreshConversations();
       try {
         await refreshMembers();
@@ -3271,7 +3426,9 @@ DASHBOARD_HTML = """<!doctype html>
       const hint = hintInput.value.trim();
       const body = { query: queryInput.value.trim(), expert_hints: hint ? [hint] : [] };
       const scopedDocIds = activeQueryDocs.map((doc) => doc.id);
-      if (scopedDocIds.length) {
+      if (activeQuerySourceSetId) {
+        body.source_set_id = activeQuerySourceSetId;
+      } else if (scopedDocIds.length) {
         body.doc_ids = scopedDocIds;
       }
       const payload = await api("/query", {
@@ -3482,6 +3639,8 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("importButton").addEventListener("click", () => importStructure().catch((error) => setStatus(error.message, "error")));
     document.getElementById("queryButton").addEventListener("click", () => queryCorpus().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearQueryScopeButton").addEventListener("click", () => clearQueryScope());
+    document.getElementById("refreshSourceSetsButton").addEventListener("click", () => refreshQuerySourceSets().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("saveSourceSetButton").addEventListener("click", () => saveQuerySourceSet().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshQueryRunsButton").addEventListener("click", () => refreshQueryRuns().catch((error) => setStatus(error.message, "error")));
     document.getElementById("exportQueryRunsButton").addEventListener("click", () => exportQueryRuns().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshQueryRetentionButton").addEventListener("click", () => refreshQueryRetention().catch((error) => setStatus(error.message, "error")));

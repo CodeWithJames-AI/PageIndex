@@ -1598,6 +1598,13 @@ class EnterpriseStore:
         if previous_role is None:
             self._enforce_workspace_quota(workspace_id, members_delta=1)
         role_downgraded = previous_role is not None and WORKSPACE_ROLE_RANK[role] < WORKSPACE_ROLE_RANK[previous_role]
+        invitation_email = None
+        if "@" in user_id:
+            try:
+                invitation_email = _normalize_invitation_email(user_id)
+            except ValueError:
+                invitation_email = None
+        updated_at = _now()
         with self._atomic():
             self.conn.execute(
                 """
@@ -1605,11 +1612,21 @@ class EnterpriseStore:
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(workspace_id, user_id) DO UPDATE SET role = excluded.role
                 """,
-                (workspace_id, user_id, role, _now()),
+                (workspace_id, user_id, role, updated_at),
             )
             api_scope_update_count = 0
             document_write_grant_downgrade_count = 0
             folder_write_grant_downgrade_count = 0
+            expired_invitation_count = 0
+            fulfilled_invitation_count = 0
+            if invitation_email is not None:
+                expired_invitation_count = self._expire_workspace_invitations(workspace_id, email=invitation_email)
+                fulfilled_invitation_count = self._fulfill_workspace_invitations(
+                    workspace_id,
+                    invitation_email,
+                    accepted_by=invitation_email,
+                    accepted_at=updated_at,
+                )
             if role_downgraded:
                 token_rows = self.conn.execute(
                     "SELECT id, scopes_json FROM api_tokens WHERE workspace_id = ? AND user_id = ?",
@@ -1679,6 +1696,8 @@ class EnterpriseStore:
                         "api_scope_update_count": api_scope_update_count,
                         "document_write_grant_downgrade_count": document_write_grant_downgrade_count,
                         "folder_write_grant_downgrade_count": folder_write_grant_downgrade_count,
+                        "expired_invitation_count": expired_invitation_count,
+                        "fulfilled_invitation_count": fulfilled_invitation_count,
                     },
                 )
 
@@ -1874,6 +1893,24 @@ class EnterpriseStore:
             WHERE {' AND '.join(where)}
             """,
             args,
+        )
+        return max(0, cursor.rowcount)
+
+    def _fulfill_workspace_invitations(
+        self,
+        workspace_id: str,
+        email: str,
+        *,
+        accepted_by: str,
+        accepted_at: str,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE workspace_invitations
+            SET status = 'accepted', accepted_by = ?, accepted_at = ?
+            WHERE workspace_id = ? AND email = ? AND status = 'pending'
+            """,
+            (accepted_by, accepted_at, workspace_id, email),
         )
         return max(0, cursor.rowcount)
 

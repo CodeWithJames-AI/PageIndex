@@ -18,6 +18,7 @@ from typing import Any
 
 PACKAGE_NAME = "pageindex_enterprise_cleanroom"
 VERSION = "0.1.0"
+SOURCE_DIRTY_PATH_LIMIT = 50
 
 
 def main() -> None:
@@ -141,6 +142,8 @@ def run_release_smoke(
                 "source_clean_required": require_clean_source,
                 "source_commit": manifest["source"]["commit"],
                 "source_dirty": manifest["source"]["dirty"],
+                "source_dirty_count": manifest["source"]["dirty_count"],
+                "source_dirty_paths_truncated": manifest["source"]["dirty_paths_truncated"],
                 "wheel_content_policy_ok": manifest["artifacts"][0]["content"]["ok"],
                 "wheel_record_hashes_valid": manifest["artifacts"][0]["record"]["ok"],
                 "wheel_sha256": manifest["artifacts"][0]["sha256"],
@@ -357,11 +360,22 @@ def _requirement_specifier(rest: str) -> str | None:
 
 
 def _source_metadata(repo_root: Path) -> dict[str, Any]:
+    dirty_paths = _git_status_entries(repo_root)
     return {
         "commit": _git_output(repo_root, "rev-parse", "HEAD"),
-        "dirty": bool(_git_output(repo_root, "status", "--short")),
+        "dirty": bool(dirty_paths),
+        "dirty_count": len(dirty_paths),
+        "dirty_paths": dirty_paths[:SOURCE_DIRTY_PATH_LIMIT],
+        "dirty_paths_truncated": len(dirty_paths) > SOURCE_DIRTY_PATH_LIMIT,
         "remote": _git_output(repo_root, "config", "--get", "remote.origin.url"),
     }
+
+
+def _git_status_entries(repo_root: Path) -> list[str]:
+    output = _git_output(repo_root, "status", "--short")
+    if output is None:
+        return []
+    return [line for line in output.splitlines() if line.strip()]
 
 
 def _git_output(repo_root: Path, *args: str) -> str | None:

@@ -170,6 +170,9 @@ class EnterpriseStoreTest(unittest.TestCase):
 
     def test_workspace_folder_lifecycle_cli_renames_and_deletes_without_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "move-cli.txt"
+            source.write_text("CLI document move evidence.", encoding="utf-8")
             root = Path(tmp) / "workspace"
             repo_root = Path(__file__).resolve().parents[1]
             env = os.environ.copy()
@@ -215,6 +218,26 @@ class EnterpriseStoreTest(unittest.TestCase):
                 text=True,
                 check=True,
             ).stdout.strip()
+            doc_id = subprocess.run(
+                [
+                    *base,
+                    "ingest-file",
+                    str(source),
+                    "--workspace-id",
+                    "ws_folder_cli",
+                    "--user-id",
+                    "alice",
+                    "--folder-id",
+                    folder_id,
+                    "--name",
+                    "Move CLI",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
             denied = subprocess.run(
                 [*base, "rename-folder", folder_id, "Blocked", "--workspace-id", "ws_folder_cli", "--user-id", "vera"],
                 cwd=repo_root,
@@ -235,6 +258,36 @@ class EnterpriseStoreTest(unittest.TestCase):
                         "--user-id",
                         "alice",
                     ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            moved_doc = json.loads(
+                subprocess.run(
+                    [
+                        *base,
+                        "move-doc",
+                        doc_id,
+                        "--folder-id",
+                        target_folder_id,
+                        "--workspace-id",
+                        "ws_folder_cli",
+                        "--user-id",
+                        "alice",
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            cleared_doc = json.loads(
+                subprocess.run(
+                    [*base, "move-doc", doc_id, "--clear-folder", "--workspace-id", "ws_folder_cli", "--user-id", "alice"],
                     cwd=repo_root,
                     env=env,
                     capture_output=True,
@@ -275,6 +328,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             store = EnterpriseStore(root)
             try:
                 folders = store.list_folders("ws_folder_cli")
+                documents = store.list_documents(workspace_id="ws_folder_cli", actor_user_id="alice")
             finally:
                 store.close()
 
@@ -282,10 +336,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("workspace role denied", denied.stderr)
             self.assertNotIn("Traceback", denied.stderr)
             self.assertEqual(moved["path"], "/Target/Reports")
+            self.assertEqual(moved_doc["document"]["folder_id"], target_folder_id)
+            self.assertIsNone(cleared_doc["document"]["folder_id"])
             self.assertEqual(renamed["path"], "/Target/Reports 2026")
             self.assertEqual(deleted, {"deleted": True})
             self.assertEqual(target_deleted, {"deleted": True})
             self.assertEqual(folders, [])
+            self.assertIsNone(documents[0]["folder_id"])
 
     def test_workspace_member_lifecycle_is_owner_admin_audited_and_invalidates_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2178,6 +2235,64 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(rename_events[0]["details"]["previous_name_length"], len("Original memo"))
             self.assertNotIn("Original memo", serialized_events)
             self.assertNotIn("Renamed memo", serialized_events)
+
+    def test_move_document_updates_folder_without_reindexing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "move-doc.txt"
+            source.write_text("Document move keeps page evidence.", encoding="utf-8")
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            other_workspace = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member")
+            store.add_workspace_member(workspace_id, "viewer", "viewer")
+            store.add_workspace_member(other_workspace, "mallory", "owner")
+            inbox = store.create_folder("Inbox", workspace_id=workspace_id, actor_user_id="alice")
+            archive = store.create_folder("Archive", workspace_id=workspace_id, actor_user_id="alice")
+            foreign_folder = store.create_folder("Foreign", workspace_id=other_workspace, actor_user_id="mallory")
+            doc_id = store.ingest_file(source, folder_id=inbox, workspace_id=workspace_id, actor_user_id="alice", name="Move memo")
+            original_versions = store.list_document_versions(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.move_document(doc_id, archive, workspace_id=workspace_id, actor_user_id="viewer")
+            self.assertIsNone(store.move_document(doc_id, archive, workspace_id=other_workspace, actor_user_id="mallory"))
+            with self.assertRaisesRegex(PermissionError, "folder access denied"):
+                store.move_document(doc_id, foreign_folder, workspace_id=workspace_id, actor_user_id="alice")
+            with self.assertRaisesRegex(ValueError, "Folder not found"):
+                store.move_document(doc_id, "fld_missing", workspace_id=workspace_id, actor_user_id="alice")
+
+            moved = store.move_document(doc_id, archive, workspace_id=workspace_id, actor_user_id="alice")
+            unfiled = store.move_document(doc_id, None, workspace_id=workspace_id, actor_user_id="alice")
+            moved_versions = store.list_document_versions(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            moved_pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            move_events = store.list_audit_events(workspace_id, "alice", action="document.move")
+            store.set_document_access_mode(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+            with self.assertRaisesRegex(PermissionError, "document write access denied"):
+                store.move_document(doc_id, inbox, workspace_id=workspace_id, actor_user_id="bob")
+            store.grant_document_access(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="bob",
+                role="write",
+            )
+            bob_moved = store.move_document(doc_id, inbox, workspace_id=workspace_id, actor_user_id="bob")
+
+            self.assertEqual(moved["folder_id"], archive)
+            self.assertIsNone(unfiled["folder_id"])
+            self.assertEqual(bob_moved["folder_id"], inbox)
+            self.assertEqual([doc["id"] for doc in store.list_documents(folder_id=inbox, workspace_id=workspace_id, actor_user_id="alice")], [doc_id])
+            self.assertEqual(moved_pages["pages"][0]["content"], "Document move keeps page evidence.")
+            self.assertEqual(moved_versions, original_versions)
+            self.assertEqual(move_events[0]["target_id"], doc_id)
+            self.assertEqual(move_events[0]["details"], {"previous_folder_id": archive, "folder_id": None})
+            self.assertEqual(move_events[1]["details"], {"previous_folder_id": inbox, "folder_id": archive})
 
     def test_reindex_document_file_rolls_back_when_audit_insert_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6346,6 +6461,35 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=owner_b_headers,
                     status=404,
                 )
+                read_doc_move_blocked = _post_json(
+                    f"{base}/documents/{foldered_doc['doc_id']}/move",
+                    {"folder_id": reports_a["folder_id"]},
+                    headers=read_a_headers,
+                    status=403,
+                )
+                viewer_doc_move_blocked = _post_json(
+                    f"{base}/documents/{foldered_doc['doc_id']}/move",
+                    {"folder_id": reports_a["folder_id"]},
+                    headers=viewer_headers,
+                    status=403,
+                )
+                foreign_doc_folder_blocked = _post_json(
+                    f"{base}/documents/{foldered_doc['doc_id']}/move",
+                    {"folder_id": reports_b["folder_id"]},
+                    headers=owner_a_headers,
+                    status=403,
+                )
+                doc_moved_root = _post_json(
+                    f"{base}/documents/{foldered_doc['doc_id']}/move",
+                    {},
+                    headers=owner_a_headers,
+                )
+                doc_moved_folder = _post_json(
+                    f"{base}/documents/{foldered_doc['doc_id']}/move",
+                    {"folder_id": reports_a["folder_id"]},
+                    headers=owner_a_headers,
+                )
+                documents_after_doc_move = _get_json(f"{base}/documents", headers=read_a_headers)
                 read_delete_blocked = _delete_json(
                     f"{base}/folders/{reports_a['folder_id']}",
                     headers=read_a_headers,
@@ -6407,6 +6551,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(foreign_folder_ingest_blocked["error"], "folder access denied")
             self.assertEqual(foreign_rename_blocked["error"], "folder not found")
             self.assertEqual(foreign_move_blocked["error"], "folder not found")
+            self.assertEqual(read_doc_move_blocked["error"], "api token scope denied")
+            self.assertEqual(viewer_doc_move_blocked["error"], "workspace role denied")
+            self.assertEqual(foreign_doc_folder_blocked["error"], "folder access denied")
+            self.assertIsNone(doc_moved_root["document"]["folder_id"])
+            self.assertEqual(doc_moved_folder["document"]["folder_id"], reports_a["folder_id"])
+            self.assertEqual(documents_after_doc_move["documents"][0]["folder_id"], reports_a["folder_id"])
             self.assertEqual(read_delete_blocked["error"], "api token scope denied")
             self.assertEqual(viewer_delete_blocked["error"], "workspace role denied")
             self.assertEqual(foreign_delete_blocked["deleted"], False)
@@ -9127,12 +9277,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("pagePreviewList", body)
                     self.assertIn("data-pages-doc-id", body)
                     self.assertIn("data-rename-doc-id", body)
+                    self.assertIn("data-move-doc-id", body)
                     self.assertIn("data-download-doc-id", body)
                     self.assertIn("data-reindex-doc-id", body)
                     self.assertIn("data-reindex-upload-doc-id", body)
                     self.assertIn("data-delete-doc-id", body)
                     self.assertIn("deleteDocument", body)
                     self.assertIn("renameDocument", body)
+                    self.assertIn("moveDocument", body)
                     self.assertIn("/access", body)
                     self.assertIn("documentAccessPanel", body)
                     self.assertIn("loadDocumentAccess", body)

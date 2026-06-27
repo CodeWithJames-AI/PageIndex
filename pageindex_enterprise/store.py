@@ -4020,6 +4020,58 @@ class EnterpriseStore:
                 )
         return self.get_document(document["id"])
 
+    def move_document(
+        self,
+        doc_id: str,
+        folder_id: str | None = None,
+        *,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        doc_id = doc_id.strip()
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        if folder_id is not None and not isinstance(folder_id, str):
+            raise ValueError("folder_id must be a string")
+        target_folder_id = folder_id.strip() if folder_id else None
+        document = self.get_document(doc_id)
+        if not document:
+            return None
+        if workspace_id and document["workspace_id"] != workspace_id:
+            return None
+        self._require_document_write(document, actor_user_id)
+        if target_folder_id:
+            folder = self._one("SELECT id, workspace_id FROM folders WHERE id = ?", (target_folder_id,))
+            if not folder:
+                raise ValueError(f"Folder not found: {target_folder_id}")
+            if folder["workspace_id"] != document["workspace_id"]:
+                raise PermissionError("folder access denied")
+        if (document["folder_id"] or None) == target_folder_id:
+            return document
+        now = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                UPDATE documents
+                SET folder_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (target_folder_id, now, document["id"]),
+            )
+            if actor_user_id and document["workspace_id"]:
+                self._insert_audit_event(
+                    document["workspace_id"],
+                    actor_user_id,
+                    "document.move",
+                    target_type="document",
+                    target_id=document["id"],
+                    details={
+                        "previous_folder_id": document["folder_id"],
+                        "folder_id": target_folder_id,
+                    },
+                )
+        return self.get_document(document["id"])
+
     def reindex_document_file(
         self,
         doc_id: str,

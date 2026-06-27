@@ -844,6 +844,7 @@ DASHBOARD_HTML = """<!doctype html>
             <button class="secondary" type="button" data-versions-doc-id="${escapeHtml(doc.id)}">Versions</button>
             <button class="secondary" type="button" data-access-doc-id="${escapeHtml(doc.id)}">Access</button>
             <button class="secondary" type="button" data-rename-doc-id="${escapeHtml(doc.id)}" data-doc-name="${escapeHtml(doc.name)}">Rename</button>
+            <button class="secondary" type="button" data-move-doc-id="${escapeHtml(doc.id)}">Move</button>
             <button class="secondary" type="button" data-download-doc-id="${escapeHtml(doc.id)}">Download</button>
             <button class="secondary" type="button" data-reindex-doc-id="${escapeHtml(doc.id)}">Reindex</button>
             <button class="secondary" type="button" data-reindex-upload-doc-id="${escapeHtml(doc.id)}">Reindex upload</button>
@@ -862,6 +863,9 @@ DASHBOARD_HTML = """<!doctype html>
       });
       documentList.querySelectorAll("[data-rename-doc-id]").forEach((button) => {
         button.addEventListener("click", () => renameDocument(button.dataset.renameDocId, button.dataset.docName).catch((error) => setStatus(error.message, "error")));
+      });
+      documentList.querySelectorAll("[data-move-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => moveDocument(button.dataset.moveDocId).catch((error) => setStatus(error.message, "error")));
       });
       documentList.querySelectorAll("[data-download-doc-id]").forEach((button) => {
         button.addEventListener("click", () => downloadDocument(button.dataset.downloadDocId).catch((error) => setStatus(error.message, "error")));
@@ -2705,6 +2709,17 @@ DASHBOARD_HTML = """<!doctype html>
         body: JSON.stringify({ name: trimmed })
       });
       setStatus(payload.updated ? "Document renamed." : "Document not found.", payload.updated ? "ok" : "warn");
+      await refreshDocuments();
+    }
+
+    async function moveDocument(docId) {
+      const folderId = selectedFolderId();
+      setStatus(folderId ? "Moving document..." : "Moving document to root...");
+      const payload = await api(`/documents/${encodeURIComponent(docId)}/move`, {
+        method: "POST",
+        body: JSON.stringify(folderId ? { folder_id: folderId } : {})
+      });
+      setStatus(payload.updated ? "Document moved." : "Document not found.", payload.updated ? "ok" : "warn");
       await refreshDocuments();
     }
 

@@ -505,6 +505,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if document_rename_id:
                 self._rename_document(document_rename_id, payload)
                 return
+            document_move_id = _document_move_path(parsed.path)
+            if document_move_id:
+                self._move_document(document_move_id, payload)
+                return
             document_access_id = _document_access_path(parsed.path)
             if document_access_id:
                 self._set_document_access(document_access_id, payload)
@@ -1059,6 +1063,24 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             document = store.rename_document(
                 doc_id,
                 name,
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+            )
+            if document is None:
+                self._json({"updated": False})
+                return
+            self._json({"updated": True, "document": document})
+        finally:
+            store.close()
+
+    def _move_document(self, doc_id: str, payload: dict[str, Any]) -> None:
+        folder_id = _optional_str(payload.get("folder_id"), "folder_id")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            document = store.move_document(
+                doc_id,
+                folder_id,
                 workspace_id=workspace_id,
                 actor_user_id=user_id,
             )
@@ -2121,6 +2143,13 @@ def _document_path(path: str) -> str | None:
 def _document_rename_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 3 and parts[0] == "documents" and parts[2] == "rename":
+        return unquote(parts[1])
+    return None
+
+
+def _document_move_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "documents" and parts[2] == "move":
         return unquote(parts[1])
     return None
 

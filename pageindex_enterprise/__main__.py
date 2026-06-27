@@ -364,6 +364,13 @@ def main() -> None:
     rename_doc.add_argument("--workspace-id")
     rename_doc.add_argument("--user-id")
 
+    move_doc = sub.add_parser("move-doc")
+    move_doc.add_argument("doc_id")
+    move_doc.add_argument("--folder-id")
+    move_doc.add_argument("--clear-folder", action="store_true")
+    move_doc.add_argument("--workspace-id")
+    move_doc.add_argument("--user-id")
+
     reindex_doc = sub.add_parser("reindex-doc")
     reindex_doc.add_argument("doc_id")
     reindex_doc.add_argument("path")
@@ -996,6 +1003,20 @@ def main() -> None:
                 lambda: store.rename_document(
                     args.doc_id,
                     args.name,
+                    workspace_id=args.workspace_id,
+                    actor_user_id=args.user_id,
+                )
+            )
+            print(json.dumps({"updated": True, "document": document}, indent=2))
+        elif args.command == "move-doc":
+            if args.folder_id and args.clear_folder:
+                raise SystemExit("choose --folder-id or --clear-folder")
+            if not args.folder_id and not args.clear_folder:
+                raise SystemExit("choose --folder-id or --clear-folder")
+            document = _reindex_document_cli(
+                lambda: store.move_document(
+                    args.doc_id,
+                    None if args.clear_folder else args.folder_id,
                     workspace_id=args.workspace_id,
                     actor_user_id=args.user_id,
                 )

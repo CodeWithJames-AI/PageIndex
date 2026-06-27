@@ -856,6 +856,17 @@ class EnterpriseStore:
               PRIMARY KEY (doc_id, group_id)
             );
 
+            CREATE TABLE IF NOT EXISTS document_share_links (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+              created_by TEXT NOT NULL,
+              token_hash TEXT NOT NULL UNIQUE,
+              created_at TEXT NOT NULL,
+              expires_at TEXT,
+              revoked_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS document_pages (
               doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
               page INTEGER NOT NULL,
@@ -1057,6 +1068,9 @@ class EnterpriseStore:
             "citations": {
                 "line_start": "INTEGER",
                 "line_end": "INTEGER",
+            },
+            "document_share_links": {
+                "revoked_at": "TEXT",
             },
         }
         for table, table_additions in additions.items():
@@ -1451,6 +1465,7 @@ class EnterpriseStore:
             "SELECT MAX(created_at) AS created_at FROM audit_events WHERE workspace_id = ?",
             (workspace_id,),
         ).fetchone()
+        share_now = _now()
         virtual_nodes = self.conn.execute(
             """
             SELECT COUNT(DISTINCT n.id) AS count
@@ -1486,6 +1501,32 @@ class EnterpriseStore:
                     GROUP BY kind
                     ORDER BY kind
                     """
+                ),
+            },
+            "share_links": {
+                "active": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM document_share_links
+                    WHERE workspace_id = ?
+                      AND revoked_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > ?)
+                    """,
+                    (workspace_id, share_now),
+                ),
+                "revoked": count(
+                    "SELECT COUNT(*) AS count FROM document_share_links WHERE workspace_id = ? AND revoked_at IS NOT NULL"
+                ),
+                "expired": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM document_share_links
+                    WHERE workspace_id = ?
+                      AND revoked_at IS NULL
+                      AND expires_at IS NOT NULL
+                      AND expires_at <= ?
+                    """,
+                    (workspace_id, share_now),
                 ),
             },
             "team": {
@@ -4039,6 +4080,199 @@ class EnterpriseStore:
                 break
         return {"doc_id": doc_id, "questions": unique_questions}
 
+    def create_document_share_link(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        expires_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        doc_id = doc_id.strip()
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        document = self.get_document(doc_id)
+        if not document or document["workspace_id"] != workspace_id:
+            return None
+        if not document["workspace_id"]:
+            raise ValueError("document share links require a workspace document")
+        self._require_document_write(document, actor_user_id)
+        expires_at = _normalize_expires_at(expires_at)
+        token = f"pis_{secrets.token_urlsafe(32)}"
+        share_link_id = f"dsl_{uuid.uuid4().hex}"
+        created_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO document_share_links (
+                  id, workspace_id, doc_id, created_by, token_hash, created_at, expires_at, revoked_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    share_link_id,
+                    workspace_id,
+                    document["id"],
+                    actor_user_id.strip(),
+                    _hash_token(token),
+                    created_at,
+                    expires_at,
+                ),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "document.share_link_create",
+                target_type="document",
+                target_id=document["id"],
+                details={"share_link_id": share_link_id, "expires_at": expires_at},
+            )
+        link = self._document_share_link(share_link_id)
+        assert link is not None
+        link["token"] = token
+        return link
+
+    def list_document_share_links(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+    ) -> list[dict[str, Any]]:
+        doc_id = doc_id.strip()
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        document = self.get_document(doc_id)
+        if not document or document["workspace_id"] != workspace_id:
+            return []
+        self._require_document_write(document, actor_user_id)
+        rows = self.conn.execute(
+            """
+            SELECT id, workspace_id, doc_id, created_by, created_at, expires_at, revoked_at
+            FROM document_share_links
+            WHERE doc_id = ?
+            ORDER BY created_at DESC, id
+            """,
+            (document["id"],),
+        )
+        return [_decorate_document_share_link(dict(row)) for row in rows]
+
+    def revoke_document_share_link(
+        self,
+        share_link_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+    ) -> bool:
+        share_link_id = share_link_id.strip()
+        if not share_link_id:
+            raise ValueError("Share link id is required.")
+        link = self._one("SELECT * FROM document_share_links WHERE id = ?", (share_link_id,))
+        if not link or link["workspace_id"] != workspace_id:
+            return False
+        document = self.get_document(link["doc_id"])
+        if not document or document["workspace_id"] != workspace_id:
+            return False
+        self._require_document_write(document, actor_user_id)
+        if link["revoked_at"] is not None:
+            return False
+        revoked_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                "UPDATE document_share_links SET revoked_at = ? WHERE id = ?",
+                (revoked_at, share_link_id),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "document.share_link_revoke",
+                target_type="document",
+                target_id=document["id"],
+                details={"share_link_id": share_link_id},
+            )
+        return True
+
+    def resolve_document_share_link(
+        self,
+        token: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        max_chars: int = 4000,
+    ) -> dict[str, Any] | None:
+        token = token.strip()
+        if not token:
+            raise ValueError("Share token is required.")
+        token_hash = _hash_token(token)
+        row = self._one(
+            """
+            SELECT l.id AS share_link_id, l.workspace_id, l.doc_id, l.created_by,
+                   l.token_hash, l.created_at, l.expires_at, l.revoked_at,
+                   d.name, d.description, d.kind, d.access_mode, d.page_count, d.line_count
+            FROM document_share_links l
+            JOIN documents d ON d.id = l.doc_id
+            WHERE l.token_hash = ?
+            """,
+            (token_hash,),
+        )
+        if not row or not hmac.compare_digest(row["token_hash"], token_hash):
+            return None
+        if row["revoked_at"] is not None or _is_expired(row["expires_at"]):
+            return None
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+        max_chars = max(200, min(int(max_chars), 20000))
+        total_pages = int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS count FROM document_pages WHERE doc_id = ?",
+                (row["doc_id"],),
+            ).fetchone()["count"]
+        )
+        pages = []
+        for page in self.conn.execute(
+            """
+            SELECT page, content
+            FROM document_pages
+            WHERE doc_id = ?
+            ORDER BY page
+            LIMIT ? OFFSET ?
+            """,
+            (row["doc_id"], limit, offset),
+        ):
+            content = page["content"]
+            pages.append(
+                {
+                    "page": page["page"],
+                    "content": content[:max_chars],
+                    "truncated": len(content) > max_chars,
+                }
+            )
+        return {
+            "share_link": _decorate_document_share_link(
+                {
+                    "id": row["share_link_id"],
+                    "workspace_id": row["workspace_id"],
+                    "doc_id": row["doc_id"],
+                    "created_by": row["created_by"],
+                    "created_at": row["created_at"],
+                    "expires_at": row["expires_at"],
+                    "revoked_at": row["revoked_at"],
+                }
+            ),
+            "document": {
+                "id": row["doc_id"],
+                "workspace_id": row["workspace_id"],
+                "name": row["name"],
+                "description": row["description"],
+                "kind": row["kind"],
+                "access_mode": row["access_mode"],
+                "page_count": row["page_count"],
+                "line_count": row["line_count"],
+            },
+            "pages": pages,
+            "total_pages": total_pages,
+        }
+
     def get_managed_upload_document_file(
         self,
         doc_id: str,
@@ -5892,6 +6126,17 @@ class EnterpriseStore:
     def _one(self, sql: str, args: tuple[Any, ...]) -> sqlite3.Row | None:
         return self.conn.execute(sql, args).fetchone()
 
+    def _document_share_link(self, share_link_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            """
+            SELECT id, workspace_id, doc_id, created_by, created_at, expires_at, revoked_at
+            FROM document_share_links
+            WHERE id = ?
+            """,
+            (share_link_id,),
+        )
+        return _decorate_document_share_link(dict(row)) if row else None
+
     def _ensure_virtual_node(
         self,
         *,
@@ -6008,6 +6253,12 @@ def _matching_line_range(content: str, terms: list[str]) -> tuple[int, int] | No
 
 def _content_line_count(content: str) -> int:
     return max(1, len(str(content).splitlines()))
+
+
+def _decorate_document_share_link(link: dict[str, Any]) -> dict[str, Any]:
+    decorated = dict(link)
+    decorated["active"] = decorated.get("revoked_at") is None and not _is_expired(decorated.get("expires_at"))
+    return decorated
 
 
 def _question_subject(name: str) -> str:

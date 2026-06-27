@@ -5696,6 +5696,84 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("document.group_access_grant", actions)
             self.assertIn("document.group_access_revoke", actions)
 
+    def test_document_share_links_are_hashed_expiring_and_revocable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "share.txt"
+            source.write_text("Shared diligence evidence.\nSecond page note.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(workspace_id, "vera", "viewer", actor_user_id="alice")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Share memo")
+            store.set_document_access_mode(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+
+            with self.assertRaisesRegex(PermissionError, "document write access denied"):
+                store.create_document_share_link(doc_id, workspace_id=workspace_id, actor_user_id="bob")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.create_document_share_link(doc_id, workspace_id=workspace_id, actor_user_id="vera")
+
+            active = store.create_document_share_link(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            )
+            expired = store.create_document_share_link(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+            )
+            listed_before_revoke = store.list_document_share_links(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+            )
+            resolved = store.resolve_document_share_link(active["token"])
+            expired_resolution = store.resolve_document_share_link(expired["token"])
+            usage_before_revoke = store.get_workspace_usage_summary(workspace_id, "alice")["share_links"]
+            revoked = store.revoke_document_share_link(active["id"], workspace_id=workspace_id, actor_user_id="alice")
+            revoked_again = store.revoke_document_share_link(active["id"], workspace_id=workspace_id, actor_user_id="alice")
+            listed_after_revoke = store.list_document_share_links(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+            )
+            usage_after_revoke = store.get_workspace_usage_summary(workspace_id, "alice")["share_links"]
+            audit_events = store.list_audit_events(workspace_id, "alice", limit=10)
+
+            serialized_list = json.dumps(listed_before_revoke, sort_keys=True)
+            serialized_audit = json.dumps(audit_events, sort_keys=True)
+            self.assertTrue(active["token"].startswith("pis_"))
+            self.assertNotIn("token_hash", active)
+            self.assertNotIn(active["token"], serialized_list)
+            self.assertNotIn("token_hash", serialized_list)
+            self.assertEqual(resolved["document"]["id"], doc_id)
+            self.assertEqual(resolved["document"]["name"], "Share memo")
+            self.assertEqual(resolved["pages"][0]["content"], "Shared diligence evidence.\nSecond page note.")
+            self.assertNotIn("source_path", json.dumps(resolved, sort_keys=True))
+            self.assertIsNone(expired_resolution)
+            self.assertEqual(usage_before_revoke["active"], 1)
+            self.assertEqual(usage_before_revoke["expired"], 1)
+            self.assertTrue(revoked)
+            self.assertFalse(revoked_again)
+            self.assertIsNone(store.resolve_document_share_link(active["token"]))
+            self.assertEqual({link["id"]: link["active"] for link in listed_after_revoke}, {active["id"]: False, expired["id"]: False})
+            self.assertEqual(usage_after_revoke["active"], 0)
+            self.assertEqual(usage_after_revoke["revoked"], 1)
+            self.assertEqual(usage_after_revoke["expired"], 1)
+            self.assertIn("document.share_link_create", [event["action"] for event in audit_events])
+            self.assertIn("document.share_link_revoke", [event["action"] for event in audit_events])
+            self.assertNotIn(active["token"], serialized_audit)
+            self.assertNotIn("token_hash", serialized_audit)
+
     def test_workspace_groups_can_be_renamed_and_deleted(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -8186,6 +8264,92 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(foreign, {"doc_id": doc_id, "pages": [], "total_pages": 0})
             self.assertNotIn(str(source), serialized)
             self.assertNotIn("source_path", serialized)
+
+    def test_http_document_share_links_require_write_and_public_token_resolves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "shared-http.txt"
+            source.write_text("HTTP shared page evidence. " + ("z" * 5000), encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            other_workspace = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "vera", "viewer", actor_user_id="alice")
+            store.add_workspace_member(other_workspace, "mallory", "owner")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="HTTP share")
+            owner_write_token = store.create_api_token(workspace_id, "alice", name="owner-write", scopes=["write"])["token"]
+            owner_read_token = store.create_api_token(workspace_id, "alice", name="owner-read", scopes=["read"])["token"]
+            viewer_token_record = store.create_api_token(workspace_id, "vera", name="viewer")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), viewer_token_record["id"]),
+            )
+            store.conn.commit()
+            viewer_token = viewer_token_record["token"]
+            other_token = store.create_api_token(other_workspace, "mallory", name="other", scopes=["write"])["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            url = f"{base}/documents/{doc_id}/share-links"
+            owner_write_headers = {"Authorization": f"Bearer {owner_write_token}"}
+            try:
+                missing_auth = _post_json(url, {}, status=403)
+                read_denied = _post_json(url, {}, headers={"Authorization": f"Bearer {owner_read_token}"}, status=403)
+                viewer_denied = _post_json(url, {}, headers={"Authorization": f"Bearer {viewer_token}"}, status=403)
+                created = _post_json(
+                    url,
+                    {"expires_in_days": 1},
+                    headers=owner_write_headers,
+                    status=201,
+                )["share_link"]
+                listed = _get_json(url, headers=owner_write_headers)["share_links"]
+                public = _get_json(f"{base}/public/documents/{created['token']}?limit=1&max_chars=200")
+                missing_doc = _post_json(
+                    f"{base}/documents/doc_missing/share-links",
+                    {},
+                    headers=owner_write_headers,
+                    status=404,
+                )
+                foreign_revoke = _delete_json(
+                    f"{base}/document-share-links/{created['id']}",
+                    headers={"Authorization": f"Bearer {other_token}"},
+                )
+                revoked = _delete_json(
+                    f"{base}/document-share-links/{created['id']}",
+                    headers=owner_write_headers,
+                )
+                public_after_revoke = _get_error(f"{base}/public/documents/{created['token']}")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            serialized_public = json.dumps(public, sort_keys=True)
+            serialized_list = json.dumps(listed, sort_keys=True)
+            self.assertEqual(missing_auth["error"], "api token required")
+            self.assertEqual(read_denied["error"], "api token scope denied")
+            self.assertEqual(viewer_denied["error"], "workspace role denied")
+            self.assertEqual(missing_doc["error"], "document not found")
+            self.assertTrue(created["token"].startswith("pis_"))
+            self.assertNotIn("token_hash", created)
+            self.assertNotIn(created["token"], serialized_list)
+            self.assertEqual(listed[0]["id"], created["id"])
+            self.assertTrue(listed[0]["active"])
+            self.assertEqual(public["document"]["id"], doc_id)
+            self.assertEqual(public["document"]["name"], "HTTP share")
+            self.assertEqual(public["total_pages"], 1)
+            self.assertTrue(public["pages"][0]["content"].startswith("HTTP shared page evidence."))
+            self.assertLessEqual(len(public["pages"][0]["content"]), 200)
+            self.assertTrue(public["pages"][0]["truncated"])
+            self.assertNotIn("source_path", serialized_public)
+            self.assertNotIn("token_hash", serialized_public)
+            self.assertEqual(foreign_revoke, {"revoked": False})
+            self.assertEqual(revoked, {"revoked": True})
+            self.assertEqual(public_after_revoke["status"], 404)
+            self.assertEqual(public_after_revoke["error"], "share link not found")
 
     def test_http_document_access_filters_documents_query_and_pages(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -46,6 +46,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/health":
                 self._json({"ok": True})
                 return
+            public_document_share_token = _public_document_share_path(parsed.path)
+            if public_document_share_token:
+                self._public_document_share(public_document_share_token, parsed.query)
+                return
             if parsed.path in {"/", "/dashboard"}:
                 self._html(DASHBOARD_HTML)
                 return
@@ -288,6 +292,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            document_share_links_id = _document_share_links_path(parsed.path)
+            if document_share_links_id:
+                self._list_document_share_links(document_share_links_id)
+                return
             document_questions_id = _document_questions_path(parsed.path)
             if document_questions_id:
                 params = parse_qs(parsed.query)
@@ -469,6 +477,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/folders":
                 self._create_folder(payload)
                 return
+            document_share_links_id = _document_share_links_path(parsed.path)
+            if document_share_links_id:
+                self._create_document_share_link(document_share_links_id, payload)
+                return
             folder_access_id = _folder_access_path(parsed.path)
             if folder_access_id:
                 self._set_folder_access(folder_access_id, payload)
@@ -627,6 +639,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             folder_id = _folder_path(parsed.path)
             if folder_id:
                 self._delete_folder(folder_id)
+                return
+            document_share_link_id = _document_share_link_path(parsed.path)
+            if document_share_link_id:
+                self._revoke_document_share_link(document_share_link_id)
                 return
             query_run_id = _query_run_path(parsed.path)
             if query_run_id:
@@ -1208,6 +1224,77 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 content_type="application/octet-stream",
                 headers={"Content-Disposition": f'attachment; filename="{filename}"'},
             )
+        finally:
+            store.close()
+
+    def _list_document_share_links(self, doc_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            self._json(
+                {
+                    "share_links": store.list_document_share_links(
+                        doc_id,
+                        workspace_id=workspace_id,
+                        actor_user_id=user_id,
+                    )
+                }
+            )
+        finally:
+            store.close()
+
+    def _create_document_share_link(self, doc_id: str, payload: dict[str, Any]) -> None:
+        if payload.get("expires_at") is not None and payload.get("expires_in_days") is not None:
+            raise ValueError("choose expires_at or expires_in_days")
+        expires_at = _optional_str(payload.get("expires_at"), "expires_at")
+        if payload.get("expires_in_days") is not None:
+            expires_at = expires_at_from_days(_optional_positive_int(payload.get("expires_in_days"), "expires_in_days"))
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            share_link = store.create_document_share_link(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+                expires_at=expires_at,
+            )
+            if share_link is None:
+                self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._json({"share_link": share_link}, HTTPStatus.CREATED)
+        finally:
+            store.close()
+
+    def _revoke_document_share_link(self, share_link_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            revoked = store.revoke_document_share_link(
+                share_link_id,
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+            )
+            self._json({"revoked": revoked})
+        finally:
+            store.close()
+
+    def _public_document_share(self, token: str, query: str) -> None:
+        params = parse_qs(query)
+        limit = max(1, min(_int_param(params, "limit", 20), 100))
+        offset = max(0, _int_param(params, "offset", 0))
+        max_chars = max(200, min(_int_param(params, "max_chars", 4000), 20000))
+        store = EnterpriseStore(self.server.root)
+        try:
+            shared = store.resolve_document_share_link(
+                token,
+                limit=limit,
+                offset=offset,
+                max_chars=max_chars,
+            )
+            if shared is None:
+                self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._json(shared)
         finally:
             store.close()
 
@@ -2252,6 +2339,27 @@ def _document_questions_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 3 and parts[0] == "documents" and parts[2] == "suggested-questions":
         return unquote(parts[1])
+    return None
+
+
+def _document_share_links_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "documents" and parts[2] == "share-links":
+        return unquote(parts[1])
+    return None
+
+
+def _document_share_link_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "document-share-links":
+        return unquote(parts[1])
+    return None
+
+
+def _public_document_share_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "public" and parts[1] == "documents":
+        return unquote(parts[2])
     return None
 
 

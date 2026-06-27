@@ -288,6 +288,24 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            document_questions_id = _document_questions_path(parsed.path)
+            if document_questions_id:
+                params = parse_qs(parsed.query)
+                limit = max(1, min(_int_param(params, "limit", 5), 8))
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(store, required_scope="read")
+                    self._json(
+                        store.suggest_document_questions(
+                            document_questions_id,
+                            workspace_id=workspace_id,
+                            actor_user_id=user_id,
+                            limit=limit,
+                        )
+                    )
+                finally:
+                    store.close()
+                return
             document_download_id = _document_download_path(parsed.path)
             if document_download_id:
                 self._download_document(document_download_id)
@@ -2226,6 +2244,13 @@ def _document_reindex_upload_path(path: str) -> str | None:
 def _document_download_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 3 and parts[0] == "documents" and parts[2] == "download":
+        return unquote(parts[1])
+    return None
+
+
+def _document_questions_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "documents" and parts[2] == "suggested-questions":
         return unquote(parts[1])
     return None
 

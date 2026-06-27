@@ -1298,6 +1298,59 @@ class EnterpriseStoreTest(unittest.TestCase):
                 store.add_workspace_member(workspace_id, "vivi", "viewer", actor_user_id="alice")
                 store.rename_conversation(viewer["id"], "vivi", "Viewer rename")
 
+    def test_document_suggested_questions_respect_access_and_keywords(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "questions.txt"
+            source.write_text(
+                "Customer acquisition expansion depends on renewal evidence and pricing controls.",
+                encoding="utf-8",
+            )
+            store = EnterpriseStore(tmp_path / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Acquisition memo")
+
+            owner_questions = store.suggest_document_questions(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                limit=5,
+            )
+            store.set_document_access_mode(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+            bob_hidden = store.suggest_document_questions(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="bob",
+            )
+            store.grant_document_access(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="bob",
+            )
+            bob_visible = store.suggest_document_questions(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="bob",
+                limit=3,
+            )
+            foreign = store.suggest_document_questions(doc_id, workspace_id="ws_missing", actor_user_id="alice")
+
+            self.assertEqual(owner_questions["doc_id"], doc_id)
+            self.assertGreaterEqual(len(owner_questions["questions"]), 3)
+            self.assertTrue(any("acquisition" in question.casefold() for question in owner_questions["questions"]))
+            self.assertEqual(bob_hidden["questions"], [])
+            self.assertEqual(len(bob_visible["questions"]), 3)
+            self.assertTrue(all("Acquisition memo" in question for question in bob_visible["questions"][:2]))
+            self.assertEqual(foreign["questions"], [])
+
     def test_conversation_chat_rolls_back_messages_when_query_audit_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -8108,6 +8161,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                 member_query = _post_json(f"{base}/query", {"query": "secret acquisition"}, headers=member_headers)
                 member_pages = _get_json(f"{base}/documents/{restricted_id}/pages", headers=member_headers)
                 owner_pages = _get_json(f"{base}/documents/{restricted_id}/pages", headers=owner_headers)
+                member_questions = _get_json(
+                    f"{base}/documents/{restricted_id}/suggested-questions",
+                    headers=member_headers,
+                )
+                owner_questions = _get_json(
+                    f"{base}/documents/{restricted_id}/suggested-questions?limit=5",
+                    headers=owner_headers,
+                )
             finally:
                 server.shutdown()
                 server.server_close()
@@ -8118,6 +8179,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(member_query["citations"], [])
             self.assertEqual(member_pages["pages"], [])
             self.assertEqual(owner_pages["pages"][0]["content"], "Secret customer acquisition evidence.")
+            self.assertEqual(member_questions["questions"], [])
+            self.assertEqual(len(owner_questions["questions"]), 5)
+            self.assertTrue(any("acquisition" in question.casefold() for question in owner_questions["questions"]))
 
     def test_folder_access_grants_inherit_to_restricted_documents(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9380,6 +9444,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("downloadDocument", body)
                     self.assertIn("loadDocumentPages", body)
                     self.assertIn("pagePreviewList", body)
+                    self.assertIn("suggested-questions", body)
+                    self.assertIn("questionSuggestionList", body)
+                    self.assertIn("loadDocumentQuestions", body)
+                    self.assertIn("renderDocumentQuestions", body)
+                    self.assertIn("useSuggestedQuestion", body)
+                    self.assertIn("data-questions-doc-id", body)
+                    self.assertIn("data-suggested-question", body)
                     self.assertIn("data-pages-doc-id", body)
                     self.assertIn("data-rename-doc-id", body)
                     self.assertIn("data-move-doc-id", body)

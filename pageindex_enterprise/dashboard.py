@@ -618,6 +618,7 @@ DASHBOARD_HTML = """<!doctype html>
             <div id="documentAccessPanel" class="muted" style="margin-top:12px">No document access loaded.</div>
             <div id="versionList" class="version-list muted" style="margin-top:12px">No versions loaded.</div>
             <div id="pagePreviewList" class="page-list muted" style="margin-top:12px">No pages loaded.</div>
+            <div id="questionSuggestionList" class="page-list muted" style="margin-top:12px">No questions loaded.</div>
           </section>
           <div id="status" class="status"></div>
         </div>
@@ -754,6 +755,7 @@ DASHBOARD_HTML = """<!doctype html>
     const folderAccessPanel = document.getElementById("folderAccessPanel");
     const versionList = document.getElementById("versionList");
     const pagePreviewList = document.getElementById("pagePreviewList");
+    const questionSuggestionList = document.getElementById("questionSuggestionList");
     const folderList = document.getElementById("folderList");
     const virtualNodeList = document.getElementById("virtualNodeList");
     const conversationList = document.getElementById("conversationList");
@@ -862,6 +864,7 @@ DASHBOARD_HTML = """<!doctype html>
           ${doc.folder_id ? `<div class="muted">folder ${escapeHtml(doc.folder_id)}</div>` : ""}
           <div class="doc-actions">
             <button class="secondary" type="button" data-query-doc-id="${escapeHtml(doc.id)}" data-query-doc-name="${escapeHtml(doc.name)}">Ask</button>
+            <button class="secondary" type="button" data-questions-doc-id="${escapeHtml(doc.id)}" data-questions-doc-name="${escapeHtml(doc.name)}">Questions</button>
             <button class="secondary" type="button" data-pages-doc-id="${escapeHtml(doc.id)}">Preview</button>
             <button class="secondary" type="button" data-versions-doc-id="${escapeHtml(doc.id)}">Versions</button>
             <button class="secondary" type="button" data-access-doc-id="${escapeHtml(doc.id)}">Access</button>
@@ -876,6 +879,9 @@ DASHBOARD_HTML = """<!doctype html>
       `).join("");
       documentList.querySelectorAll("[data-query-doc-id]").forEach((button) => {
         button.addEventListener("click", () => setQueryDocumentScope(button.dataset.queryDocId, button.dataset.queryDocName));
+      });
+      documentList.querySelectorAll("[data-questions-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => loadDocumentQuestions(button.dataset.questionsDocId, button.dataset.questionsDocName).catch((error) => setStatus(error.message, "error")));
       });
       documentList.querySelectorAll("[data-pages-doc-id]").forEach((button) => {
         button.addEventListener("click", () => loadDocumentPages(button.dataset.pagesDocId).catch((error) => setStatus(error.message, "error")));
@@ -1019,6 +1025,21 @@ DASHBOARD_HTML = """<!doctype html>
           <pre>${escapeHtml(page.content || "")}</pre>
         </article>
       `).join("");
+    }
+
+    function renderDocumentQuestions(docId, docName, questions) {
+      if (!questions.length) {
+        questionSuggestionList.className = "page-list muted";
+        questionSuggestionList.textContent = "No questions loaded.";
+        return;
+      }
+      questionSuggestionList.className = "page-list";
+      questionSuggestionList.innerHTML = questions.map((question) => `
+        <button class="secondary" type="button" data-suggested-question="${escapeHtml(question)}" data-suggested-doc-id="${escapeHtml(docId)}" data-suggested-doc-name="${escapeHtml(docName || docId)}">${escapeHtml(question)}</button>
+      `).join("");
+      questionSuggestionList.querySelectorAll("[data-suggested-question]").forEach((button) => {
+        button.addEventListener("click", () => useSuggestedQuestion(button.dataset.suggestedQuestion, button.dataset.suggestedDocId, button.dataset.suggestedDocName));
+      });
     }
 
     function renderFolders(folders, selectedId = activeFolderId) {
@@ -1544,6 +1565,22 @@ DASHBOARD_HTML = """<!doctype html>
       const payload = await api(`/documents/${encodeURIComponent(docId)}/pages?limit=5&max_chars=2000`);
       renderDocumentPages(docId, payload);
       setStatus("Pages refreshed.", "ok");
+    }
+
+    async function loadDocumentQuestions(docId, docName) {
+      if (!docId) {
+        setStatus("Document not found.", "warn");
+        return;
+      }
+      setStatus("Loading questions...");
+      const payload = await api(`/documents/${encodeURIComponent(docId)}/suggested-questions?limit=5`);
+      renderDocumentQuestions(docId, docName || docId, payload.questions || []);
+      setStatus("Questions loaded.", "ok");
+    }
+
+    function useSuggestedQuestion(question, docId, docName) {
+      queryInput.value = question || "";
+      setQueryDocumentScope(docId || "", docName || docId || "");
     }
 
     async function loadDocumentAccess(docId) {

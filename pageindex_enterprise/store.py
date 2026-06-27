@@ -31,6 +31,38 @@ API_TOKEN_SCOPES = ("read", "write", "audit")
 MAX_CONVERSATION_MESSAGE_CHARS = 4000
 MAX_LEGAL_HOLD_REASON_CHARS = 500
 CHAT_TRACE_QUERY = "[conversation message redacted]"
+QUESTION_SUGGESTION_STOPWORDS = {
+    "about",
+    "after",
+    "also",
+    "analysis",
+    "because",
+    "between",
+    "chapter",
+    "content",
+    "document",
+    "documents",
+    "during",
+    "evidence",
+    "from",
+    "have",
+    "into",
+    "page",
+    "pages",
+    "report",
+    "section",
+    "their",
+    "there",
+    "these",
+    "this",
+    "through",
+    "using",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+}
 WORKSPACE_EXPORT_FORMAT = "pageindex.workspace-export.v1"
 WORKSPACE_EXPORT_TABLES = (
     "workspace",
@@ -3940,6 +3972,61 @@ class EnterpriseStore:
             )
         return {"doc_id": doc_id, "pages": pages, "total_pages": total_pages}
 
+    def suggest_document_questions(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        doc_id = doc_id.strip()
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        document = self.get_document(doc_id)
+        if not document:
+            return {"doc_id": doc_id, "questions": []}
+        if workspace_id and document["workspace_id"] != workspace_id:
+            return {"doc_id": doc_id, "questions": []}
+        if document["workspace_id"]:
+            if not actor_user_id:
+                raise PermissionError("workspace access denied")
+            self.require_workspace_access(document["workspace_id"], actor_user_id)
+            if not self._can_read_document(document, actor_user_id):
+                return {"doc_id": doc_id, "questions": []}
+        limit = max(1, min(int(limit), 8))
+        rows = self.conn.execute(
+            """
+            SELECT content
+            FROM document_pages
+            WHERE doc_id = ?
+            ORDER BY page
+            LIMIT 3
+            """,
+            (doc_id,),
+        )
+        sample_text = " ".join(row["content"][:2000] for row in rows)
+        subject = _question_subject(document["name"])
+        keywords = _question_keywords(f"{document['name']} {document['description']} {sample_text}")
+        questions = [
+            f"What are the key takeaways from {subject}?",
+            f"Which pages provide the strongest evidence in {subject}?",
+        ]
+        for keyword in keywords[:4]:
+            questions.append(f"What does {subject} say about {keyword}?")
+        if keywords:
+            questions.append(f"Which page first discusses {keywords[0]}?")
+        unique_questions: list[str] = []
+        seen: set[str] = set()
+        for question in questions:
+            normalized = question.casefold()
+            if normalized not in seen:
+                seen.add(normalized)
+                unique_questions.append(question[:240])
+            if len(unique_questions) >= limit:
+                break
+        return {"doc_id": doc_id, "questions": unique_questions}
+
     def get_managed_upload_document_file(
         self,
         doc_id: str,
@@ -5816,6 +5903,24 @@ def _unsafe_hint_reason(hint: str) -> str | None:
 def _terms_for(query: str, expert_hints: list[str] | None = None) -> list[str]:
     text = " ".join([query, *_prepare_hints(expert_hints)["accepted"]])
     return [term.casefold() for term in text.split() if term.strip()]
+
+
+def _question_subject(name: str) -> str:
+    subject = " ".join((name or "this document").split())
+    if len(subject) > 80:
+        subject = subject[:77].rstrip() + "..."
+    return subject or "this document"
+
+
+def _question_keywords(text: str) -> list[str]:
+    counts: dict[str, int] = {}
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9-]{3,}", text.casefold()):
+        token = token.strip("-")
+        if not token or token in QUESTION_SUGGESTION_STOPWORDS or token.isdigit():
+            continue
+        counts[token] = counts.get(token, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return [token.replace("-", " ") for token, _count in ranked[:8]]
 
 
 def _kind_for(path: Path) -> str:

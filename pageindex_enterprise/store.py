@@ -137,6 +137,7 @@ WORKSPACE_EXPORT_OMITTED_TABLES = ("api_tokens",)
 WORKSPACE_EXPORT_OMITTED_POLICIES = ("api_tokens", "document filesystem paths")
 _UNSET = object()
 _AUDIT_SINK_SECRET_VALUE = re.compile(r"(pit_[A-Za-z0-9_-]+|Bearer\s+\S+|sk-[A-Za-z0-9_-]+)", re.IGNORECASE)
+_EMAIL_ADDRESS = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _ENV_VAR_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _ABSOLUTE_SOURCE_PATH = re.compile(
     r"(^|[\s:\"'])(/(?:Users|home|tmp|private|var|Volumes|opt|etc)/[^\s\"']+|[A-Za-z]:\\[^\s\"']+)"
@@ -725,6 +726,22 @@ def _redact_audit_sink_mapping(data: dict[str, Any]) -> dict[str, Any]:
     return redacted
 
 
+def _redact_conversation_share_content(content: Any) -> str:
+    text = "" if content is None else str(content)
+    text = _AUDIT_SINK_SECRET_VALUE.sub("[redacted]", text)
+    text = _ABSOLUTE_SOURCE_PATH.sub(lambda match: f"{match.group(1)}[redacted-path]", text)
+    text = _EMAIL_ADDRESS.sub("[redacted-email]", text)
+    return text
+
+
+def _redact_conversation_share_citation(citation: dict[str, Any]) -> dict[str, Any]:
+    redacted = dict(citation)
+    for key in ("doc_name", "label"):
+        if redacted.get(key) is not None:
+            redacted[key] = _redact_conversation_share_content(redacted[key])
+    return redacted
+
+
 def _audit_sink_secret_key(key: str) -> bool:
     key_lower = key.casefold()
     return any(secret in key_lower for secret in ("token", "secret", "authorization", "api_key", "password"))
@@ -1027,6 +1044,7 @@ class EnterpriseStore:
               conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
               created_by TEXT NOT NULL,
               token_hash TEXT NOT NULL UNIQUE,
+              redact_content INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL,
               expires_at TEXT,
               revoked_at TEXT
@@ -1215,6 +1233,7 @@ class EnterpriseStore:
             },
             "conversation_share_links": {
                 "revoked_at": "TEXT",
+                "redact_content": "INTEGER NOT NULL DEFAULT 0",
             },
         }
         for table, table_additions in additions.items():
@@ -5826,7 +5845,10 @@ class EnterpriseStore:
         *,
         expected_workspace_id: str | None = None,
         expires_at: str | None = None,
+        redact_content: bool = False,
     ) -> dict[str, Any]:
+        if not isinstance(redact_content, bool):
+            raise ValueError("redact_content must be a boolean")
         conversation = self._conversation_for_actor(
             conversation_id,
             actor_user_id,
@@ -5841,9 +5863,10 @@ class EnterpriseStore:
             self.conn.execute(
                 """
                 INSERT INTO conversation_share_links (
-                  id, workspace_id, conversation_id, created_by, token_hash, created_at, expires_at, revoked_at
+                  id, workspace_id, conversation_id, created_by, token_hash,
+                  redact_content, created_at, expires_at, revoked_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     share_link_id,
@@ -5851,6 +5874,7 @@ class EnterpriseStore:
                     conversation["id"],
                     actor_user_id.strip(),
                     _hash_token(token),
+                    1 if redact_content else 0,
                     created_at,
                     expires_at,
                 ),
@@ -5861,7 +5885,11 @@ class EnterpriseStore:
                 "conversation.share_link_create",
                 target_type="conversation",
                 target_id=conversation["id"],
-                details={"share_link_id": share_link_id, "expires_at": expires_at},
+                details={
+                    "share_link_id": share_link_id,
+                    "expires_at": expires_at,
+                    "redact_content": redact_content,
+                },
             )
         link = self._conversation_share_link(share_link_id)
         assert link is not None
@@ -5883,7 +5911,8 @@ class EnterpriseStore:
         )
         rows = self.conn.execute(
             """
-            SELECT id, workspace_id, conversation_id, created_by, created_at, expires_at, revoked_at
+            SELECT id, workspace_id, conversation_id, created_by, redact_content,
+                   created_at, expires_at, revoked_at
             FROM conversation_share_links
             WHERE conversation_id = ?
             ORDER BY created_at DESC, id
@@ -5944,7 +5973,7 @@ class EnterpriseStore:
         row = self._one(
             """
             SELECT l.id AS share_link_id, l.workspace_id, l.conversation_id, l.created_by,
-                   l.token_hash, l.created_at, l.expires_at, l.revoked_at,
+                   l.token_hash, l.redact_content, l.created_at, l.expires_at, l.revoked_at,
                    c.title, c.created_at AS conversation_created_at, c.updated_at, c.archived_at
             FROM conversation_share_links l
             JOIN conversations c ON c.id = l.conversation_id
@@ -5957,11 +5986,14 @@ class EnterpriseStore:
         if row["revoked_at"] is not None or _is_expired(row["expires_at"]) or row["archived_at"] is not None:
             return None
         limit = max(1, min(int(limit), 500))
+        redact_content = bool(row["redact_content"])
         messages = [
             {
                 "id": message["id"],
                 "role": message["role"],
-                "content": message["content"],
+                "content": _redact_conversation_share_content(message["content"])
+                if redact_content
+                else message["content"],
                 "run_id": message["run_id"],
                 "created_at": message["created_at"],
             }
@@ -5991,7 +6023,10 @@ class EnterpriseStore:
                 """,
                 tuple(run_ids),
             ):
-                citations_by_run.setdefault(citation["run_id"], []).append(dict(citation))
+                citation_payload = dict(citation)
+                if redact_content:
+                    citation_payload = _redact_conversation_share_citation(citation_payload)
+                citations_by_run.setdefault(citation["run_id"], []).append(citation_payload)
         return {
             "share_link": _decorate_conversation_share_link(
                 {
@@ -5999,6 +6034,7 @@ class EnterpriseStore:
                     "workspace_id": row["workspace_id"],
                     "conversation_id": row["conversation_id"],
                     "created_by": row["created_by"],
+                    "redact_content": row["redact_content"],
                     "created_at": row["created_at"],
                     "expires_at": row["expires_at"],
                     "revoked_at": row["revoked_at"],
@@ -6007,7 +6043,7 @@ class EnterpriseStore:
             "conversation": {
                 "id": row["conversation_id"],
                 "workspace_id": row["workspace_id"],
-                "title": row["title"],
+                "title": _redact_conversation_share_content(row["title"]) if redact_content else row["title"],
                 "created_at": row["conversation_created_at"],
                 "updated_at": row["updated_at"],
             },
@@ -7382,7 +7418,8 @@ class EnterpriseStore:
     def _conversation_share_link(self, share_link_id: str) -> dict[str, Any] | None:
         row = self._one(
             """
-            SELECT id, workspace_id, conversation_id, created_by, created_at, expires_at, revoked_at
+            SELECT id, workspace_id, conversation_id, created_by, redact_content,
+                   created_at, expires_at, revoked_at
             FROM conversation_share_links
             WHERE id = ?
             """,
@@ -7516,6 +7553,7 @@ def _decorate_document_share_link(link: dict[str, Any]) -> dict[str, Any]:
 
 def _decorate_conversation_share_link(link: dict[str, Any]) -> dict[str, Any]:
     decorated = dict(link)
+    decorated["redact_content"] = bool(decorated.get("redact_content"))
     decorated["active"] = decorated.get("revoked_at") is None and not _is_expired(decorated.get("expires_at"))
     return decorated
 

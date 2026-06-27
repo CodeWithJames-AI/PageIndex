@@ -2279,16 +2279,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             root = Path(tmp)
             source = root / "share-chat.txt"
             source.write_text("Shared chat evidence points to renewal risk.", encoding="utf-8")
+            sensitive_doc_name = "Shared chat memo Bearer doc-secret /Users/alice/private.pdf agent@example.com"
             store = EnterpriseStore(root / "workspace")
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.add_workspace_member(workspace_id, "bob", "owner")
             store.add_workspace_member(workspace_id, "vivi", "member")
-            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Shared chat memo")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name=sensitive_doc_name)
             conversation = store.create_conversation(workspace_id, "alice", title="Share this chat")
             viewer_conversation = store.create_conversation(workspace_id, "vivi", title="Viewer legacy")
             store.add_workspace_member(workspace_id, "vivi", "viewer", actor_user_id="alice")
-            chat = store.chat_message(conversation["id"], "alice", "renewal risk", limit=4)
+            raw_message = "renewal risk Bearer store-secret /Users/alice/private.pdf agent@example.com"
+            chat = store.chat_message(conversation["id"], "alice", raw_message, limit=4)
 
             with self.assertRaisesRegex(PermissionError, "conversation access denied"):
                 store.create_conversation_share_link(conversation["id"], "bob")
@@ -2305,8 +2307,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "alice",
                 expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
             )
+            redacted = store.create_conversation_share_link(
+                conversation["id"],
+                "alice",
+                redact_content=True,
+            )
             listed = store.list_conversation_share_links(conversation["id"], "alice")
             resolved = store.resolve_conversation_share_link(active["token"])
+            redacted_resolution = store.resolve_conversation_share_link(redacted["token"])
             limited = store.resolve_conversation_share_link(active["token"], limit=1)
             expired_resolution = store.resolve_conversation_share_link(expired["token"])
             usage = store.get_workspace_usage_summary(workspace_id, "alice")["conversations"]
@@ -2315,28 +2323,64 @@ class EnterpriseStoreTest(unittest.TestCase):
             archive_link = store.create_conversation_share_link(conversation["id"], "alice")
             store.archive_conversation(conversation["id"], "alice")
             archived_resolution = store.resolve_conversation_share_link(archive_link["token"])
+            auto_conversation = store.create_conversation(workspace_id, "alice")
+            auto_message = "Bearer title-secret /Users/alice/title.pdf title@example.com"
+            store.chat_message(auto_conversation["id"], "alice", auto_message, limit=4)
+            auto_redacted = store.create_conversation_share_link(
+                auto_conversation["id"],
+                "alice",
+                redact_content=True,
+            )
+            auto_redacted_resolution = store.resolve_conversation_share_link(auto_redacted["token"])
             audit_events = store.list_audit_events(workspace_id, "alice", limit=20)
 
             serialized_list = json.dumps(listed, sort_keys=True)
             serialized_resolved = json.dumps(resolved, sort_keys=True)
+            serialized_redacted = json.dumps(redacted_resolution, sort_keys=True)
+            serialized_auto_redacted = json.dumps(auto_redacted_resolution, sort_keys=True)
             serialized_audit = json.dumps(audit_events, sort_keys=True)
+            listed_by_id = {link["id"]: link for link in listed}
             run_id = chat["assistant_message"]["run_id"]
             self.assertTrue(active["token"].startswith("pcs_"))
+            self.assertFalse(active["redact_content"])
+            self.assertTrue(redacted["redact_content"])
+            self.assertFalse(listed_by_id[active["id"]]["redact_content"])
+            self.assertTrue(listed_by_id[redacted["id"]]["redact_content"])
             self.assertNotIn("token_hash", active)
             self.assertNotIn(active["token"], serialized_list)
             self.assertNotIn("token_hash", serialized_list)
             self.assertEqual(resolved["conversation"]["title"], "Share this chat")
             self.assertEqual([message["role"] for message in resolved["messages"]], ["user", "assistant"])
-            self.assertEqual(resolved["messages"][0]["content"], "renewal risk")
+            self.assertEqual(resolved["messages"][0]["content"], raw_message)
             self.assertEqual(resolved["messages"][1]["run_id"], run_id)
+            redacted_content = redacted_resolution["messages"][0]["content"]
+            self.assertTrue(redacted_resolution["share_link"]["redact_content"])
+            self.assertIn("renewal risk", redacted_content)
+            self.assertIn("[redacted]", redacted_content)
+            self.assertIn("[redacted-path]", redacted_content)
+            self.assertIn("[redacted-email]", redacted_content)
+            self.assertNotIn("Bearer", serialized_redacted)
+            self.assertNotIn("store-secret", serialized_redacted)
+            self.assertNotIn("doc-secret", serialized_redacted)
+            self.assertNotIn("/Users/alice/private.pdf", serialized_redacted)
+            self.assertNotIn("agent@example.com", serialized_redacted)
+            self.assertIn("[redacted]", redacted_resolution["citations"][run_id][0]["doc_name"])
+            self.assertIn("[redacted-path]", redacted_resolution["citations"][run_id][0]["label"])
+            self.assertIn("[redacted-email]", redacted_resolution["citations"][run_id][0]["label"])
+            self.assertIn("[redacted]", auto_redacted_resolution["conversation"]["title"])
+            self.assertIn("[redacted-path]", auto_redacted_resolution["conversation"]["title"])
+            self.assertIn("[redacted-email]", auto_redacted_resolution["conversation"]["title"])
+            self.assertNotIn("title-secret", serialized_auto_redacted)
+            self.assertNotIn("/Users/alice/title.pdf", serialized_auto_redacted)
+            self.assertNotIn("title@example.com", serialized_auto_redacted)
             self.assertEqual(limited["messages"][0]["role"], "user")
             self.assertEqual(len(limited["messages"]), 1)
             self.assertIn(run_id, resolved["citations"])
-            self.assertEqual(resolved["citations"][run_id][0]["doc_name"], "Shared chat memo")
+            self.assertEqual(resolved["citations"][run_id][0]["doc_name"], sensitive_doc_name)
             self.assertNotIn("source_path", serialized_resolved)
             self.assertNotIn("token_hash", serialized_resolved)
             self.assertIsNone(expired_resolution)
-            self.assertEqual(usage["share_links_active"], 1)
+            self.assertEqual(usage["share_links_active"], 2)
             self.assertTrue(revoked)
             self.assertFalse(revoked_again)
             self.assertIsNone(store.resolve_conversation_share_link(active["token"]))
@@ -10583,14 +10627,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             tmp_path = Path(tmp)
             source = tmp_path / "conversation-share.txt"
             source.write_text("HTTP conversation share evidence.", encoding="utf-8")
+            sensitive_doc_name = "Conversation share memo Bearer http-doc /Users/alice/http-doc.txt person@example.com"
             root = tmp_path / "workspace"
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.add_workspace_member(workspace_id, "bob", "owner")
-            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Conversation share memo")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name=sensitive_doc_name)
             conversation = store.create_conversation(workspace_id, "alice", title="HTTP shared chat")
-            chat = store.chat_message(conversation["id"], "alice", "conversation share", limit=4)
+            raw_message = "conversation share Bearer http-secret /Users/alice/http.txt person@example.com"
+            chat = store.chat_message(conversation["id"], "alice", raw_message, limit=4)
             owner_write_token = store.create_api_token(workspace_id, "alice", name="owner-write", scopes=["write"])["token"]
             owner_read_token = store.create_api_token(workspace_id, "alice", name="owner-read", scopes=["read"])["token"]
             bob_token = store.create_api_token(workspace_id, "bob", name="bob")["token"]
@@ -10611,11 +10657,28 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=owner_write_headers,
                     status=201,
                 )["share_link"]
+                redacted_created = _post_json(
+                    url,
+                    {"redact_content": True},
+                    headers=owner_write_headers,
+                    status=201,
+                )["share_link"]
+                bad_redact = _post_json(
+                    url,
+                    {"redact_content": "yes"},
+                    headers=owner_write_headers,
+                    status=400,
+                )
                 listed = _get_json(url, headers=owner_write_headers)["share_links"]
                 public = _get_json(f"{base}/public/conversations/{created['token']}")
+                redacted_public = _get_json(f"{base}/public/conversations/{redacted_created['token']}")
                 limited = _get_json(f"{base}/public/conversations/{created['token']}?limit=1")
                 public_html, public_html_type = _get_text(
                     f"{base}/public/conversations/{created['token']}",
+                    headers={"Accept": "text/html"},
+                )
+                redacted_html, redacted_html_type = _get_text(
+                    f"{base}/public/conversations/{redacted_created['token']}",
                     headers={"Accept": "text/html"},
                 )
                 revoked = _delete_json(
@@ -10629,25 +10692,57 @@ class EnterpriseStoreTest(unittest.TestCase):
                 thread.join(timeout=5)
 
             serialized_public = json.dumps(public, sort_keys=True)
+            serialized_redacted_public = json.dumps(redacted_public, sort_keys=True)
             serialized_list = json.dumps(listed, sort_keys=True)
+            listed_by_id = {link["id"]: link for link in listed}
             run_id = chat["assistant_message"]["run_id"]
             self.assertEqual(missing_auth["error"], "api token required")
             self.assertEqual(read_denied["error"], "api token scope denied")
             self.assertEqual(bob_denied["error"], "conversation access denied")
+            self.assertEqual(bad_redact["error"], "redact_content must be a boolean")
             self.assertTrue(created["token"].startswith("pcs_"))
+            self.assertFalse(created["redact_content"])
+            self.assertTrue(redacted_created["redact_content"])
             self.assertNotIn("token_hash", created)
             self.assertNotIn(created["token"], serialized_list)
-            self.assertEqual(listed[0]["id"], created["id"])
-            self.assertTrue(listed[0]["active"])
+            self.assertFalse(listed_by_id[created["id"]]["redact_content"])
+            self.assertTrue(listed_by_id[redacted_created["id"]]["redact_content"])
+            self.assertTrue(listed_by_id[created["id"]]["active"])
             self.assertEqual(public["conversation"]["title"], "HTTP shared chat")
             self.assertEqual([message["role"] for message in public["messages"]], ["user", "assistant"])
             self.assertEqual(public["messages"][1]["run_id"], run_id)
+            self.assertEqual(public["messages"][0]["content"], raw_message)
+            self.assertTrue(redacted_public["share_link"]["redact_content"])
+            self.assertIn("conversation share", redacted_public["messages"][0]["content"])
+            self.assertIn("[redacted]", redacted_public["messages"][0]["content"])
+            self.assertIn("[redacted-path]", redacted_public["messages"][0]["content"])
+            self.assertIn("[redacted-email]", redacted_public["messages"][0]["content"])
+            self.assertNotIn("Bearer", serialized_redacted_public)
+            self.assertNotIn("http-secret", serialized_redacted_public)
+            self.assertNotIn("http-doc", serialized_redacted_public)
+            self.assertNotIn("/Users/alice/http.txt", serialized_redacted_public)
+            self.assertNotIn("/Users/alice/http-doc.txt", serialized_redacted_public)
+            self.assertNotIn("person@example.com", serialized_redacted_public)
             self.assertEqual(len(limited["messages"]), 1)
             self.assertIn(run_id, public["citations"])
-            self.assertEqual(public["citations"][run_id][0]["doc_name"], "Conversation share memo")
+            self.assertEqual(public["citations"][run_id][0]["doc_name"], sensitive_doc_name)
+            self.assertIn("[redacted]", redacted_public["citations"][run_id][0]["doc_name"])
+            self.assertIn("[redacted-path]", redacted_public["citations"][run_id][0]["label"])
+            self.assertIn("[redacted-email]", redacted_public["citations"][run_id][0]["label"])
             self.assertIn("text/html", public_html_type)
+            self.assertIn("text/html", redacted_html_type)
             self.assertIn("HTTP shared chat", public_html)
             self.assertIn("conversation share", public_html)
+            self.assertIn("Bearer http-secret", public_html)
+            self.assertIn("[redacted]", redacted_html)
+            self.assertIn("[redacted-path]", redacted_html)
+            self.assertIn("[redacted-email]", redacted_html)
+            self.assertNotIn("Bearer", redacted_html)
+            self.assertNotIn("http-secret", redacted_html)
+            self.assertNotIn("http-doc", redacted_html)
+            self.assertNotIn("/Users/alice/http.txt", redacted_html)
+            self.assertNotIn("/Users/alice/http-doc.txt", redacted_html)
+            self.assertNotIn("person@example.com", redacted_html)
             self.assertIn("Conversation share memo", public_html)
             self.assertNotIn(created["token"], public_html)
             self.assertNotIn("token_hash", public_html)
@@ -12325,7 +12420,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("conversationExportFormatInput", body)
                     self.assertIn("conversationExportText", body)
                     self.assertIn("conversationShareList", body)
+                    self.assertIn("conversationShareRedactInput", body)
                     self.assertIn("conversation-share-links", body)
+                    self.assertIn("redact_content: conversationShareRedactInput.checked", body)
+                    self.assertIn('link.redact_content ? "redacted" : "raw"', body)
                     self.assertIn('publicShareUrl("conversations"', body)
                     self.assertIn("createConversationShareLink", body)
                     self.assertIn("loadConversationShareLinks", body)

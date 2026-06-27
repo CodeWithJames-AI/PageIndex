@@ -445,6 +445,7 @@ DASHBOARD_HTML = """<!doctype html>
               </div>
               <div id="conversationList" class="conversation-list muted">No conversations loaded.</div>
               <textarea id="conversationExportText" readonly placeholder="conversation export output" aria-label="Conversation export output"></textarea>
+              <label class="checkbox-row"><input id="conversationShareRedactInput" type="checkbox"> Redact share content</label>
               <div id="conversationShareList" class="member-list muted">No conversation shares loaded.</div>
             </div>
           </section>
@@ -743,6 +744,7 @@ DASHBOARD_HTML = """<!doctype html>
     const conversationIncludeArchivedInput = document.getElementById("conversationIncludeArchivedInput");
     const conversationExportFormatInput = document.getElementById("conversationExportFormatInput");
     const conversationExportText = document.getElementById("conversationExportText");
+    const conversationShareRedactInput = document.getElementById("conversationShareRedactInput");
     const conversationShareList = document.getElementById("conversationShareList");
     const memberUserInput = document.getElementById("memberUserInput");
     const memberRoleInput = document.getElementById("memberRoleInput");
@@ -1411,7 +1413,7 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="member-row">
             <div>
               <strong>${escapeHtml(link.active ? "active" : "inactive")}</strong>
-              <div class="muted">${escapeHtml(link.id)}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
+              <div class="muted">${escapeHtml(link.id)}${kind === "conversations" ? ` | ${escapeHtml(link.redact_content ? "redacted" : "raw")}` : ""}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
             </div>
             <button class="secondary" type="button" data-revoke-share-kind="${escapeHtml(kind)}" data-revoke-share-target-id="${escapeHtml(link[targetKey] || "")}" data-revoke-share-link-path="${escapeHtml(path)}" data-revoke-share-link-id="${escapeHtml(link.id)}"${link.active ? "" : " disabled"}>Revoke</button>
           </div>
@@ -2736,9 +2738,13 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       setStatus("Creating conversation share...");
+      const payloadBody = {
+        ...expiry.payload,
+        redact_content: conversationShareRedactInput.checked
+      };
       const payload = await api(`/conversations/${encodeURIComponent(conversationId)}/share-links`, {
         method: "POST",
-        body: JSON.stringify(expiry.payload)
+        body: JSON.stringify(payloadBody)
       });
       const link = payload.share_link || {};
       shareUrlOutput.value = link.token ? publicShareUrl("conversations", link.token) : "";

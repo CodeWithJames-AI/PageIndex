@@ -442,6 +442,7 @@ DASHBOARD_HTML = """<!doctype html>
               </div>
               <div id="conversationList" class="conversation-list muted">No conversations loaded.</div>
               <textarea id="conversationExportText" readonly placeholder="conversation export output" aria-label="Conversation export output"></textarea>
+              <div id="conversationShareList" class="member-list muted">No conversation shares loaded.</div>
             </div>
           </section>
           <section>
@@ -619,6 +620,8 @@ DASHBOARD_HTML = """<!doctype html>
             <div id="versionList" class="version-list muted" style="margin-top:12px">No versions loaded.</div>
             <div id="pagePreviewList" class="page-list muted" style="margin-top:12px">No pages loaded.</div>
             <div id="questionSuggestionList" class="page-list muted" style="margin-top:12px">No questions loaded.</div>
+            <div id="documentShareList" class="member-list muted" style="margin-top:12px">No document shares loaded.</div>
+            <input id="shareUrlOutput" readonly value="" placeholder="latest share URL" aria-label="Latest share URL">
           </section>
           <div id="status" class="status"></div>
         </div>
@@ -705,6 +708,7 @@ DASHBOARD_HTML = """<!doctype html>
     const conversationIncludeArchivedInput = document.getElementById("conversationIncludeArchivedInput");
     const conversationExportFormatInput = document.getElementById("conversationExportFormatInput");
     const conversationExportText = document.getElementById("conversationExportText");
+    const conversationShareList = document.getElementById("conversationShareList");
     const memberUserInput = document.getElementById("memberUserInput");
     const memberRoleInput = document.getElementById("memberRoleInput");
     const groupNameInput = document.getElementById("groupNameInput");
@@ -756,6 +760,8 @@ DASHBOARD_HTML = """<!doctype html>
     const versionList = document.getElementById("versionList");
     const pagePreviewList = document.getElementById("pagePreviewList");
     const questionSuggestionList = document.getElementById("questionSuggestionList");
+    const documentShareList = document.getElementById("documentShareList");
+    const shareUrlOutput = document.getElementById("shareUrlOutput");
     const folderList = document.getElementById("folderList");
     const virtualNodeList = document.getElementById("virtualNodeList");
     const conversationList = document.getElementById("conversationList");
@@ -901,6 +907,8 @@ DASHBOARD_HTML = """<!doctype html>
             <button class="secondary" type="button" data-pages-doc-id="${escapeHtml(doc.id)}">Preview</button>
             <button class="secondary" type="button" data-versions-doc-id="${escapeHtml(doc.id)}">Versions</button>
             <button class="secondary" type="button" data-access-doc-id="${escapeHtml(doc.id)}">Access</button>
+            <button class="secondary" type="button" data-share-doc-id="${escapeHtml(doc.id)}">Share</button>
+            <button class="secondary" type="button" data-shares-doc-id="${escapeHtml(doc.id)}">Shares</button>
             <button class="secondary" type="button" data-rename-doc-id="${escapeHtml(doc.id)}" data-doc-name="${escapeHtml(doc.name)}">Rename</button>
             <button class="secondary" type="button" data-move-doc-id="${escapeHtml(doc.id)}">Move</button>
             <button class="secondary" type="button" data-download-doc-id="${escapeHtml(doc.id)}">Download</button>
@@ -924,6 +932,12 @@ DASHBOARD_HTML = """<!doctype html>
       });
       documentList.querySelectorAll("[data-access-doc-id]").forEach((button) => {
         button.addEventListener("click", () => loadDocumentAccess(button.dataset.accessDocId).catch((error) => setStatus(error.message, "error")));
+      });
+      documentList.querySelectorAll("[data-share-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => createDocumentShareLink(button.dataset.shareDocId).catch((error) => setStatus(error.message, "error")));
+      });
+      documentList.querySelectorAll("[data-shares-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => loadDocumentShareLinks(button.dataset.sharesDocId).catch((error) => setStatus(error.message, "error")));
       });
       documentList.querySelectorAll("[data-rename-doc-id]").forEach((button) => {
         button.addEventListener("click", () => renameDocument(button.dataset.renameDocId, button.dataset.docName).catch((error) => setStatus(error.message, "error")));
@@ -1072,6 +1086,52 @@ DASHBOARD_HTML = """<!doctype html>
       `).join("");
       questionSuggestionList.querySelectorAll("[data-suggested-question]").forEach((button) => {
         button.addEventListener("click", () => useSuggestedQuestion(button.dataset.suggestedQuestion, button.dataset.suggestedDocId, button.dataset.suggestedDocName));
+      });
+    }
+
+    function shareExpiryPayload() {
+      const value = window.prompt("Expires in days", "");
+      if (value === null) {
+        return { cancelled: true };
+      }
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return { cancelled: false, payload: {} };
+      }
+      const days = Number(trimmed);
+      if (!Number.isInteger(days) || days <= 0) {
+        setStatus("Expiration days must be a positive integer.", "warn");
+        return { cancelled: true };
+      }
+      return { cancelled: false, payload: { expires_in_days: days } };
+    }
+
+    function publicShareUrl(kind, token) {
+      return `${window.location.origin}/public/${kind}/${encodeURIComponent(token)}`;
+    }
+
+    function renderShareLinks(container, kind, links) {
+      if (!links.length) {
+        container.className = "member-list muted";
+        container.textContent = kind === "documents" ? "No document shares loaded." : "No conversation shares loaded.";
+        return;
+      }
+      container.className = "member-list";
+      const path = kind === "documents" ? "document-share-links" : "conversation-share-links";
+      const targetKey = kind === "documents" ? "doc_id" : "conversation_id";
+      container.innerHTML = links.map((link) => `
+        <article class="member">
+          <div class="member-row">
+            <div>
+              <strong>${escapeHtml(link.active ? "active" : "inactive")}</strong>
+              <div class="muted">${escapeHtml(link.id)}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
+            </div>
+            <button class="secondary" type="button" data-revoke-share-kind="${escapeHtml(kind)}" data-revoke-share-target-id="${escapeHtml(link[targetKey] || "")}" data-revoke-share-link-path="${escapeHtml(path)}" data-revoke-share-link-id="${escapeHtml(link.id)}"${link.active ? "" : " disabled"}>Revoke</button>
+          </div>
+        </article>
+      `).join("");
+      container.querySelectorAll("[data-revoke-share-link-id]").forEach((button) => {
+        button.addEventListener("click", () => revokeShareLink(button.dataset.revokeShareLinkPath, button.dataset.revokeShareLinkId, button.dataset.revokeShareKind, button.dataset.revokeShareTargetId).catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -1275,6 +1335,8 @@ DASHBOARD_HTML = """<!doctype html>
           </button>
           <div class="doc-actions">
             <button class="secondary" type="button" data-rename-conversation-id="${escapeHtml(conversation.id)}" data-conversation-title="${escapeHtml(conversation.title)}">Rename</button>
+            <button class="secondary" type="button" data-share-conversation-id="${escapeHtml(conversation.id)}">Share</button>
+            <button class="secondary" type="button" data-shares-conversation-id="${escapeHtml(conversation.id)}">Shares</button>
             <button class="secondary" type="button" data-archive-conversation-id="${escapeHtml(conversation.id)}" data-archive-state="${conversation.archived_at ? "restore" : "archive"}">${conversation.archived_at ? "Restore" : "Archive"}</button>
             <button class="secondary" type="button" data-delete-conversation-id="${escapeHtml(conversation.id)}">Delete</button>
           </div>
@@ -1285,6 +1347,12 @@ DASHBOARD_HTML = """<!doctype html>
       });
       conversationList.querySelectorAll("[data-rename-conversation-id]").forEach((button) => {
         button.addEventListener("click", () => renameConversation(button.dataset.renameConversationId, button.dataset.conversationTitle).catch((error) => setStatus(error.message, "error")));
+      });
+      conversationList.querySelectorAll("[data-share-conversation-id]").forEach((button) => {
+        button.addEventListener("click", () => createConversationShareLink(button.dataset.shareConversationId).catch((error) => setStatus(error.message, "error")));
+      });
+      conversationList.querySelectorAll("[data-shares-conversation-id]").forEach((button) => {
+        button.addEventListener("click", () => loadConversationShareLinks(button.dataset.sharesConversationId).catch((error) => setStatus(error.message, "error")));
       });
       conversationList.querySelectorAll("[data-archive-conversation-id]").forEach((button) => {
         button.addEventListener("click", () => archiveConversation(button.dataset.archiveConversationId, button.dataset.archiveState === "restore").catch((error) => setStatus(error.message, "error")));
@@ -1614,6 +1682,37 @@ DASHBOARD_HTML = """<!doctype html>
     function useSuggestedQuestion(question, docId, docName) {
       queryInput.value = question || "";
       setQueryDocumentScope(docId || "", docName || docId || "");
+    }
+
+    async function loadDocumentShareLinks(docId) {
+      if (!docId) {
+        setStatus("Document not found.", "warn");
+        return;
+      }
+      setStatus("Loading document shares...");
+      const payload = await api(`/documents/${encodeURIComponent(docId)}/share-links`);
+      renderShareLinks(documentShareList, "documents", payload.share_links || []);
+      setStatus("Document shares loaded.", "ok");
+    }
+
+    async function createDocumentShareLink(docId) {
+      if (!docId) {
+        setStatus("Document not found.", "warn");
+        return;
+      }
+      const expiry = shareExpiryPayload();
+      if (expiry.cancelled) {
+        return;
+      }
+      setStatus("Creating document share...");
+      const payload = await api(`/documents/${encodeURIComponent(docId)}/share-links`, {
+        method: "POST",
+        body: JSON.stringify(expiry.payload)
+      });
+      const link = payload.share_link || {};
+      shareUrlOutput.value = link.token ? publicShareUrl("documents", link.token) : "";
+      await loadDocumentShareLinks(docId);
+      setStatus("Document share created.", "ok");
     }
 
     async function loadDocumentAccess(docId) {
@@ -2184,6 +2283,60 @@ DASHBOARD_HTML = """<!doctype html>
       }
       conversationExportText.value = text;
       setStatus("Conversation exported.", "ok");
+    }
+
+    async function loadConversationShareLinks(conversationId) {
+      if (!conversationId) {
+        setStatus("Conversation not found.", "warn");
+        return;
+      }
+      setStatus("Loading conversation shares...");
+      const payload = await api(`/conversations/${encodeURIComponent(conversationId)}/share-links`);
+      renderShareLinks(conversationShareList, "conversations", payload.share_links || []);
+      setStatus("Conversation shares loaded.", "ok");
+    }
+
+    async function createConversationShareLink(conversationId) {
+      if (!conversationId) {
+        setStatus("Conversation not found.", "warn");
+        return;
+      }
+      const expiry = shareExpiryPayload();
+      if (expiry.cancelled) {
+        return;
+      }
+      setStatus("Creating conversation share...");
+      const payload = await api(`/conversations/${encodeURIComponent(conversationId)}/share-links`, {
+        method: "POST",
+        body: JSON.stringify(expiry.payload)
+      });
+      const link = payload.share_link || {};
+      shareUrlOutput.value = link.token ? publicShareUrl("conversations", link.token) : "";
+      await loadConversationShareLinks(conversationId);
+      setStatus("Conversation share created.", "ok");
+    }
+
+    async function revokeShareLink(path, shareLinkId, kind, targetId) {
+      if (!path || !shareLinkId) {
+        setStatus("Share link not found.", "warn");
+        return;
+      }
+      if (!window.confirm("Revoke this share link?")) {
+        setStatus("Share revoke cancelled.", "warn");
+        return;
+      }
+      setStatus("Revoking share...");
+      const payload = await api(`/${path}/${encodeURIComponent(shareLinkId)}`, {
+        method: "DELETE"
+      });
+      setStatus(payload.revoked ? "Share revoked." : "Share not found.", payload.revoked ? "ok" : "warn");
+      if (kind === "documents" && targetId) {
+        await loadDocumentShareLinks(targetId).catch(() => {});
+      } else if (kind === "conversations" && targetId) {
+        await loadConversationShareLinks(targetId).catch(() => {});
+      } else if (activeConversationId) {
+        await loadConversationShareLinks(activeConversationId).catch(() => {});
+      }
     }
 
     async function renameConversation(conversationId, currentTitle) {

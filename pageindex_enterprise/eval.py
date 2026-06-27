@@ -124,12 +124,40 @@ def run_enterprise_eval(root: str | Path, fixtures_root: str | Path | None = Non
                 and store.verify_trace(section["run_id"])["ok"],
                 run_ids=[multi_doc["run_id"], section["run_id"]],
             )
+            audit_integrity = store.verify_audit_integrity(workspace_id, "eval-user")
+            checks["audit_integrity"] = _check(
+                audit_integrity["ok"] and audit_integrity["checked"] > 0 and bool(audit_integrity["latest_integrity_hash"]),
+                checked=audit_integrity["checked"],
+                legacy=audit_integrity["legacy"],
+                failure_count=audit_integrity["failure_count"],
+            )
             api_token = store.create_api_token(
                 workspace_id,
                 "eval-user",
-                name="eval-http-read",
-                scopes=["read", "write"],
+                name="eval-http-admin",
+                scopes=["read", "write", "audit"],
             )["token"]
+
+            restore_source = eval_root_path / "restore-source.txt"
+            restore_source.write_text("Restored eval workspace evidence.", encoding="utf-8")
+            restore_source_store = EnterpriseStore(eval_root_path / "restore-source-store")
+            try:
+                restore_workspace_id = restore_source_store.create_workspace(
+                    "Eval Restore Workspace",
+                    workspace_id="eval-restore-workspace",
+                )
+                restore_source_store.add_workspace_member(restore_workspace_id, "restore-user", "owner")
+                restore_source_store.ingest_file(
+                    restore_source,
+                    doc_id="eval-restore-doc",
+                    workspace_id=restore_workspace_id,
+                    actor_user_id="restore-user",
+                    name="Eval restore note",
+                )
+                restore_bundle_path = eval_root_path / "eval-restore-workspace.zip"
+                restore_source_store.export_workspace_bundle(restore_workspace_id, "restore-user", restore_bundle_path)
+            finally:
+                restore_source_store.close()
         finally:
             store.close()
 
@@ -140,6 +168,8 @@ def run_enterprise_eval(root: str | Path, fixtures_root: str | Path | None = Non
                 workspace_id=workspace_id,
                 inflation_id=inflation_id,
                 authority_id=authority_id,
+                restore_workspace_id=restore_workspace_id,
+                restore_bundle_path=restore_bundle_path,
             )
         )
 
@@ -171,6 +201,8 @@ def _run_strict_http_eval(
     workspace_id: str,
     inflation_id: str,
     authority_id: str,
+    restore_workspace_id: str,
+    restore_bundle_path: Path,
 ) -> dict[str, dict[str, Any]]:
     checks: dict[str, dict[str, Any]] = {}
     server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
@@ -209,6 +241,16 @@ def _run_strict_http_eval(
             and query.get("trace", {}).get("scope", {}).get("workspace_id") == workspace_id,
             cited_docs=sorted(query_docs),
             run_id=query.get("run_id"),
+        )
+
+        audit_integrity = _http_get_json(f"{base}/audit-integrity", headers=headers)
+        checks["strict_http_audit_integrity"] = _check(
+            audit_integrity.get("ok") is True
+            and audit_integrity.get("checked", 0) > 0
+            and bool(audit_integrity.get("latest_integrity_hash")),
+            checked=audit_integrity.get("checked"),
+            legacy=audit_integrity.get("legacy"),
+            failure_count=audit_integrity.get("failure_count"),
         )
 
         completion = _http_post_json(
@@ -350,6 +392,39 @@ def _run_strict_http_eval(
             cited_docs=sorted(finish_docs),
             event_count=len(events),
             streamed_chars=len(streamed_text),
+        )
+
+        restored = _http_post_json(
+            f"{base}/workspace-import",
+            {"path": str(restore_bundle_path)},
+            headers=headers,
+            status=201,
+        )
+        duplicate = _http_post_json(
+            f"{base}/workspace-import",
+            {"path": str(restore_bundle_path)},
+            headers=headers,
+            status=400,
+        )
+        restored_store = EnterpriseStore(root)
+        try:
+            restored_documents = restored_store.list_documents(
+                workspace_id=restore_workspace_id,
+                actor_user_id="restore-user",
+            )
+            restored_integrity = restored_store.verify_audit_integrity(restore_workspace_id, "restore-user")
+        finally:
+            restored_store.close()
+        checks["strict_http_workspace_restore"] = _check(
+            restored.get("ok") is True
+            and restored.get("workspace_id") == restore_workspace_id
+            and restored.get("inserted", {}).get("documents") == 1
+            and [doc["id"] for doc in restored_documents] == ["eval-restore-doc"]
+            and restored_integrity["ok"]
+            and "Workspace already exists" in duplicate.get("error", ""),
+            restored_workspace_id=restored.get("workspace_id"),
+            restored_documents=[doc["id"] for doc in restored_documents],
+            duplicate_error=duplicate.get("error"),
         )
     finally:
         server.shutdown()

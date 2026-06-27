@@ -4956,6 +4956,88 @@ class EnterpriseStore:
             raise RuntimeError("created source set could not be loaded")
         return created
 
+    def update_query_source_set(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        source_set_id: str,
+        *,
+        name: str | object = _UNSET,
+        description: str | None | object = _UNSET,
+        doc_ids: list[str] | None | object = _UNSET,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        source_set = self._query_source_set_row(workspace_id, source_set_id)
+        if not source_set:
+            raise ValueError("Query source set not found.")
+        if name is _UNSET and description is _UNSET and doc_ids is _UNSET:
+            raise ValueError("At least one source set update is required.")
+        if name is _UNSET:
+            normalized_name = source_set["name"]
+        elif not isinstance(name, str):
+            raise ValueError("Source set name must be a string.")
+        else:
+            normalized_name = _normalize_source_set_name(name)
+        if description is _UNSET:
+            normalized_description = source_set["description"]
+        elif description is not None and not isinstance(description, str):
+            raise ValueError("Source set description must be a string.")
+        else:
+            normalized_description = _normalize_source_set_description(description)
+        normalized_doc_ids: list[str] | None = None
+        if doc_ids is not _UNSET:
+            if doc_ids is not None and not isinstance(doc_ids, list):
+                raise ValueError("Document ids must be a list.")
+            normalized_doc_ids = _normalize_source_set_doc_ids(doc_ids)
+            readable_documents = self._readable_documents_by_id(workspace_id, normalized_doc_ids, actor_user_id)
+            if len(readable_documents) != len(normalized_doc_ids):
+                raise ValueError("Source set documents must belong to the workspace and be readable.")
+        duplicate = self._one(
+            "SELECT id FROM query_source_sets WHERE workspace_id = ? AND name = ? AND id <> ?",
+            (workspace_id, normalized_name, source_set["id"]),
+        )
+        if duplicate:
+            raise ValueError("Source set name already exists.")
+        now = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                UPDATE query_source_sets
+                SET name = ?, description = ?, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (normalized_name, normalized_description, now, source_set["id"], workspace_id),
+            )
+            if normalized_doc_ids is not None:
+                self.conn.execute(
+                    "DELETE FROM query_source_set_documents WHERE source_set_id = ? AND workspace_id = ?",
+                    (source_set["id"], workspace_id),
+                )
+                for position, doc_id in enumerate(normalized_doc_ids):
+                    self.conn.execute(
+                        """
+                        INSERT INTO query_source_set_documents (source_set_id, workspace_id, doc_id, position)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (source_set["id"], workspace_id, doc_id, position),
+                    )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "query_source_set.update",
+                target_type="query_source_set",
+                target_id=source_set["id"],
+                details={
+                    "name": normalized_name,
+                    "previous_name": source_set["name"],
+                    "document_count": len(normalized_doc_ids) if normalized_doc_ids is not None else None,
+                },
+            )
+        updated = self.get_query_source_set(workspace_id, actor_user_id, source_set["id"])
+        if updated is None:
+            raise RuntimeError("updated source set could not be loaded")
+        return updated
+
     def delete_query_source_set(self, workspace_id: str, actor_user_id: str, source_set_id: str) -> bool:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         source_set = self._query_source_set_row(workspace_id, source_set_id)

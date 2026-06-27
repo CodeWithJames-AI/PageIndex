@@ -1293,12 +1293,78 @@ class EnterpriseStoreTest(unittest.TestCase):
                     source_set_id="qss_conflict",
                 )
 
+    def test_query_source_set_update_preserves_id_and_replaces_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            first_source = tmp_path / "first.txt"
+            second_source = tmp_path / "second.txt"
+            foreign_source = tmp_path / "foreign.txt"
+            first_source.write_text("Original source set evidence.", encoding="utf-8")
+            second_source.write_text("Replacement source set evidence.", encoding="utf-8")
+            foreign_source.write_text("Foreign source set evidence.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
+            workspace_id = store.create_workspace("Team")
+            foreign_workspace_id = store.create_workspace("Foreign")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(foreign_workspace_id, "mallory", "owner")
+            first_doc_id = store.ingest_file(first_source, workspace_id=workspace_id, actor_user_id="alice", name="First memo")
+            second_doc_id = store.ingest_file(second_source, workspace_id=workspace_id, actor_user_id="alice", name="Second memo")
+            foreign_doc_id = store.ingest_file(
+                foreign_source,
+                workspace_id=foreign_workspace_id,
+                actor_user_id="mallory",
+                name="Foreign memo",
+            )
+            source_set = store.create_query_source_set(
+                workspace_id,
+                "alice",
+                "Original scope",
+                [first_doc_id],
+                description="Original description",
+            )
+
+            updated = store.update_query_source_set(
+                workspace_id,
+                "alice",
+                source_set["id"],
+                name="Updated scope",
+                description="Replacement description",
+                doc_ids=[second_doc_id, first_doc_id, second_doc_id],
+            )
+            queried = store.query_corpus(
+                "replacement source set evidence",
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                source_set_id=source_set["id"],
+            )
+            events = store.list_audit_events(workspace_id, "alice", action="query_source_set.update")
+
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.update_query_source_set(workspace_id, "bob", source_set["id"], name="Member edit")
+            with self.assertRaisesRegex(ValueError, "Source set name already exists"):
+                store.create_query_source_set(workspace_id, "alice", "Existing scope", [first_doc_id])
+                store.update_query_source_set(workspace_id, "alice", source_set["id"], name="Existing scope")
+            with self.assertRaisesRegex(ValueError, "Source set documents must belong"):
+                store.update_query_source_set(workspace_id, "alice", source_set["id"], doc_ids=[foreign_doc_id])
+
+            self.assertEqual(updated["id"], source_set["id"])
+            self.assertEqual(updated["name"], "Updated scope")
+            self.assertEqual(updated["description"], "Replacement description")
+            self.assertEqual(updated["doc_ids"], [second_doc_id, first_doc_id])
+            self.assertEqual(queried["trace"]["scope"]["source_set_id"], source_set["id"])
+            self.assertEqual(queried["trace"]["scope"]["doc_ids"], [second_doc_id, first_doc_id])
+            self.assertIn(second_doc_id, {citation["doc_id"] for citation in queried["citations"]})
+            self.assertEqual(events[0]["target_id"], source_set["id"])
+
     def test_query_source_set_cli_creates_lists_deletes_and_queries(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             root = tmp_path / "workspace"
             source = tmp_path / "source-set-cli.txt"
+            replacement_source = tmp_path / "source-set-cli-replacement.txt"
             source.write_text("CLI source set evidence for reusable query scope.", encoding="utf-8")
+            replacement_source.write_text("CLI replacement source set evidence.", encoding="utf-8")
             repo_root = Path(__file__).resolve().parents[1]
             env = os.environ.copy()
             env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
@@ -1306,6 +1372,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             workspace_id = store.create_workspace("Team", workspace_id="ws_source_set_cli")
             store.add_workspace_member(workspace_id, "alice", "owner")
             doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="CLI source set memo")
+            replacement_doc_id = store.ingest_file(
+                replacement_source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="CLI replacement source set memo",
+            )
             store.close()
             base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
 
@@ -1318,6 +1390,31 @@ class EnterpriseStoreTest(unittest.TestCase):
                 check=True,
             )
             created_source_set = json.loads(created.stdout)
+            updated = subprocess.run(
+                [
+                    *base,
+                    "query-source-set",
+                    workspace_id,
+                    "alice",
+                    "--update",
+                    created_source_set["id"],
+                    "--name",
+                    "Updated CLI scope",
+                    "--description",
+                    "Updated CLI description",
+                    "--doc-id",
+                    replacement_doc_id,
+                    "--doc-id",
+                    doc_id,
+                    "--doc-id",
+                    replacement_doc_id,
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
             listed = subprocess.run(
                 [*base, "query-source-set", workspace_id, "alice"],
                 cwd=repo_root,
@@ -1330,7 +1427,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 [
                     *base,
                     "query",
-                    "source set evidence",
+                    "replacement source set evidence",
                     "--workspace-id",
                     workspace_id,
                     "--user-id",
@@ -1372,13 +1469,18 @@ class EnterpriseStoreTest(unittest.TestCase):
                 check=True,
             )
 
+            updated_source_set = json.loads(updated.stdout)
             listed_source_sets = json.loads(listed.stdout)
             query_result = json.loads(queried.stdout)
             delete_result = json.loads(deleted.stdout)
             self.assertEqual(created_source_set["doc_ids"], [doc_id])
+            self.assertEqual(updated_source_set["id"], created_source_set["id"])
+            self.assertEqual(updated_source_set["name"], "Updated CLI scope")
+            self.assertEqual(updated_source_set["doc_ids"], [replacement_doc_id, doc_id])
             self.assertEqual(listed_source_sets[0]["id"], created_source_set["id"])
+            self.assertEqual(listed_source_sets[0]["doc_ids"], [replacement_doc_id, doc_id])
             self.assertEqual(query_result["trace"]["scope"]["source_set_id"], created_source_set["id"])
-            self.assertEqual(query_result["citations"][0]["doc_id"], doc_id)
+            self.assertIn(replacement_doc_id, {citation["doc_id"] for citation in query_result["citations"]})
             self.assertNotEqual(conflict.returncode, 0)
             self.assertIn("use --doc-id or --source-set-id", conflict.stderr)
             self.assertTrue(delete_result["deleted"])
@@ -4563,12 +4665,20 @@ class EnterpriseStoreTest(unittest.TestCase):
             tmp_path = Path(tmp)
             root = tmp_path / "workspace"
             source = tmp_path / "source-set-http.txt"
+            replacement_source = tmp_path / "source-set-http-replacement.txt"
             source.write_text("HTTP source set evidence for reusable query scope.", encoding="utf-8")
+            replacement_source.write_text("HTTP replacement source set evidence.", encoding="utf-8")
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
             doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="HTTP source set memo")
+            replacement_doc_id = store.ingest_file(
+                replacement_source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="HTTP replacement source set memo",
+            )
             owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
             audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
             write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
@@ -4603,6 +4713,21 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=owner_headers,
                     status=201,
                 )
+                audit_update_denied = _put_json(
+                    f"{url}/{created['id']}",
+                    {"name": "Denied", "doc_ids": [replacement_doc_id]},
+                    headers={"Authorization": f"Bearer {audit_token}"},
+                    status=403,
+                )
+                updated = _put_json(
+                    f"{url}/{created['id']}",
+                    {
+                        "name": "Reusable replacement scope",
+                        "description": "Updated HTTP source set",
+                        "doc_ids": [replacement_doc_id, doc_id, replacement_doc_id],
+                    },
+                    headers=owner_headers,
+                )
                 listed = _get_json(url, headers=owner_headers)
                 conflict = _post_json(
                     f"{base}/query",
@@ -4612,7 +4737,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )
                 queried = _post_json(
                     f"{base}/query",
-                    {"query": "source set evidence", "source_set_id": created["id"]},
+                    {"query": "replacement source set evidence", "source_set_id": created["id"]},
                     headers=owner_headers,
                 )
                 deleted = _delete_json(f"{url}/{created['id']}", headers=owner_headers)
@@ -4624,15 +4749,21 @@ class EnterpriseStoreTest(unittest.TestCase):
 
             self.assertEqual(missing["error"], "api token required")
             self.assertEqual(audit_create_denied["error"], "api token scope denied")
+            self.assertEqual(audit_update_denied["error"], "api token scope denied")
             self.assertEqual(write_list_denied["error"], "api token scope denied")
             self.assertEqual(member_list_denied["error"], "workspace role denied")
             self.assertEqual(created["name"], "Reusable scope")
             self.assertEqual(created["doc_ids"], [doc_id])
+            self.assertEqual(updated["id"], created["id"])
+            self.assertEqual(updated["name"], "Reusable replacement scope")
+            self.assertEqual(updated["description"], "Updated HTTP source set")
+            self.assertEqual(updated["doc_ids"], [replacement_doc_id, doc_id])
             self.assertEqual(listed["source_sets"][0]["id"], created["id"])
+            self.assertEqual(listed["source_sets"][0]["doc_ids"], [replacement_doc_id, doc_id])
             self.assertEqual(conflict["error"], "use doc_ids or source_set_id, not both")
             self.assertEqual(queried["trace"]["scope"]["source_set_id"], created["id"])
-            self.assertEqual(queried["trace"]["scope"]["doc_ids"], [doc_id])
-            self.assertEqual(queried["citations"][0]["doc_id"], doc_id)
+            self.assertEqual(queried["trace"]["scope"]["doc_ids"], [replacement_doc_id, doc_id])
+            self.assertIn(replacement_doc_id, {citation["doc_id"] for citation in queried["citations"]})
             self.assertTrue(deleted["deleted"])
             self.assertFalse(deleted_again["deleted"])
 

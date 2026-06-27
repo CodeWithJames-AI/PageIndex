@@ -625,6 +625,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         try:
             parsed = urlparse(self.path)
+            query_source_set_id = _query_source_set_path(parsed.path)
+            if query_source_set_id:
+                self._update_query_source_set(query_source_set_id, self._read_json())
+                return
             folder_id = _folder_path(parsed.path)
             if folder_id:
                 self._rename_folder(folder_id, self._read_json())
@@ -1975,6 +1979,28 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     description=description,
                 ),
                 HTTPStatus.CREATED,
+            )
+        finally:
+            store.close()
+
+    def _update_query_source_set(self, source_set_id: str, payload: dict[str, Any]) -> None:
+        name = _optional_str(payload.get("name"), "name") if "name" in payload else _UNSET
+        description = _optional_str(payload.get("description"), "description") if "description" in payload else _UNSET
+        doc_ids = _list_or_none(payload.get("doc_ids")) if "doc_ids" in payload else _UNSET
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store, required_scope=("audit", "write"), require_api_token=True
+            )
+            self._json(
+                store.update_query_source_set(
+                    workspace_id,
+                    user_id,
+                    source_set_id,
+                    name=name,
+                    description=description,
+                    doc_ids=doc_ids,
+                )
             )
         finally:
             store.close()

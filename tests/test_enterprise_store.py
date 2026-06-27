@@ -2344,6 +2344,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                 limit=4,
             )
             listed = store.list_conversations(workspace_id, "bob")
+            child_conversation = store.create_conversation(
+                workspace_id,
+                "bob",
+                title="Child folder pinned chat",
+                folder_id=child_folder_id,
+            )
 
             self.assertEqual(conversation["folder_id"], folder_id)
             self.assertIsNone(conversation["source_set_id"])
@@ -2371,6 +2377,27 @@ class EnterpriseStoreTest(unittest.TestCase):
                     source_set_id="qss_missing",
                     folder_id=folder_id,
                 )
+            deleted = store.delete_folder(folder_id, workspace_id=workspace_id, actor_user_id="alice")
+            stored_conversation_after_delete = dict(
+                store.conn.execute("SELECT folder_id FROM conversations WHERE id = ?", (conversation["id"],)).fetchone()
+            )
+            stored_child_conversation_after_delete = dict(
+                store.conn.execute("SELECT folder_id FROM conversations WHERE id = ?", (child_conversation["id"],)).fetchone()
+            )
+            listed_after_delete = {
+                row["id"]: row for row in store.list_conversations(workspace_id, "bob")
+            }
+            chat_after_delete = store.chat_message(conversation["id"], "bob", "renewal", limit=4)
+            delete_events = store.list_audit_events(workspace_id, "alice", action="folder.delete")
+
+            self.assertEqual(deleted, True)
+            self.assertIsNone(stored_conversation_after_delete["folder_id"])
+            self.assertIsNone(stored_child_conversation_after_delete["folder_id"])
+            self.assertIsNone(listed_after_delete[conversation["id"]]["folder_id"])
+            self.assertIsNone(listed_after_delete[child_conversation["id"]]["folder_id"])
+            self.assertIsNone(chat_after_delete["conversation"]["folder_id"])
+            self.assertNotIn("folder_id", chat_after_delete["result"]["trace"]["scope"])
+            self.assertEqual(delete_events[0]["details"]["scoped_conversation_count"], 2)
 
     def test_conversation_scope_update_changes_future_chat_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:

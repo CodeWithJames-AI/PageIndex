@@ -4830,7 +4830,46 @@ class EnterpriseStore:
             return False
         folder_workspace_id = folder["workspace_id"]
         self.require_workspace_write(folder_workspace_id, actor_user_id)
+        descendant_pattern = f"{_escape_like(folder['path'])}/%"
+        if folder_workspace_id:
+            folder_rows = self.conn.execute(
+                """
+                SELECT id
+                FROM folders
+                WHERE workspace_id = ?
+                  AND (path = ? OR path LIKE ? ESCAPE '\\')
+                """,
+                (folder_workspace_id, folder["path"], descendant_pattern),
+            )
+        else:
+            folder_rows = self.conn.execute(
+                """
+                SELECT id
+                FROM folders
+                WHERE workspace_id IS NULL
+                  AND (path = ? OR path LIKE ? ESCAPE '\\')
+                """,
+                (folder["path"], descendant_pattern),
+            )
+        deleted_folder_ids = [row["id"] for row in folder_rows]
         with self._atomic():
+            scoped_conversation_count = 0
+            if deleted_folder_ids:
+                placeholders = ",".join("?" for _ in deleted_folder_ids)
+                scoped_conversation_count = int(
+                    self._one(
+                        f"SELECT COUNT(*) AS count FROM conversations WHERE folder_id IN ({placeholders})",
+                        tuple(deleted_folder_ids),
+                    )["count"]
+                )
+                self.conn.execute(
+                    f"""
+                    UPDATE conversations
+                    SET folder_id = NULL, updated_at = ?
+                    WHERE folder_id IN ({placeholders})
+                    """,
+                    (_now(), *deleted_folder_ids),
+                )
             cursor = self.conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
             deleted = cursor.rowcount > 0
             if deleted and actor_user_id and folder_workspace_id:
@@ -4840,7 +4879,11 @@ class EnterpriseStore:
                     "folder.delete",
                     target_type="folder",
                     target_id=folder_id,
-                    details={"name": folder["name"], "path": folder["path"]},
+                    details={
+                        "name": folder["name"],
+                        "path": folder["path"],
+                        "scoped_conversation_count": scoped_conversation_count,
+                    },
                 )
         return deleted
 

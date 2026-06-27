@@ -381,6 +381,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <select id="folderAccessGrantRoleInput" aria-label="Folder access grant role">
                   <option value="read">read</option>
                   <option value="write">write</option>
+                  <option value="deny">deny</option>
                 </select>
                 <button id="grantFolderAccessButton" type="button">Grant user</button>
                 <button id="revokeFolderAccessButton" class="secondary" type="button">Revoke user</button>
@@ -1348,6 +1349,7 @@ DASHBOARD_HTML = """<!doctype html>
             <select id="documentAccessGrantRoleInput" aria-label="Document access grant role">
               <option value="read">read</option>
               <option value="write">write</option>
+              <option value="deny">deny</option>
             </select>
             <button id="grantDocumentAccessButton" type="button">Grant</button>
             <button id="revokeDocumentAccessButton" class="secondary" type="button">Revoke</button>

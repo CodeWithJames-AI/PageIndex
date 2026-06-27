@@ -26,7 +26,7 @@ WORKSPACE_ROLES = {"owner", "admin", "member", "viewer"}
 WORKSPACE_INVITATION_ROLES = {"admin", "member", "viewer"}
 WORKSPACE_ROLE_RANK = {"viewer": 0, "member": 1, "admin": 2, "owner": 3}
 DOCUMENT_ACCESS_MODES = {"workspace", "restricted"}
-DOCUMENT_ACCESS_GRANT_ROLES = {"read", "write"}
+DOCUMENT_ACCESS_GRANT_ROLES = {"read", "write", "deny"}
 API_TOKEN_SCOPES = ("read", "write", "audit")
 MAX_CONVERSATION_MESSAGE_CHARS = 4000
 MAX_CONVERSATION_TITLE_CHARS = 72
@@ -2357,68 +2357,198 @@ class EnterpriseStore:
         return (
             f"""
             (
-              {alias}.access_mode = 'workspace'
-              OR EXISTS (
+              EXISTS (
                 SELECT 1 FROM workspace_members wm
                 WHERE wm.workspace_id = {alias}.workspace_id
                   AND wm.user_id = ?
                   AND wm.role IN ('owner', 'admin')
               )
-              OR EXISTS (
-                SELECT 1 FROM document_access_grants dag
-                WHERE dag.doc_id = {alias}.id
-                  AND dag.user_id = ?
-              )
-              OR EXISTS (
-                SELECT 1
-                FROM document_group_access_grants dgag
-                JOIN workspace_group_members wgm ON wgm.group_id = dgag.group_id
-                WHERE dgag.doc_id = {alias}.id
-                  AND wgm.workspace_id = {alias}.workspace_id
-                  AND wgm.user_id = ?
-              )
-              OR EXISTS (
-                SELECT 1
-                FROM folder_access_grants fag
-                JOIN folders granted_folder ON granted_folder.id = fag.folder_id
-                JOIN folders document_folder ON document_folder.id = {alias}.folder_id
-                WHERE fag.workspace_id = {alias}.workspace_id
-                  AND fag.user_id = ?
-                  AND (
-                    document_folder.path = granted_folder.path
-                    OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+              OR (
+                NOT EXISTS (
+                  SELECT 1 FROM document_access_grants dag
+                  WHERE dag.doc_id = {alias}.id
+                    AND dag.user_id = ?
+                    AND dag.role = 'deny'
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM document_group_access_grants dgag
+                  JOIN workspace_group_members wgm ON wgm.group_id = dgag.group_id
+                  WHERE dgag.doc_id = {alias}.id
+                    AND dgag.role = 'deny'
+                    AND wgm.workspace_id = {alias}.workspace_id
+                    AND wgm.user_id = ?
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM folder_access_grants fag
+                  JOIN folders granted_folder ON granted_folder.id = fag.folder_id
+                  JOIN folders document_folder ON document_folder.id = {alias}.folder_id
+                  WHERE fag.workspace_id = {alias}.workspace_id
+                    AND fag.user_id = ?
+                    AND fag.role = 'deny'
+                    AND (
+                      document_folder.path = granted_folder.path
+                      OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                    )
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM folder_group_access_grants fgag
+                  JOIN folders granted_folder ON granted_folder.id = fgag.folder_id
+                  JOIN folders document_folder ON document_folder.id = {alias}.folder_id
+                  JOIN workspace_group_members wgm ON wgm.group_id = fgag.group_id
+                  WHERE fgag.workspace_id = {alias}.workspace_id
+                    AND fgag.role = 'deny'
+                    AND wgm.workspace_id = {alias}.workspace_id
+                    AND wgm.user_id = ?
+                    AND (
+                      document_folder.path = granted_folder.path
+                      OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                    )
+                )
+                AND (
+                  {alias}.access_mode = 'workspace'
+                  OR EXISTS (
+                    SELECT 1 FROM document_access_grants dag
+                    WHERE dag.doc_id = {alias}.id
+                      AND dag.user_id = ?
+                      AND dag.role IN ('read', 'write')
                   )
-              )
-              OR EXISTS (
-                SELECT 1
-                FROM folder_group_access_grants fgag
-                JOIN folders granted_folder ON granted_folder.id = fgag.folder_id
-                JOIN folders document_folder ON document_folder.id = {alias}.folder_id
-                JOIN workspace_group_members wgm ON wgm.group_id = fgag.group_id
-                WHERE fgag.workspace_id = {alias}.workspace_id
-                  AND wgm.workspace_id = {alias}.workspace_id
-                  AND wgm.user_id = ?
-                  AND (
-                    document_folder.path = granted_folder.path
-                    OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                  OR EXISTS (
+                    SELECT 1
+                    FROM document_group_access_grants dgag
+                    JOIN workspace_group_members wgm ON wgm.group_id = dgag.group_id
+                    WHERE dgag.doc_id = {alias}.id
+                      AND dgag.role IN ('read', 'write')
+                      AND wgm.workspace_id = {alias}.workspace_id
+                      AND wgm.user_id = ?
                   )
+                  OR EXISTS (
+                    SELECT 1
+                    FROM folder_access_grants fag
+                    JOIN folders granted_folder ON granted_folder.id = fag.folder_id
+                    JOIN folders document_folder ON document_folder.id = {alias}.folder_id
+                    WHERE fag.workspace_id = {alias}.workspace_id
+                      AND fag.user_id = ?
+                      AND fag.role IN ('read', 'write')
+                      AND (
+                        document_folder.path = granted_folder.path
+                        OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                      )
+                  )
+                  OR EXISTS (
+                    SELECT 1
+                    FROM folder_group_access_grants fgag
+                    JOIN folders granted_folder ON granted_folder.id = fgag.folder_id
+                    JOIN folders document_folder ON document_folder.id = {alias}.folder_id
+                    JOIN workspace_group_members wgm ON wgm.group_id = fgag.group_id
+                    WHERE fgag.workspace_id = {alias}.workspace_id
+                      AND fgag.role IN ('read', 'write')
+                      AND wgm.workspace_id = {alias}.workspace_id
+                      AND wgm.user_id = ?
+                      AND (
+                        document_folder.path = granted_folder.path
+                        OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                      )
+                  )
+                )
               )
             )
             """,
-            [actor_user_id, actor_user_id, actor_user_id, actor_user_id, actor_user_id],
+            [
+                actor_user_id,
+                actor_user_id,
+                actor_user_id,
+                actor_user_id,
+                actor_user_id,
+                actor_user_id,
+                actor_user_id,
+                actor_user_id,
+                actor_user_id,
+            ],
         )
 
-    def _can_read_document(self, document: dict[str, Any], actor_user_id: str | None) -> bool:
-        if not document.get("workspace_id") or document.get("access_mode", "workspace") == "workspace":
-            return True
-        if not actor_user_id:
+    def _document_access_deny_exists(self, document: dict[str, Any], actor_user_id: str | None) -> bool:
+        if not document.get("workspace_id") or not actor_user_id:
             return False
         actor_user_id = actor_user_id.strip()
-        if self.workspace_role(document["workspace_id"], actor_user_id) in WORKSPACE_ADMIN_ROLES:
+        if not actor_user_id:
+            return False
+        if self._one(
+            "SELECT 1 FROM document_access_grants WHERE doc_id = ? AND user_id = ? AND role = 'deny'",
+            (document["id"], actor_user_id),
+        ):
+            return True
+        if self._one(
+            """
+            SELECT 1
+            FROM document_group_access_grants dgag
+            JOIN workspace_group_members wgm ON wgm.group_id = dgag.group_id
+            WHERE dgag.doc_id = ?
+              AND dgag.role = 'deny'
+              AND wgm.workspace_id = ?
+              AND wgm.user_id = ?
+            """,
+            (document["id"], document["workspace_id"], actor_user_id),
+        ):
+            return True
+        folder_id = document.get("folder_id")
+        if not folder_id:
+            return False
+        if self._one(
+            """
+            SELECT 1
+            FROM folder_access_grants fag
+            JOIN folders granted_folder ON granted_folder.id = fag.folder_id
+            JOIN folders document_folder ON document_folder.id = ?
+            WHERE fag.workspace_id = ?
+              AND fag.user_id = ?
+              AND fag.role = 'deny'
+              AND (
+                document_folder.path = granted_folder.path
+                OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+              )
+            """,
+            (folder_id, document["workspace_id"], actor_user_id),
+        ):
             return True
         return bool(
             self._one(
-                "SELECT 1 FROM document_access_grants WHERE doc_id = ? AND user_id = ?",
+                """
+                SELECT 1
+                FROM folder_group_access_grants fgag
+                JOIN folders granted_folder ON granted_folder.id = fgag.folder_id
+                JOIN folders document_folder ON document_folder.id = ?
+                JOIN workspace_group_members wgm ON wgm.group_id = fgag.group_id
+                WHERE fgag.workspace_id = ?
+                  AND fgag.role = 'deny'
+                  AND wgm.workspace_id = ?
+                  AND wgm.user_id = ?
+                  AND (
+                    document_folder.path = granted_folder.path
+                    OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                  )
+                """,
+                (folder_id, document["workspace_id"], document["workspace_id"], actor_user_id),
+            )
+        )
+
+    def _can_read_document(self, document: dict[str, Any], actor_user_id: str | None) -> bool:
+        if not document.get("workspace_id"):
+            return True
+        if not actor_user_id:
+            return document.get("access_mode", "workspace") == "workspace"
+        actor_user_id = actor_user_id.strip()
+        if self.workspace_role(document["workspace_id"], actor_user_id) in WORKSPACE_ADMIN_ROLES:
+            return True
+        if self._document_access_deny_exists(document, actor_user_id):
+            return False
+        if document.get("access_mode", "workspace") == "workspace":
+            return True
+        return bool(
+            self._one(
+                "SELECT 1 FROM document_access_grants WHERE doc_id = ? AND user_id = ? AND role IN ('read', 'write')",
                 (document["id"], actor_user_id),
             )
             or self._one(
@@ -2427,6 +2557,7 @@ class EnterpriseStore:
                 FROM document_group_access_grants dgag
                 JOIN workspace_group_members wgm ON wgm.group_id = dgag.group_id
                 WHERE dgag.doc_id = ?
+                  AND dgag.role IN ('read', 'write')
                   AND wgm.workspace_id = ?
                   AND wgm.user_id = ?
                 """,
@@ -2440,6 +2571,7 @@ class EnterpriseStore:
                 JOIN folders document_folder ON document_folder.id = ?
                 WHERE fag.workspace_id = ?
                   AND fag.user_id = ?
+                  AND fag.role IN ('read', 'write')
                   AND (
                     document_folder.path = granted_folder.path
                     OR substr(document_folder.path, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
@@ -2455,6 +2587,7 @@ class EnterpriseStore:
                 JOIN folders document_folder ON document_folder.id = ?
                 JOIN workspace_group_members wgm ON wgm.group_id = fgag.group_id
                 WHERE fgag.workspace_id = ?
+                  AND fgag.role IN ('read', 'write')
                   AND wgm.workspace_id = ?
                   AND wgm.user_id = ?
                   AND (
@@ -2467,16 +2600,20 @@ class EnterpriseStore:
         )
 
     def _can_write_document(self, document: dict[str, Any], actor_user_id: str | None) -> bool:
-        if not document.get("workspace_id") or document.get("access_mode", "workspace") == "workspace":
+        if not document.get("workspace_id"):
             return True
         if not actor_user_id:
-            return False
+            return document.get("access_mode", "workspace") == "workspace"
         actor_user_id = actor_user_id.strip()
         role = self.workspace_role(document["workspace_id"], actor_user_id)
         if role in WORKSPACE_ADMIN_ROLES:
             return True
         if role not in WORKSPACE_WRITE_ROLES:
             return False
+        if self._document_access_deny_exists(document, actor_user_id):
+            return False
+        if document.get("access_mode", "workspace") == "workspace":
+            return True
         return bool(
             self._one(
                 "SELECT 1 FROM document_access_grants WHERE doc_id = ? AND user_id = ? AND role = 'write'",

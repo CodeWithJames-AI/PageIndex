@@ -8226,6 +8226,18 @@ class EnterpriseStoreTest(unittest.TestCase):
                 name="Bob-updated secret memo",
             )
             bob_pages_after_write = store.list_document_pages(restricted_id, workspace_id=workspace_id, actor_user_id="bob")
+            deny_access = store.grant_document_access(
+                restricted_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="bob",
+                role="deny",
+            )
+            bob_documents_after_deny = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
+            bob_query_after_deny = store.query_corpus("secret merger", workspace_id=workspace_id, actor_user_id="bob")
+            bob_pages_after_deny = store.list_document_pages(restricted_id, workspace_id=workspace_id, actor_user_id="bob")
+            with self.assertRaisesRegex(PermissionError, "document write access denied"):
+                store.reindex_document_file(restricted_id, replacement, workspace_id=workspace_id, actor_user_id="bob")
             revoked = store.revoke_document_access(
                 restricted_id,
                 workspace_id=workspace_id,
@@ -8249,6 +8261,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(write_access["grants"][0]["role"], "write")
             self.assertEqual(bob_reindex["name"], "Bob-updated secret memo")
             self.assertEqual(bob_pages_after_write["pages"][0]["content"], "Secret merger write-grant replacement evidence.")
+            self.assertEqual(deny_access["grants"][0]["role"], "deny")
+            self.assertEqual([doc["id"] for doc in bob_documents_after_deny], [public_id])
+            self.assertEqual(bob_query_after_deny["citations"], [])
+            self.assertEqual(bob_pages_after_deny["pages"], [])
             self.assertTrue(revoked)
             self.assertEqual(bob_query_after_revoke["citations"], [])
             self.assertIn("document.access_mode", actions)
@@ -12490,6 +12506,19 @@ class EnterpriseStoreTest(unittest.TestCase):
                 name="Folder write memo",
             )
             written_pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="bob")
+            deny_granted = store.grant_folder_access(
+                child,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="bob",
+                role="deny",
+            )
+            denied_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
+            denied_query = store.query_corpus("inherited folder access", workspace_id=workspace_id, actor_user_id="bob")
+            with self.assertRaisesRegex(PermissionError, "document write access denied"):
+                store.reindex_document_file(doc_id, write_source, workspace_id=workspace_id, actor_user_id="bob")
+            deny_revoked = store.revoke_folder_access(child, workspace_id=workspace_id, actor_user_id="alice", user_id="bob")
+            restored_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
             revoked = store.revoke_folder_access(parent, workspace_id=workspace_id, actor_user_id="alice", user_id="bob")
             revoked_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
             group = store.create_workspace_group(workspace_id, "alice", "Reviewers")
@@ -12510,6 +12539,22 @@ class EnterpriseStoreTest(unittest.TestCase):
                 actor_user_id="alice",
                 group_id=group["id"],
                 role="write",
+            )
+            group_denied = store.grant_folder_group_access(
+                child,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                group_id=group["id"],
+                role="deny",
+            )
+            group_denied_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="carol")
+            with self.assertRaisesRegex(PermissionError, "document write access denied"):
+                store.reindex_document_file(doc_id, group_write_source, workspace_id=workspace_id, actor_user_id="carol")
+            group_deny_revoked = store.revoke_folder_group_access(
+                child,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                group_id=group["id"],
             )
             group_written = store.reindex_document_file(
                 doc_id,
@@ -12537,6 +12582,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(write_granted["grants"][0]["role"], "write")
             self.assertEqual(written["name"], "Folder write memo")
             self.assertEqual(written_pages["pages"][0]["content"], "Inherited folder access evidence after user write.")
+            self.assertEqual(deny_granted["grants"][0]["role"], "deny")
+            self.assertEqual(denied_docs, [])
+            self.assertEqual(denied_query["citations"], [])
+            self.assertTrue(deny_revoked)
+            self.assertEqual([doc["id"] for doc in restored_docs], [doc_id])
             self.assertTrue(revoked)
             self.assertEqual(revoked_docs, [])
             self.assertEqual([grant["group_id"] for grant in group_granted["group_grants"]], [group["id"]])
@@ -12544,6 +12594,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual([doc["id"] for doc in group_docs], [doc_id])
             self.assertEqual([citation["doc_id"] for citation in group_query["citations"]], [doc_id])
             self.assertEqual(group_write_granted["group_grants"][0]["role"], "write")
+            self.assertEqual(group_denied["group_grants"][0]["role"], "deny")
+            self.assertEqual(group_denied_docs, [])
+            self.assertTrue(group_deny_revoked)
             self.assertEqual(group_written["name"], "Folder group write memo")
             self.assertEqual(
                 group_written_pages["pages"][0]["content"],
@@ -12621,6 +12674,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=member_headers,
                 )
                 member_pages_after_write = _get_json(f"{base}/documents/{doc_id}/pages", headers=member_headers)
+                denied = _post_json(access_url, {"grant_user_id": "bob", "grant_role": "deny"}, headers=owner_headers)
+                denied_pages = _get_json(f"{base}/documents/{doc_id}/pages", headers=member_headers)
+                denied_reindex = _put_json(
+                    f"{base}/documents/{doc_id}",
+                    {"path": str(replacement), "name": "Access deny blocked"},
+                    headers=member_headers,
+                    status=403,
+                )
                 revoked = _post_json(access_url, {"revoke_user_id": "bob"}, headers=owner_headers)
                 revoked_again = _post_json(access_url, {"revoke_user_id": "bob"}, headers=owner_headers)
             finally:
@@ -12643,6 +12704,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(write_reindex["updated"])
             self.assertEqual(write_reindex["document"]["name"], "Access write memo")
             self.assertEqual(member_pages_after_write["pages"][0]["content"], "Document access write grant evidence.")
+            self.assertEqual(denied["access"]["grants"][0]["role"], "deny")
+            self.assertEqual(denied_pages["pages"], [])
+            self.assertEqual(denied_reindex["error"], "document write access denied")
             self.assertTrue(revoked["revoked"])
             self.assertEqual(revoked["access"]["grants"], [])
             self.assertFalse(revoked_again["revoked"])
@@ -12694,6 +12758,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             thread.start()
             base = f"http://127.0.0.1:{server.server_port}"
             access_url = f"{base}/folders/{parent}/access"
+            child_access_url = f"{base}/folders/{child}/access"
             owner_headers = {"Authorization": f"Bearer {owner_token}"}
             audit_headers = {"Authorization": f"Bearer {audit_token}"}
             write_headers = {"Authorization": f"Bearer {write_token}"}
@@ -12737,6 +12802,20 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=member_headers,
                 )
                 member_pages_after_write = _get_json(f"{base}/documents/{doc_id}/pages", headers=member_headers)
+                denied = _post_json(
+                    child_access_url,
+                    {"grant_user_id": "bob", "grant_role": "deny"},
+                    headers=owner_headers,
+                )
+                denied_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=member_headers)
+                denied_reindex = _put_json(
+                    f"{base}/documents/{doc_id}",
+                    {"path": str(write_source), "name": "Folder deny write blocked"},
+                    headers=member_headers,
+                    status=403,
+                )
+                deny_revoked = _post_json(child_access_url, {"revoke_user_id": "bob"}, headers=owner_headers)
+                restored_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=member_headers)
                 revoked = _post_json(access_url, {"revoke_user_id": "bob"}, headers=owner_headers)
                 after_revoke_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=member_headers)
                 group_granted = _post_json(access_url, {"grant_group_id": group["id"]}, headers=owner_headers)
@@ -12784,6 +12863,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                 member_pages_after_write["pages"][0]["content"],
                 "HTTP inherited folder access evidence after user write.",
             )
+            self.assertEqual(denied["access"]["grants"][0]["role"], "deny")
+            self.assertEqual(denied_query["citations"], [])
+            self.assertEqual(denied_reindex["error"], "document write access denied")
+            self.assertTrue(deny_revoked["revoked"])
+            self.assertEqual([citation["doc_id"] for citation in restored_query["citations"]], [doc_id])
             self.assertTrue(revoked["revoked"])
             self.assertEqual(after_revoke_query["citations"], [])
             self.assertEqual([grant["group_id"] for grant in group_granted["access"]["group_grants"]], [group["id"]])
@@ -13990,6 +14074,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("grantFolderAccess", body)
                     self.assertIn("grantFolderGroupAccess", body)
                     self.assertIn("grant_role", body)
+                    self.assertIn('<option value="deny">deny</option>', body)
                     self.assertIn("data-rename-folder-id", body)
                     self.assertIn("data-move-folder-id", body)
                     self.assertIn("data-delete-folder-id", body)

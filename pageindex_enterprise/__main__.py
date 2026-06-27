@@ -443,7 +443,7 @@ def main() -> None:
     document_access.add_argument("--revoke-user")
     document_access.add_argument("--grant-group")
     document_access.add_argument("--revoke-group")
-    document_access.add_argument("--role", choices=["read", "write"], default="read")
+    document_access.add_argument("--role", choices=["read", "write", "deny"], default="read")
 
     document_share = sub.add_parser("document-share")
     document_share.add_argument("workspace_id")

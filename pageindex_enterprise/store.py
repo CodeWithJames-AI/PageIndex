@@ -76,6 +76,8 @@ WORKSPACE_EXPORT_TABLES = (
     "documents",
     "document_access_grants",
     "document_group_access_grants",
+    "query_source_sets",
+    "query_source_set_documents",
     "document_pages",
     "document_versions",
     "conversations",
@@ -91,6 +93,7 @@ WORKSPACE_EXPORT_TABLES = (
     "provider_config",
     "audit_events",
 )
+WORKSPACE_EXPORT_OPTIONAL_TABLES = ("query_source_sets", "query_source_set_documents")
 WORKSPACE_IMPORT_INSERT_ORDER = (
     "workspace",
     "workspace_members",
@@ -99,6 +102,8 @@ WORKSPACE_IMPORT_INSERT_ORDER = (
     "workspace_group_members",
     "folders",
     "documents",
+    "query_source_sets",
+    "query_source_set_documents",
     "folder_access_grants",
     "folder_group_access_grants",
     "document_access_grants",
@@ -199,6 +204,43 @@ def _normalize_quota_limit(limit: int | None, name: str) -> int | None:
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError(f"{name} must be a positive integer or null")
     return limit
+
+
+def _normalize_source_set_name(name: str) -> str:
+    normalized = " ".join(name.split())
+    if not normalized:
+        raise ValueError("Source set name is required.")
+    if len(normalized) > 120:
+        raise ValueError("Source set name must be 120 characters or fewer.")
+    return normalized
+
+
+def _normalize_source_set_description(description: str | None) -> str:
+    if description is None:
+        return ""
+    normalized = " ".join(description.split())
+    if len(normalized) > 500:
+        raise ValueError("Source set description must be 500 characters or fewer.")
+    return normalized
+
+
+def _normalize_source_set_doc_ids(doc_ids: list[str] | None) -> list[str]:
+    if not doc_ids:
+        raise ValueError("At least one document id is required.")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for doc_id in doc_ids:
+        if not isinstance(doc_id, str):
+            raise ValueError("Document ids must be strings.")
+        doc_id = doc_id.strip()
+        if not doc_id:
+            continue
+        if doc_id not in seen:
+            normalized.append(doc_id)
+            seen.add(doc_id)
+    if not normalized:
+        raise ValueError("At least one document id is required.")
+    return normalized
 
 
 def _normalize_legal_hold_reason(reason: str | None) -> str | None:
@@ -511,7 +553,13 @@ def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
         for table in WORKSPACE_EXPORT_TABLES:
             filename = f"{table}.jsonl"
             if filename not in names:
-                errors.append(f"required export table is missing: {filename}")
+                if table in WORKSPACE_EXPORT_OPTIONAL_TABLES:
+                    if table in manifest_tables or filename in manifest_checksums:
+                        errors.append(f"manifest references missing optional export table: {filename}")
+                    else:
+                        warnings.append(f"optional export table is missing: {filename}")
+                else:
+                    errors.append(f"required export table is missing: {filename}")
                 continue
             expected_checksum = manifest_checksums.get(filename)
             if isinstance(checksums, dict):
@@ -889,6 +937,25 @@ class EnterpriseStore:
               revoked_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS query_source_sets (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              created_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(workspace_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS query_source_set_documents (
+              source_set_id TEXT NOT NULL REFERENCES query_source_sets(id) ON DELETE CASCADE,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+              position INTEGER NOT NULL,
+              PRIMARY KEY (source_set_id, doc_id)
+            );
+
             CREATE TABLE IF NOT EXISTS document_pages (
               doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
               page INTEGER NOT NULL,
@@ -1010,6 +1077,12 @@ class EnterpriseStore:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_invitations_pending_email
             ON workspace_invitations (workspace_id, email)
             WHERE status = 'pending'
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_query_source_set_documents_workspace
+            ON query_source_set_documents (workspace_id, doc_id)
             """
         )
         self._ensure_schema_columns()
@@ -3015,6 +3088,28 @@ class EnterpriseStore:
                     (workspace_id,),
                 )
             ),
+            "query_source_sets.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT id, workspace_id, name, description, created_by, created_at, updated_at
+                    FROM query_source_sets
+                    WHERE workspace_id = ?
+                    ORDER BY updated_at, id
+                    """,
+                    (workspace_id,),
+                )
+            ),
+            "query_source_set_documents.jsonl": _rows(
+                self.conn.execute(
+                    """
+                    SELECT source_set_id, workspace_id, doc_id, position
+                    FROM query_source_set_documents
+                    WHERE workspace_id = ?
+                    ORDER BY source_set_id, position, doc_id
+                    """,
+                    (workspace_id,),
+                )
+            ),
             "document_pages.jsonl": _rows(
                 self.conn.execute(
                     """
@@ -3155,8 +3250,13 @@ class EnterpriseStore:
         errors: list[str] = []
         rows_by_table: dict[str, list[dict[str, Any]]] = {}
         with zipfile.ZipFile(bundle) as archive:
+            names = set(archive.namelist())
             for table in WORKSPACE_EXPORT_TABLES:
-                rows = _read_workspace_import_jsonl(archive, f"{table}.jsonl", errors)
+                filename = f"{table}.jsonl"
+                if filename not in names and table in WORKSPACE_EXPORT_OPTIONAL_TABLES:
+                    rows = []
+                else:
+                    rows = _read_workspace_import_jsonl(archive, filename, errors)
                 rows_by_table[table] = _workspace_import_rows_for_insert(table, rows)
         if errors:
             raise ValueError("workspace import bundle is invalid: " + "; ".join(errors))
@@ -4696,6 +4796,186 @@ class EnterpriseStore:
         row = self._one("SELECT * FROM documents WHERE id = ?", (doc_id,))
         return dict(row) if row else None
 
+    def _query_source_set_row(self, workspace_id: str, source_set_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            """
+            SELECT id, workspace_id, name, description, created_by, created_at, updated_at
+            FROM query_source_sets
+            WHERE workspace_id = ? AND id = ?
+            """,
+            (workspace_id, source_set_id.strip()),
+        )
+        return dict(row) if row else None
+
+    def _readable_documents_by_id(
+        self,
+        workspace_id: str,
+        doc_ids: list[str],
+        actor_user_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        if not doc_ids:
+            return {}
+        read_condition, read_args = self._document_read_condition("d", actor_user_id)
+        rows = self.conn.execute(
+            f"""
+            SELECT d.id, d.workspace_id, d.name, d.kind, d.access_mode
+            FROM documents d
+            WHERE d.workspace_id = ?
+              AND d.id IN ({','.join('?' for _ in doc_ids)})
+              AND {read_condition}
+            """,
+            (workspace_id, *doc_ids, *read_args),
+        )
+        return {row["id"]: dict(row) for row in rows}
+
+    def _query_source_set_documents(
+        self,
+        workspace_id: str,
+        source_set_id: str,
+        actor_user_id: str,
+    ) -> list[dict[str, Any]]:
+        read_condition, read_args = self._document_read_condition("d", actor_user_id)
+        rows = self.conn.execute(
+            f"""
+            SELECT d.id, d.workspace_id, d.name, d.kind, d.access_mode, qsd.position
+            FROM query_source_set_documents qsd
+            JOIN documents d ON d.id = qsd.doc_id
+            WHERE qsd.workspace_id = ?
+              AND qsd.source_set_id = ?
+              AND d.workspace_id = ?
+              AND {read_condition}
+            ORDER BY qsd.position, d.name, d.id
+            """,
+            (workspace_id, source_set_id, workspace_id, *read_args),
+        )
+        return [dict(row) for row in rows]
+
+    def get_query_source_set(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        source_set_id: str,
+    ) -> dict[str, Any] | None:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        source_set = self._query_source_set_row(workspace_id, source_set_id)
+        if not source_set:
+            return None
+        documents = self._query_source_set_documents(workspace_id, source_set["id"], actor_user_id)
+        return {
+            **source_set,
+            "doc_ids": [document["id"] for document in documents],
+            "documents": documents,
+            "document_count": len(documents),
+        }
+
+    def list_query_source_sets(self, workspace_id: str, actor_user_id: str) -> list[dict[str, Any]]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        rows = self.conn.execute(
+            """
+            SELECT id, workspace_id, name, description, created_by, created_at, updated_at
+            FROM query_source_sets
+            WHERE workspace_id = ?
+            ORDER BY updated_at DESC, name, id
+            """,
+            (workspace_id,),
+        )
+        source_sets = []
+        for row in rows:
+            source_set = dict(row)
+            documents = self._query_source_set_documents(workspace_id, source_set["id"], actor_user_id)
+            source_sets.append(
+                {
+                    **source_set,
+                    "doc_ids": [document["id"] for document in documents],
+                    "documents": documents,
+                    "document_count": len(documents),
+                }
+            )
+        return source_sets
+
+    def create_query_source_set(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        name: str,
+        doc_ids: list[str] | None,
+        *,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        normalized_name = _normalize_source_set_name(name)
+        normalized_description = _normalize_source_set_description(description)
+        normalized_doc_ids = _normalize_source_set_doc_ids(doc_ids)
+        if self._one(
+            "SELECT id FROM query_source_sets WHERE workspace_id = ? AND name = ?",
+            (workspace_id, normalized_name),
+        ):
+            raise ValueError("Source set name already exists.")
+        readable_documents = self._readable_documents_by_id(workspace_id, normalized_doc_ids, actor_user_id)
+        if len(readable_documents) != len(normalized_doc_ids):
+            raise ValueError("Source set documents must belong to the workspace and be readable.")
+        source_set_id = f"qss_{uuid.uuid4().hex}"
+        now = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO query_source_sets
+                  (id, workspace_id, name, description, created_by, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (source_set_id, workspace_id, normalized_name, normalized_description, actor_user_id, now, now),
+            )
+            for position, doc_id in enumerate(normalized_doc_ids):
+                self.conn.execute(
+                    """
+                    INSERT INTO query_source_set_documents (source_set_id, workspace_id, doc_id, position)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (source_set_id, workspace_id, doc_id, position),
+                )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "query_source_set.create",
+                target_type="query_source_set",
+                target_id=source_set_id,
+                details={"name": normalized_name, "document_count": len(normalized_doc_ids)},
+            )
+        created = self.get_query_source_set(workspace_id, actor_user_id, source_set_id)
+        if created is None:
+            raise RuntimeError("created source set could not be loaded")
+        return created
+
+    def delete_query_source_set(self, workspace_id: str, actor_user_id: str, source_set_id: str) -> bool:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        source_set = self._query_source_set_row(workspace_id, source_set_id)
+        if not source_set:
+            return False
+        with self._atomic():
+            self.conn.execute("DELETE FROM query_source_sets WHERE id = ? AND workspace_id = ?", (source_set["id"], workspace_id))
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "query_source_set.delete",
+                target_type="query_source_set",
+                target_id=source_set["id"],
+                details={"name": source_set["name"]},
+            )
+        return True
+
+    def resolve_query_source_set_doc_ids(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        source_set_id: str,
+    ) -> list[str]:
+        self.require_workspace_access(workspace_id, actor_user_id)
+        source_set = self._query_source_set_row(workspace_id, source_set_id)
+        if source_set is None:
+            raise ValueError("Query source set not found.")
+        documents = self._query_source_set_documents(workspace_id, source_set["id"], actor_user_id)
+        return [document["id"] for document in documents]
+
     def list_documents(
         self,
         folder_id: str | None = None,
@@ -5607,11 +5887,13 @@ class EnterpriseStore:
         terms = _terms_for(query, expert_hints)
         if not terms:
             return []
+        if doc_ids is not None and not doc_ids:
+            return []
         haystack_sql = "lower(d.name || ' ' || d.description || ' ' || p.content)"
         term_where = " OR ".join([f"{haystack_sql} LIKE ? ESCAPE '\\'" for _ in terms])
         args: list[Any] = [f"%{_escape_like(term)}%" for term in terms]
         where_parts = [f"({term_where})"]
-        if doc_ids:
+        if doc_ids is not None:
             where_parts.append(f"d.id IN ({','.join('?' for _ in doc_ids)})")
             args.extend(doc_ids)
         if workspace_id:
@@ -5647,6 +5929,7 @@ class EnterpriseStore:
         query: str,
         *,
         doc_ids: list[str] | None = None,
+        source_set_id: str | None = None,
         expert_hints: list[str] | None = None,
         workspace_id: str | None = None,
         limit: int = 8,
@@ -5657,6 +5940,20 @@ class EnterpriseStore:
     ) -> dict[str, Any]:
         if actor_user_id and workspace_id:
             self.require_workspace_access(workspace_id, actor_user_id)
+        if doc_ids and source_set_id:
+            raise ValueError("Use doc_ids or source_set_id, not both.")
+        if source_set_id is not None and not isinstance(source_set_id, str):
+            raise ValueError("source_set_id must be a string")
+        resolved_source_set_id = source_set_id.strip() if isinstance(source_set_id, str) else None
+        source_set_scope: dict[str, Any] | None = None
+        if resolved_source_set_id:
+            if not workspace_id or not actor_user_id:
+                raise ValueError("source_set_id requires workspace_id and actor_user_id")
+            doc_ids = self.resolve_query_source_set_doc_ids(workspace_id, actor_user_id, resolved_source_set_id)
+            source_set_scope = {
+                "source_set_id": resolved_source_set_id,
+                "source_set_document_count": len(doc_ids),
+            }
         search = self.hybrid_search(
             query,
             doc_ids=doc_ids,
@@ -5677,6 +5974,8 @@ class EnterpriseStore:
                 "query_tree": query_tree,
                 "hybrid_policy": search["policy"],
             }
+            if source_set_scope:
+                scope.update(source_set_scope)
             if scope_extra:
                 scope.update(scope_extra)
             run_id = self.start_query(
@@ -5874,6 +6173,8 @@ class EnterpriseStore:
         terms = _terms_for(query, expert_hints)
         if not terms:
             return []
+        if doc_ids is not None and not doc_ids:
+            return []
         haystack_sql = "lower(n.label || ' ' || n.summary || ' ' || n.path || ' ' || d.name || ' ' || d.description)"
         term_where = " OR ".join([f"{haystack_sql} LIKE ? ESCAPE '\\'" for _ in terms])
         args: list[Any] = [f"%{_escape_like(term)}%" for term in terms]
@@ -5885,7 +6186,7 @@ class EnterpriseStore:
             "n.page_end IS NOT NULL",
             f"({term_where})",
         ]
-        if doc_ids:
+        if doc_ids is not None:
             where_parts.append(f"n.doc_id IN ({','.join('?' for _ in doc_ids)})")
             args.extend(doc_ids)
         if workspace_id:

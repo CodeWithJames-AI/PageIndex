@@ -1202,6 +1202,187 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(result["verification"]["ok"], result["verification"]["errors"])
             self.assertIn("Found relevant evidence", result["answer"])
 
+    def test_query_source_sets_filter_restricted_docs_from_query_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            public_source = tmp_path / "public.txt"
+            secret_source = tmp_path / "secret.txt"
+            public_source.write_text("Shared diligence evidence is available to the full workspace.", encoding="utf-8")
+            secret_source.write_text("Secret diligence evidence is restricted to admins.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            public_doc_id = store.ingest_file(public_source, workspace_id=workspace_id, actor_user_id="alice", name="Public diligence")
+            secret_doc_id = store.ingest_file(secret_source, workspace_id=workspace_id, actor_user_id="alice", name="Secret diligence")
+            store.set_document_access_mode(secret_doc_id, access_mode="restricted", workspace_id=workspace_id, actor_user_id="alice")
+            source_set = store.create_query_source_set(
+                workspace_id,
+                "alice",
+                "Diligence set",
+                [public_doc_id, secret_doc_id],
+                description="Cross-document diligence pack",
+            )
+            secret_only_set = store.create_query_source_set(
+                workspace_id,
+                "alice",
+                "Secret-only set",
+                [secret_doc_id],
+            )
+
+            admin_result = store.query_corpus(
+                "diligence evidence",
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                source_set_id=source_set["id"],
+            )
+            member_result = store.query_corpus(
+                "diligence evidence",
+                workspace_id=workspace_id,
+                actor_user_id="bob",
+                source_set_id=source_set["id"],
+            )
+            hidden_result = store.query_corpus(
+                "diligence evidence",
+                workspace_id=workspace_id,
+                actor_user_id="bob",
+                source_set_id=secret_only_set["id"],
+            )
+
+            self.assertEqual(source_set["doc_ids"], [public_doc_id, secret_doc_id])
+            self.assertEqual({citation["doc_id"] for citation in admin_result["citations"]}, {public_doc_id, secret_doc_id})
+            self.assertEqual({citation["doc_id"] for citation in member_result["citations"]}, {public_doc_id})
+            self.assertEqual(member_result["trace"]["scope"]["source_set_id"], source_set["id"])
+            self.assertEqual(member_result["trace"]["scope"]["doc_ids"], [public_doc_id])
+            self.assertEqual(member_result["trace"]["scope"]["source_set_document_count"], 1)
+            self.assertNotIn(secret_doc_id, json.dumps(member_result["trace"]["scope"]))
+            self.assertEqual(hidden_result["citations"], [])
+            self.assertEqual(hidden_result["trace"]["scope"]["doc_ids"], [])
+            self.assertEqual(hidden_result["trace"]["scope"]["source_set_document_count"], 0)
+
+    def test_query_source_set_creation_rejects_missing_or_foreign_docs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            alpha_source = tmp_path / "alpha.txt"
+            beta_source = tmp_path / "beta.txt"
+            alpha_source.write_text("Alpha source set evidence.", encoding="utf-8")
+            beta_source.write_text("Beta source set evidence.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
+            alpha_workspace = store.create_workspace("Alpha")
+            beta_workspace = store.create_workspace("Beta")
+            store.add_workspace_member(alpha_workspace, "alice", "owner")
+            store.add_workspace_member(alpha_workspace, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(beta_workspace, "mallory", "owner")
+            alpha_doc_id = store.ingest_file(alpha_source, workspace_id=alpha_workspace, actor_user_id="alice", name="Alpha memo")
+            beta_doc_id = store.ingest_file(beta_source, workspace_id=beta_workspace, actor_user_id="mallory", name="Beta memo")
+
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.list_query_source_sets(alpha_workspace, "bob")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.create_query_source_set(alpha_workspace, "bob", "Member set", [alpha_doc_id])
+            with self.assertRaisesRegex(ValueError, "Source set documents must belong"):
+                store.create_query_source_set(alpha_workspace, "alice", "Foreign set", [beta_doc_id])
+            with self.assertRaisesRegex(ValueError, "Source set documents must belong"):
+                store.create_query_source_set(alpha_workspace, "alice", "Missing set", ["doc_missing"])
+            with self.assertRaisesRegex(ValueError, "Use doc_ids or source_set_id"):
+                store.query_corpus(
+                    "alpha",
+                    workspace_id=alpha_workspace,
+                    actor_user_id="alice",
+                    doc_ids=[alpha_doc_id],
+                    source_set_id="qss_conflict",
+                )
+
+    def test_query_source_set_cli_creates_lists_deletes_and_queries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "source-set-cli.txt"
+            source.write_text("CLI source set evidence for reusable query scope.", encoding="utf-8")
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team", workspace_id="ws_source_set_cli")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="CLI source set memo")
+            store.close()
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+
+            created = subprocess.run(
+                [*base, "query-source-set", workspace_id, "alice", "--create", "CLI scope", "--doc-id", doc_id],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            created_source_set = json.loads(created.stdout)
+            listed = subprocess.run(
+                [*base, "query-source-set", workspace_id, "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            queried = subprocess.run(
+                [
+                    *base,
+                    "query",
+                    "source set evidence",
+                    "--workspace-id",
+                    workspace_id,
+                    "--user-id",
+                    "alice",
+                    "--source-set-id",
+                    created_source_set["id"],
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            conflict = subprocess.run(
+                [
+                    *base,
+                    "query",
+                    "source set evidence",
+                    "--workspace-id",
+                    workspace_id,
+                    "--user-id",
+                    "alice",
+                    "--source-set-id",
+                    created_source_set["id"],
+                    "--doc-id",
+                    doc_id,
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            deleted = subprocess.run(
+                [*base, "query-source-set", workspace_id, "alice", "--delete", created_source_set["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            listed_source_sets = json.loads(listed.stdout)
+            query_result = json.loads(queried.stdout)
+            delete_result = json.loads(deleted.stdout)
+            self.assertEqual(created_source_set["doc_ids"], [doc_id])
+            self.assertEqual(listed_source_sets[0]["id"], created_source_set["id"])
+            self.assertEqual(query_result["trace"]["scope"]["source_set_id"], created_source_set["id"])
+            self.assertEqual(query_result["citations"][0]["doc_id"], doc_id)
+            self.assertNotEqual(conflict.returncode, 0)
+            self.assertIn("use --doc-id or --source-set-id", conflict.stderr)
+            self.assertTrue(delete_result["deleted"])
+
     def test_query_run_history_is_admin_scoped(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3776,7 +3957,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             workspace_id = store.create_workspace("Team", workspace_id="ws_import")
             store.add_workspace_member(workspace_id, "alice", "owner")
             folder_id = store.create_folder("Backups", workspace_id=workspace_id, actor_user_id="alice")
-            store.ingest_file(source, folder_id=folder_id, workspace_id=workspace_id, actor_user_id="alice", name="Import memo")
+            doc_id = store.ingest_file(source, folder_id=folder_id, workspace_id=workspace_id, actor_user_id="alice", name="Import memo")
+            source_set = store.create_query_source_set(
+                workspace_id,
+                "alice",
+                "Import source set",
+                [doc_id],
+                description="Source set export preservation",
+            )
             store.create_api_token(workspace_id, "alice", name="secret-token")
             store.query_corpus("dry-run", workspace_id=workspace_id, actor_user_id="alice")
             store.set_query_retention_policy(workspace_id, "alice", retention_days=45)
@@ -3858,6 +4046,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                 restored_audit_retention = restored_store.get_audit_retention_policy(workspace_id, "alice")
                 restored_quota_policy = restored_store.get_workspace_quota_policy(workspace_id, "alice")
                 restored_provider = restored_store.get_workspace_provider_config(workspace_id, "alice")
+                restored_source_sets = restored_store.list_query_source_sets(workspace_id, "alice")
+                restored_source_set_query = restored_store.query_corpus(
+                    "import dry-run",
+                    workspace_id=workspace_id,
+                    actor_user_id="alice",
+                    source_set_id=source_set["id"],
+                )
                 restored_audit_events = restored_store.list_audit_events(workspace_id, "alice")
                 restored_integrity = restored_store.verify_audit_integrity(workspace_id, "alice")
                 restored_token_count = int(
@@ -3870,6 +4065,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(report["format"], "pageindex.workspace-export.v1")
             self.assertEqual(report["workspace_id"], workspace_id)
             self.assertEqual(report["table_counts"]["documents"], 1)
+            self.assertEqual(report["table_counts"]["query_source_sets"], 1)
+            self.assertEqual(report["table_counts"]["query_source_set_documents"], 1)
             self.assertEqual(report["manifest_tables"], report["table_counts"])
             self.assertEqual(after_counts, before_counts)
             self.assertTrue(cli_report["ok"], cli_report["errors"])
@@ -3894,6 +4091,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(restored_quota_policy["usage"], {"documents": 1, "pages": 1, "members": 1})
             self.assertEqual(restored_provider["model"], "restore-model")
             self.assertEqual(restored_provider["api_key_env_var"], "PAGEINDEX_RESTORE_PROVIDER_KEY")
+            self.assertEqual(restored_source_sets[0]["id"], source_set["id"])
+            self.assertEqual(restored_source_sets[0]["doc_ids"], [doc_id])
+            self.assertEqual(restored_source_set_query["trace"]["scope"]["source_set_id"], source_set["id"])
+            self.assertEqual(restored_source_set_query["citations"][0]["doc_id"], doc_id)
             self.assertTrue(any(event.get("integrity_hash") for event in restored_audit_events))
             self.assertTrue(restored_integrity["ok"], restored_integrity["failures"])
             self.assertGreater(restored_integrity["checked"], 0)
@@ -4230,6 +4431,84 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(restored_integrity["ok"], restored_integrity["failures"])
             self.assertEqual(operator_events[0]["target_id"], restore_workspace_id)
             self.assertIn("Workspace already exists", duplicate["error"])
+
+    def test_http_query_source_sets_require_admin_and_drive_queries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "source-set-http.txt"
+            source.write_text("HTTP source set evidence for reusable query scope.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="HTTP source set memo")
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store._commit()
+            member_token = member_token_record["token"]
+            store.close()
+
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            url = f"{base}/query-source-sets"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            try:
+                missing = _get_error(url)
+                audit_create_denied = _post_json(
+                    url,
+                    {"name": "Denied", "doc_ids": [doc_id]},
+                    headers={"Authorization": f"Bearer {audit_token}"},
+                    status=403,
+                )
+                write_list_denied = _get_error(url, headers={"Authorization": f"Bearer {write_token}"})
+                member_list_denied = _get_error(url, headers={"Authorization": f"Bearer {member_token}"})
+                created = _post_json(
+                    url,
+                    {"name": "Reusable scope", "description": "HTTP source set", "doc_ids": [doc_id]},
+                    headers=owner_headers,
+                    status=201,
+                )
+                listed = _get_json(url, headers=owner_headers)
+                conflict = _post_json(
+                    f"{base}/query",
+                    {"query": "source set evidence", "doc_ids": [doc_id], "source_set_id": created["id"]},
+                    headers=owner_headers,
+                    status=400,
+                )
+                queried = _post_json(
+                    f"{base}/query",
+                    {"query": "source set evidence", "source_set_id": created["id"]},
+                    headers=owner_headers,
+                )
+                deleted = _delete_json(f"{url}/{created['id']}", headers=owner_headers)
+                deleted_again = _delete_json(f"{url}/{created['id']}", headers=owner_headers)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(missing["error"], "api token required")
+            self.assertEqual(audit_create_denied["error"], "api token scope denied")
+            self.assertEqual(write_list_denied["error"], "api token scope denied")
+            self.assertEqual(member_list_denied["error"], "workspace role denied")
+            self.assertEqual(created["name"], "Reusable scope")
+            self.assertEqual(created["doc_ids"], [doc_id])
+            self.assertEqual(listed["source_sets"][0]["id"], created["id"])
+            self.assertEqual(conflict["error"], "use doc_ids or source_set_id, not both")
+            self.assertEqual(queried["trace"]["scope"]["source_set_id"], created["id"])
+            self.assertEqual(queried["trace"]["scope"]["doc_ids"], [doc_id])
+            self.assertEqual(queried["citations"][0]["doc_id"], doc_id)
+            self.assertTrue(deleted["deleted"])
+            self.assertFalse(deleted_again["deleted"])
 
     def test_http_workspace_usage_requires_admin_audit_token(self):
         with tempfile.TemporaryDirectory() as tmp:

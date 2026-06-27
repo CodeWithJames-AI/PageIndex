@@ -433,10 +433,19 @@ def main() -> None:
     query = sub.add_parser("query")
     query.add_argument("query")
     query.add_argument("--doc-id", action="append", dest="doc_ids")
+    query.add_argument("--source-set-id")
     query.add_argument("--hint", action="append", dest="expert_hints")
     query.add_argument("--workspace-id")
     query.add_argument("--user-id")
     query.add_argument("--limit", type=int, default=8)
+
+    query_source_set = sub.add_parser("query-source-set")
+    query_source_set.add_argument("workspace_id")
+    query_source_set.add_argument("user_id")
+    query_source_set.add_argument("--create")
+    query_source_set.add_argument("--description")
+    query_source_set.add_argument("--doc-id", action="append", dest="doc_ids")
+    query_source_set.add_argument("--delete")
 
     query_tree = sub.add_parser("query-tree")
     query_tree.add_argument("query")
@@ -1211,11 +1220,14 @@ def main() -> None:
                 )
             )
         elif args.command == "query":
+            if args.doc_ids and args.source_set_id:
+                raise SystemExit("use --doc-id or --source-set-id, not both")
             print(
                 json.dumps(
                     store.query_corpus(
                         args.query,
                         doc_ids=args.doc_ids,
+                        source_set_id=args.source_set_id,
                         expert_hints=args.expert_hints,
                         workspace_id=args.workspace_id,
                         limit=args.limit,
@@ -1224,6 +1236,34 @@ def main() -> None:
                     indent=2,
                 )
             )
+        elif args.command == "query-source-set":
+            if args.create and args.delete:
+                raise SystemExit("use --create or --delete, not both")
+            if args.delete:
+                deleted = _workspace_member_cli(
+                    lambda: store.delete_query_source_set(args.workspace_id, args.user_id, args.delete)
+                )
+                print(json.dumps({"deleted": deleted}, indent=2))
+            elif args.create:
+                source_set = _workspace_member_cli(
+                    lambda: store.create_query_source_set(
+                        args.workspace_id,
+                        args.user_id,
+                        args.create,
+                        args.doc_ids,
+                        description=args.description,
+                    )
+                )
+                print(json.dumps(source_set, indent=2))
+            else:
+                print(
+                    json.dumps(
+                        _workspace_member_cli(
+                            lambda: store.list_query_source_sets(args.workspace_id, args.user_id)
+                        ),
+                        indent=2,
+                    )
+                )
         elif args.command == "query-tree":
             print(
                 json.dumps(

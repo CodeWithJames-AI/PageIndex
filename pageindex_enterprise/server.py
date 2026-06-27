@@ -228,6 +228,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            if parsed.path == "/query-source-sets":
+                self._list_query_source_sets()
+                return
             query_run_id = _query_run_path(parsed.path)
             if query_run_id:
                 store = EnterpriseStore(self.server.root)
@@ -548,6 +551,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/workspace-quota-policy":
                 self._set_workspace_quota_policy(payload)
                 return
+            if parsed.path == "/query-source-sets":
+                self._create_query_source_set(payload)
+                return
             if parsed.path == "/chat/completions":
                 self._chat_completion(payload)
                 return
@@ -676,6 +682,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     self._json({"deleted": deleted})
                 finally:
                     store.close()
+                return
+            query_source_set_id = _query_source_set_path(parsed.path)
+            if query_source_set_id:
+                self._delete_query_source_set(query_source_set_id)
                 return
             conversation_id = _conversation_path(parsed.path)
             if conversation_id:
@@ -1864,6 +1874,11 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         query = payload.get("query")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query is required")
+        source_set_id = payload.get("source_set_id", payload.get("sourceSetId"))
+        if source_set_id is not None and not isinstance(source_set_id, str):
+            raise ValueError("source_set_id must be a string")
+        if source_set_id and payload.get("doc_ids") is not None:
+            raise ValueError("use doc_ids or source_set_id, not both")
         store = EnterpriseStore(self.server.root)
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope="read")
@@ -1871,12 +1886,58 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 store.query_corpus(
                     query,
                     doc_ids=_list_or_none(payload.get("doc_ids")),
+                    source_set_id=source_set_id,
                     expert_hints=_list_or_none(payload.get("expert_hints")),
                     workspace_id=workspace_id,
                     limit=int(payload.get("limit", 8)),
                     actor_user_id=user_id,
                 )
             )
+        finally:
+            store.close()
+
+    def _list_query_source_sets(self) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store, required_scope="audit", require_api_token=True
+            )
+            self._json({"source_sets": store.list_query_source_sets(workspace_id, user_id)})
+        finally:
+            store.close()
+
+    def _create_query_source_set(self, payload: dict[str, Any]) -> None:
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name is required")
+        description = payload.get("description")
+        if description is not None and not isinstance(description, str):
+            raise ValueError("description must be a string")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store, required_scope=("audit", "write"), require_api_token=True
+            )
+            self._json(
+                store.create_query_source_set(
+                    workspace_id,
+                    user_id,
+                    name,
+                    _list_or_none(payload.get("doc_ids")),
+                    description=description,
+                ),
+                HTTPStatus.CREATED,
+            )
+        finally:
+            store.close()
+
+    def _delete_query_source_set(self, source_set_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store, required_scope=("audit", "write"), require_api_token=True
+            )
+            self._json({"deleted": store.delete_query_source_set(workspace_id, user_id, source_set_id)})
         finally:
             store.close()
 
@@ -2702,6 +2763,13 @@ def _render_public_conversation_share(shared: dict[str, Any]) -> str:
 def _query_run_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "query-runs":
+        return unquote(parts[1])
+    return None
+
+
+def _query_source_set_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "query-source-sets":
         return unquote(parts[1])
     return None
 

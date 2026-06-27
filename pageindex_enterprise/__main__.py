@@ -445,6 +445,12 @@ def main() -> None:
     document_access.add_argument("--revoke-group")
     document_access.add_argument("--role", choices=["read", "write", "deny"], default="read")
 
+    acl_bulk = sub.add_parser("acl-bulk")
+    acl_bulk.add_argument("workspace_id")
+    acl_bulk.add_argument("actor_user_id")
+    acl_bulk.add_argument("policy_path")
+    acl_bulk.add_argument("--apply", action="store_true")
+
     document_share = sub.add_parser("document-share")
     document_share.add_argument("workspace_id")
     document_share.add_argument("user_id")
@@ -1363,6 +1369,21 @@ def main() -> None:
             if access is None:
                 raise SystemExit("document not found")
             print(json.dumps(access, indent=2))
+        elif args.command == "acl-bulk":
+            try:
+                with open(args.policy_path, encoding="utf-8") as handle:
+                    policy = json.load(handle)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"invalid ACL policy JSON: {exc}") from exc
+            report = _workspace_member_cli(
+                lambda: store.apply_acl_bulk(
+                    args.workspace_id,
+                    args.actor_user_id,
+                    policy,
+                    dry_run=not args.apply,
+                )
+            )
+            print(json.dumps(report, indent=2))
         elif args.command == "document-share":
             selected_actions = [
                 bool(args.share),

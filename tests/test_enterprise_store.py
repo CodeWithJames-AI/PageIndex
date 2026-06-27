@@ -12932,6 +12932,87 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(group_revoked["revoked"])
             self.assertEqual(after_group_revoke_query["citations"], [])
 
+    def test_acl_bulk_dry_run_and_apply_grants_documents_and_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "bulk.txt"
+            source.write_text("Bulk ACL import evidence.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(workspace_id, "vera", "viewer", actor_user_id="alice")
+            folder_id = store.create_folder("Legal", workspace_id=workspace_id, actor_user_id="alice")
+            doc_id = store.ingest_file(source, folder_id=folder_id, workspace_id=workspace_id, actor_user_id="alice", name="Bulk memo")
+            group = store.create_workspace_group(workspace_id, "alice", "Reviewers")
+            store.add_workspace_group_member(workspace_id, "alice", group["id"], "bob")
+            policy = {
+                "document_grants": [
+                    {"doc_id": doc_id, "user_id": "bob", "role": "write"},
+                    {"doc_id": doc_id, "group_id": group["id"], "role": "deny"},
+                ],
+                "folder_grants": [
+                    {"folder_id": folder_id, "user_id": "bob", "role": "read"},
+                    {"folder_id": folder_id, "group_id": group["id"], "role": "write"},
+                ],
+            }
+
+            dry_run = store.apply_acl_bulk(workspace_id, "alice", policy)
+            access_after_dry_run = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            applied = store.apply_acl_bulk(workspace_id, "alice", policy, dry_run=False)
+            document_access = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            folder_access = store.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id="alice")
+            invalid = store.apply_acl_bulk(
+                workspace_id,
+                "alice",
+                {"document_grants": [{"doc_id": doc_id, "user_id": "vera", "role": "write"}]},
+                dry_run=False,
+            )
+            store.close()
+
+            cli_policy = tmp_path / "acl-policy.json"
+            cli_policy.write_text(json.dumps({"folder_grants": [{"folder_id": folder_id, "user_id": "bob", "role": "deny"}]}), encoding="utf-8")
+            repo_root = Path(__file__).resolve().parents[1]
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            cli_dry_run = subprocess.run(
+                [*base, "acl-bulk", workspace_id, "alice", str(cli_policy)],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            cli_apply = subprocess.run(
+                [*base, "acl-bulk", workspace_id, "alice", str(cli_policy), "--apply"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            cli_dry_run_report = json.loads(cli_dry_run.stdout)
+            cli_apply_report = json.loads(cli_apply.stdout)
+            inspected = EnterpriseStore(root)
+            folder_access_after_cli = inspected.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id="alice")
+            inspected.close()
+
+            self.assertTrue(dry_run["dry_run"])
+            self.assertEqual(dry_run["operation_count"], 4)
+            self.assertEqual(dry_run["applied"], 0)
+            self.assertEqual(access_after_dry_run["grants"], [])
+            self.assertFalse(applied["dry_run"])
+            self.assertEqual(applied["applied"], 4)
+            self.assertEqual(document_access["grants"][0]["role"], "write")
+            self.assertEqual(document_access["group_grants"][0]["role"], "deny")
+            self.assertEqual(folder_access["grants"][0]["role"], "read")
+            self.assertEqual(folder_access["group_grants"][0]["role"], "write")
+            self.assertEqual(invalid["applied"], 0)
+            self.assertEqual(invalid["errors"][0]["error"], "write grant requires workspace write role")
+            self.assertTrue(cli_dry_run_report["dry_run"])
+            self.assertEqual(cli_dry_run_report["applied"], 0)
+            self.assertFalse(cli_apply_report["dry_run"])
+            self.assertEqual(cli_apply_report["applied"], 1)
+            self.assertEqual(folder_access_after_cli["grants"][0]["role"], "deny")
+
     def test_http_workspace_group_routes_grant_document_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

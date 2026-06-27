@@ -2824,11 +2824,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("token_hash", serialized_resolved)
             self.assertIsNone(expired_resolution)
             self.assertEqual(usage["share_links_active"], 2)
+            self.assertEqual(usage["share_links_expired"], 1)
+            self.assertEqual(usage["share_links_exhausted"], 0)
             self.assertTrue(revoked)
             self.assertFalse(revoked_again)
             self.assertIsNone(store.resolve_conversation_share_link(active["token"]))
             self.assertIsNone(archived_resolution)
             self.assertEqual(usage_after_archive["share_links_active"], 0)
+            self.assertEqual(usage_after_archive["share_links_expired"], 1)
+            self.assertEqual(usage_after_archive["share_links_exhausted"], 0)
             self.assertIn("conversation.share_link_create", [event["action"] for event in audit_events])
             self.assertIn("conversation.share_link_revoke", [event["action"] for event in audit_events])
             self.assertNotIn(active["token"], serialized_audit)
@@ -12612,6 +12616,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     limit=20,
                 )
                 share_links_after_views = audit_store.list_conversation_share_links(conversation["id"], "alice")
+                conversation_usage = audit_store.get_workspace_usage_summary(workspace_id, "alice")["conversations"]
             finally:
                 audit_store.close()
 
@@ -12763,6 +12768,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIsNotNone(share_links_after_views_by_id[redacted_created["id"]]["last_viewed_at"])
             self.assertIsNotNone(share_links_after_views_by_id[capped_created["id"]]["last_viewed_at"])
             self.assertIsNotNone(share_links_after_views_by_id[password_created["id"]]["last_viewed_at"])
+            self.assertEqual(conversation_usage["share_links_active"], 2)
+            self.assertEqual(conversation_usage["share_links_revoked"], 1)
+            self.assertEqual(conversation_usage["share_links_expired"], 0)
+            self.assertEqual(conversation_usage["share_links_exhausted"], 1)
 
     def test_http_strict_document_delete_requires_write_role(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -13007,6 +13016,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     workspace_id=workspace_id,
                     actor_user_id="alice",
                 )
+                document_usage = audit_store.get_workspace_usage_summary(workspace_id, "alice")["share_links"]
             finally:
                 audit_store.close()
 
@@ -13141,6 +13151,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIsNotNone(share_links_after_views_by_id[redacted_created["id"]]["last_viewed_at"])
             self.assertIsNotNone(share_links_after_views_by_id[capped_created["id"]]["last_viewed_at"])
             self.assertIsNotNone(share_links_after_views_by_id[password_created["id"]]["last_viewed_at"])
+            self.assertEqual(document_usage["active"], 2)
+            self.assertEqual(document_usage["revoked"], 1)
+            self.assertEqual(document_usage["expired"], 0)
+            self.assertEqual(document_usage["exhausted"], 1)
 
     def test_http_document_access_filters_documents_query_and_pages(self):
         with tempfile.TemporaryDirectory() as tmp:

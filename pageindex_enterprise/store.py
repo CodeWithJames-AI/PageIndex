@@ -2151,6 +2151,18 @@ class EnterpriseStore:
                     """,
                     (workspace_id, share_now),
                 ),
+                "exhausted": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM document_share_links
+                    WHERE workspace_id = ?
+                      AND revoked_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > ?)
+                      AND max_views IS NOT NULL
+                      AND view_count >= max_views
+                    """,
+                    (workspace_id, share_now),
+                ),
             },
             "team": {
                 "members": count("SELECT COUNT(*) AS count FROM workspace_members WHERE workspace_id = ?"),
@@ -2199,6 +2211,29 @@ class EnterpriseStore:
                 ),
                 "share_links_revoked": count(
                     "SELECT COUNT(*) AS count FROM conversation_share_links WHERE workspace_id = ? AND revoked_at IS NOT NULL"
+                ),
+                "share_links_expired": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM conversation_share_links
+                    WHERE workspace_id = ?
+                      AND revoked_at IS NULL
+                      AND expires_at IS NOT NULL
+                      AND expires_at <= ?
+                    """,
+                    (workspace_id, share_now),
+                ),
+                "share_links_exhausted": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM conversation_share_links
+                    WHERE workspace_id = ?
+                      AND revoked_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > ?)
+                      AND max_views IS NOT NULL
+                      AND view_count >= max_views
+                    """,
+                    (workspace_id, share_now),
                 ),
             },
             "source_sets": {

@@ -484,10 +484,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except RateLimitError as exc:
-            self._json(
-                {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds},
-                HTTPStatus.TOO_MANY_REQUESTS,
-            )
+            self._rate_limit(exc)
         except PermissionError as exc:
             self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
         except ValueError as exc:
@@ -617,10 +614,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except RateLimitError as exc:
-            self._json(
-                {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds},
-                HTTPStatus.TOO_MANY_REQUESTS,
-            )
+            self._rate_limit(exc)
         except PermissionError as exc:
             self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
         except LLMProviderError as exc:
@@ -645,10 +639,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except RateLimitError as exc:
-            self._json(
-                {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds},
-                HTTPStatus.TOO_MANY_REQUESTS,
-            )
+            self._rate_limit(exc)
         except PermissionError as exc:
             self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
         except (ValueError, FileNotFoundError) as exc:
@@ -2263,10 +2254,25 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             raise PermissionError("api token scope denied")
         return verified
 
-    def _json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _rate_limit(self, exc: RateLimitError) -> None:
+        self._json(
+            {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds},
+            HTTPStatus.TOO_MANY_REQUESTS,
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        )
+
+    def _json(
+        self,
+        payload: dict[str, Any],
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

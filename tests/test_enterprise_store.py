@@ -10053,7 +10053,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             try:
                 first = _get_json(f"{strict_base}/documents", headers=primary_headers)
                 second = _get_json(f"{strict_base}/documents", headers=primary_headers)
-                limited = _get_error(f"{strict_base}/documents", headers=primary_headers)
+                with self.assertRaises(HTTPError) as limited_error:
+                    urlopen(Request(f"{strict_base}/documents", headers=primary_headers))
+                limited = {
+                    "status": limited_error.exception.code,
+                    **json.loads(limited_error.exception.read().decode("utf-8")),
+                }
+                retry_after = limited_error.exception.headers.get("Retry-After")
                 other = _get_json(f"{strict_base}/documents", headers=other_headers)
                 missing = _get_error(f"{strict_base}/documents")
 
@@ -10062,6 +10068,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(limited["status"], 429)
                 self.assertEqual(limited["error"], "api token rate limit exceeded")
                 self.assertGreater(limited["retry_after_seconds"], 0)
+                self.assertEqual(retry_after, str(limited["retry_after_seconds"]))
                 self.assertEqual(other["documents"], [])
                 self.assertEqual(missing["error"], "api token required")
             finally:

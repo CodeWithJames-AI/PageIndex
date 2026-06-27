@@ -94,12 +94,14 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
         dependencies = _wheel_dependencies(wheel)
         dependency_policy = _dependency_policy(dependencies)
         wheel_record = _wheel_record_integrity(wheel)
+        wheel_content = _wheel_content_policy(wheel)
         manifest = _artifact_manifest(
             wheel,
             source=_source_metadata(repo_root),
             dependencies=dependencies,
             dependency_policy=dependency_policy,
             wheel_record=wheel_record,
+            wheel_content=wheel_content,
         )
         if manifest_output is not None:
             manifest_output = manifest_output.expanduser().resolve()
@@ -115,6 +117,7 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
                 "path": str(manifest_output) if manifest_output is not None else None,
                 "source_commit": manifest["source"]["commit"],
                 "source_dirty": manifest["source"]["dirty"],
+                "wheel_content_policy_ok": manifest["artifacts"][0]["content"]["ok"],
                 "wheel_record_hashes_valid": manifest["artifacts"][0]["record"]["ok"],
                 "wheel_sha256": manifest["artifacts"][0]["sha256"],
                 "wheel_size_bytes": manifest["artifacts"][0]["size_bytes"],
@@ -125,6 +128,7 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
                 "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
                 "dependency_inventory": bool(manifest["dependencies"]),
                 "dependency_pins": manifest["dependency_policy"]["direct_dependencies_pinned"],
+                "wheel_content_policy": manifest["artifacts"][0]["content"]["ok"],
                 "wheel_record_hashes": manifest["artifacts"][0]["record"]["ok"],
                 "eval_command": eval_report.get("ok") is True,
                 "eval_checks": eval_report.get("summary", {}),
@@ -162,6 +166,7 @@ def _artifact_manifest(
     dependencies: list[dict[str, Any]],
     dependency_policy: dict[str, Any],
     wheel_record: dict[str, Any],
+    wheel_content: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -174,6 +179,7 @@ def _artifact_manifest(
         "dependency_policy": dependency_policy,
         "artifacts": [
             {
+                "content": wheel_content,
                 "filename": wheel.name,
                 "record": wheel_record,
                 "sha256": _sha256(wheel),
@@ -205,6 +211,36 @@ def _wheel_dependencies(wheel: Path) -> list[dict[str, Any]]:
             }
         )
     return sorted(dependencies, key=lambda dep: dep["name"])
+
+
+def _wheel_content_policy(wheel: Path) -> dict[str, Any]:
+    blocked: list[dict[str, str]] = []
+    with zipfile.ZipFile(wheel) as archive:
+        for name in archive.namelist():
+            reason = _blocked_wheel_entry_reason(name)
+            if reason is not None:
+                blocked.append({"path": name, "reason": reason})
+    return {
+        "ok": not blocked,
+        "blocked": blocked,
+        "blocked_count": len(blocked),
+    }
+
+
+def _blocked_wheel_entry_reason(name: str) -> str | None:
+    parts = name.split("/")
+    basename = parts[-1]
+    if any(part in {".git", ".mypy_cache", ".omx", ".pytest_cache", ".ruff_cache", "__pycache__"} for part in parts):
+        return "local_state"
+    if basename in {".DS_Store", ".env"}:
+        return "local_state"
+    lowered = basename.lower()
+    for suffix in (".db", ".pem", ".pyo", ".pyc", ".sqlite"):
+        if lowered.endswith(suffix):
+            return "blocked_suffix"
+    if lowered.endswith((".key", ".keyfile")):
+        return "private_key_candidate"
+    return None
 
 
 def _wheel_record_integrity(wheel: Path) -> dict[str, Any]:

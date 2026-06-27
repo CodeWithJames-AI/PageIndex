@@ -4763,8 +4763,50 @@ class EnterpriseStore:
                     }
                 )
 
+        def _validate_revoke_entries(collection: str, target_key: str, target_type: str) -> None:
+            entries = policy.get(collection, [])
+            if entries is None:
+                return
+            if not isinstance(entries, list):
+                errors.append({"collection": collection, "error": "must be a list"})
+                return
+            for index, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    errors.append({"collection": collection, "index": index, "error": "entry must be an object"})
+                    continue
+                target_id = entry.get(target_key)
+                if not isinstance(target_id, str) or not target_id.strip():
+                    errors.append({"collection": collection, "index": index, "error": f"{target_key} must be a non-empty string"})
+                    continue
+                target_id = target_id.strip()
+                if target_type == "document":
+                    target = self.get_document(target_id)
+                    if not target or target["workspace_id"] != workspace_id:
+                        errors.append({"collection": collection, "index": index, "error": "document not found", "doc_id": target_id})
+                        continue
+                else:
+                    target = self._one("SELECT * FROM folders WHERE id = ?", (target_id,))
+                    if not target or target["workspace_id"] != workspace_id:
+                        errors.append({"collection": collection, "index": index, "error": "folder not found", "folder_id": target_id})
+                        continue
+                principal = _validate_principal(entry, collection, index)
+                if not principal:
+                    continue
+                principal_type, principal_id = principal
+                operations.append(
+                    {
+                        "action": "revoke",
+                        "target_type": target_type,
+                        "target_id": target_id,
+                        "principal_type": principal_type,
+                        "principal_id": principal_id,
+                    }
+                )
+
         _validate_entries("document_grants", "doc_id", "document")
         _validate_entries("folder_grants", "folder_id", "folder")
+        _validate_revoke_entries("document_revokes", "doc_id", "document")
+        _validate_revoke_entries("folder_revokes", "folder_id", "folder")
         report = {
             "workspace_id": workspace_id,
             "dry_run": dry_run,
@@ -4776,7 +4818,35 @@ class EnterpriseStore:
         if dry_run or errors:
             return report
         for operation in operations:
-            if operation["target_type"] == "document" and operation["principal_type"] == "user":
+            if operation["action"] == "revoke" and operation["target_type"] == "document" and operation["principal_type"] == "user":
+                self.revoke_document_access(
+                    operation["target_id"],
+                    workspace_id=workspace_id,
+                    actor_user_id=actor_user_id,
+                    user_id=operation["principal_id"],
+                )
+            elif operation["action"] == "revoke" and operation["target_type"] == "document":
+                self.revoke_document_group_access(
+                    operation["target_id"],
+                    workspace_id=workspace_id,
+                    actor_user_id=actor_user_id,
+                    group_id=operation["principal_id"],
+                )
+            elif operation["action"] == "revoke" and operation["principal_type"] == "user":
+                self.revoke_folder_access(
+                    operation["target_id"],
+                    workspace_id=workspace_id,
+                    actor_user_id=actor_user_id,
+                    user_id=operation["principal_id"],
+                )
+            elif operation["action"] == "revoke":
+                self.revoke_folder_group_access(
+                    operation["target_id"],
+                    workspace_id=workspace_id,
+                    actor_user_id=actor_user_id,
+                    group_id=operation["principal_id"],
+                )
+            elif operation["target_type"] == "document" and operation["principal_type"] == "user":
                 self.grant_document_access(
                     operation["target_id"],
                     workspace_id=workspace_id,

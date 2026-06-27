@@ -1290,6 +1290,8 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             policy = {
                 "document_grants": payload.get("document_grants", []),
                 "folder_grants": payload.get("folder_grants", []),
+                "document_revokes": payload.get("document_revokes", []),
+                "folder_revokes": payload.get("folder_revokes", []),
             }
         if not isinstance(policy, dict):
             raise ValueError("policy must be an object")

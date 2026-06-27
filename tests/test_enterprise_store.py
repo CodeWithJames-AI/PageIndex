@@ -13024,6 +13024,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             inspected = EnterpriseStore(root)
             folder_access_after_cli = inspected.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id="alice")
             document_access_after_http = inspected.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            revoke_policy = {
+                "document_revokes": [{"doc_id": doc_id, "user_id": "bob"}],
+                "folder_revokes": [{"folder_id": folder_id, "group_id": group["id"]}],
+            }
+            revoke_dry_run = inspected.apply_acl_bulk(workspace_id, "alice", revoke_policy)
+            revoke_applied = inspected.apply_acl_bulk(workspace_id, "alice", revoke_policy, dry_run=False)
+            document_access_after_revoke = inspected.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            folder_access_after_revoke = inspected.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id="alice")
             inspected.close()
 
             self.assertTrue(dry_run["dry_run"])
@@ -13049,6 +13057,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(http_apply["applied"], 1)
             self.assertEqual(bad_dry_run["error"], "dry_run must be boolean")
             self.assertEqual(document_access_after_http["grants"][0]["role"], "read")
+            self.assertTrue(revoke_dry_run["dry_run"])
+            self.assertEqual(revoke_dry_run["operation_count"], 2)
+            self.assertEqual(revoke_dry_run["applied"], 0)
+            self.assertFalse(revoke_applied["dry_run"])
+            self.assertEqual(revoke_applied["applied"], 2)
+            self.assertEqual(document_access_after_revoke["grants"], [])
+            self.assertEqual(document_access_after_revoke["group_grants"][0]["role"], "deny")
+            self.assertEqual(folder_access_after_revoke["group_grants"], [])
 
     def test_http_workspace_group_routes_grant_document_access(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -30,6 +30,9 @@ def main() -> None:
         manifest_output=Path(args.manifest_output) if args.manifest_output else None,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
+    exit_code = _release_smoke_exit_code(report)
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -> dict[str, Any]:
@@ -135,6 +138,10 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
             },
             "checks": checks,
         }
+
+
+def _release_smoke_exit_code(report: dict[str, Any]) -> int:
+    return 0 if report.get("ok") is True else 1
 
 
 def _single_wheel(wheel_dir: Path) -> Path:

@@ -15724,6 +15724,13 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(_release_checks_ok(bad_record), False)
         self.assertEqual(_release_checks_ok(bad_eval_summary), False)
 
+    def test_release_smoke_exit_code_follows_report_ok(self):
+        from scripts.release_smoke import _release_smoke_exit_code
+
+        self.assertEqual(_release_smoke_exit_code({"ok": True}), 0)
+        self.assertEqual(_release_smoke_exit_code({"ok": False}), 1)
+        self.assertEqual(_release_smoke_exit_code({"ok": None}), 1)
+
     def test_deployment_check_reports_readiness_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "deployment-root"

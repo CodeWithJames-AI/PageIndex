@@ -87,7 +87,7 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
         )
         eval_report = json.loads(eval_result.stdout)
         _inspect_wheel(wheel)
-        manifest = _artifact_manifest(wheel)
+        manifest = _artifact_manifest(wheel, source=_source_metadata(repo_root))
         if manifest_output is not None:
             manifest_output = manifest_output.expanduser().resolve()
             manifest_output.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +98,8 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
             "manifest": {
                 "artifact_count": len(manifest["artifacts"]),
                 "path": str(manifest_output) if manifest_output is not None else None,
+                "source_commit": manifest["source"]["commit"],
+                "source_dirty": manifest["source"]["dirty"],
                 "wheel_sha256": manifest["artifacts"][0]["sha256"],
                 "wheel_size_bytes": manifest["artifacts"][0]["size_bytes"],
             },
@@ -134,13 +136,14 @@ def _inspect_wheel(wheel: Path) -> None:
         raise AssertionError("wheel console entrypoint is missing")
 
 
-def _artifact_manifest(wheel: Path) -> dict[str, Any]:
+def _artifact_manifest(wheel: Path, *, source: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "package": {
             "name": "pageindex-enterprise-cleanroom",
             "version": VERSION,
         },
+        "source": source,
         "artifacts": [
             {
                 "filename": wheel.name,
@@ -149,6 +152,28 @@ def _artifact_manifest(wheel: Path) -> dict[str, Any]:
             }
         ],
     }
+
+
+def _source_metadata(repo_root: Path) -> dict[str, Any]:
+    return {
+        "commit": _git_output(repo_root, "rev-parse", "HEAD"),
+        "dirty": bool(_git_output(repo_root, "status", "--short")),
+        "remote": _git_output(repo_root, "config", "--get", "remote.origin.url"),
+    }
+
+
+def _git_output(repo_root: Path, *args: str) -> str | None:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
 
 
 def _sha256(path: Path) -> str:

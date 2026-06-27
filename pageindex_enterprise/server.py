@@ -501,6 +501,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/query":
                 self._query(payload)
                 return
+            document_rename_id = _document_rename_path(parsed.path)
+            if document_rename_id:
+                self._rename_document(document_rename_id, payload)
+                return
             document_access_id = _document_access_path(parsed.path)
             if document_access_id:
                 self._set_document_access(document_access_id, payload)
@@ -1035,6 +1039,26 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 path,
                 name=_optional_str(payload.get("name"), "name"),
                 folder_id=_optional_str(payload.get("folder_id"), "folder_id"),
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+            )
+            if document is None:
+                self._json({"updated": False})
+                return
+            self._json({"updated": True, "document": document})
+        finally:
+            store.close()
+
+    def _rename_document(self, doc_id: str, payload: dict[str, Any]) -> None:
+        name = payload.get("name")
+        if not isinstance(name, str):
+            raise ValueError("Document name is required.")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            document = store.rename_document(
+                doc_id,
+                name,
                 workspace_id=workspace_id,
                 actor_user_id=user_id,
             )
@@ -2091,6 +2115,13 @@ def _document_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "documents":
         return parts[1]
+    return None
+
+
+def _document_rename_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "documents" and parts[2] == "rename":
+        return unquote(parts[1])
     return None
 
 

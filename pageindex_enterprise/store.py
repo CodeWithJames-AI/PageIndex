@@ -3973,6 +3973,53 @@ class EnterpriseStore:
             raise FileNotFoundError(source_path)
         return {"document": document, "path": source_path}
 
+    def rename_document(
+        self,
+        doc_id: str,
+        name: str,
+        *,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        doc_id = doc_id.strip()
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        if not isinstance(name, str):
+            raise ValueError("Document name is required.")
+        name = name.strip()
+        if not name:
+            raise ValueError("Document name is required.")
+        document = self.get_document(doc_id)
+        if not document:
+            return None
+        if workspace_id and document["workspace_id"] != workspace_id:
+            return None
+        self._require_document_write(document, actor_user_id)
+        now = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                UPDATE documents
+                SET name = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (name, now, document["id"]),
+            )
+            if actor_user_id and document["workspace_id"]:
+                self._insert_audit_event(
+                    document["workspace_id"],
+                    actor_user_id,
+                    "document.rename",
+                    target_type="document",
+                    target_id=document["id"],
+                    details={
+                        "name_length": len(name),
+                        "previous_name_length": len(document["name"]),
+                        "kind": document["kind"],
+                    },
+                )
+        return self.get_document(document["id"])
+
     def reindex_document_file(
         self,
         doc_id: str,

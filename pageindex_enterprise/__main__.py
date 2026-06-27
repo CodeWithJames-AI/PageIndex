@@ -358,6 +358,12 @@ def main() -> None:
     delete_doc.add_argument("--workspace-id")
     delete_doc.add_argument("--user-id")
 
+    rename_doc = sub.add_parser("rename-doc")
+    rename_doc.add_argument("doc_id")
+    rename_doc.add_argument("name")
+    rename_doc.add_argument("--workspace-id")
+    rename_doc.add_argument("--user-id")
+
     reindex_doc = sub.add_parser("reindex-doc")
     reindex_doc.add_argument("doc_id")
     reindex_doc.add_argument("path")
@@ -985,6 +991,16 @@ def main() -> None:
                     }
                 )
             )
+        elif args.command == "rename-doc":
+            document = _reindex_document_cli(
+                lambda: store.rename_document(
+                    args.doc_id,
+                    args.name,
+                    workspace_id=args.workspace_id,
+                    actor_user_id=args.user_id,
+                )
+            )
+            print(json.dumps({"updated": True, "document": document}, indent=2))
         elif args.command == "reindex-doc":
             document = _reindex_document_cli(
                 lambda: store.reindex_document_file(

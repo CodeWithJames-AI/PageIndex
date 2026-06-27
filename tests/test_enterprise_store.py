@@ -1931,6 +1931,16 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            renamed = json.loads(
+                subprocess.run(
+                    [*base, "rename-doc", doc_id, "Renamed CLI", "--workspace-id", "ws_cli", "--user-id", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
             old_result = json.loads(
                 subprocess.run(
                     [*base, "query", "legacy", "--workspace-id", "ws_cli", "--user-id", "alice"],
@@ -1993,6 +2003,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(updated["updated"])
             self.assertEqual(updated["document"]["id"], doc_id)
             self.assertEqual(updated["document"]["name"], "Reindexed CLI")
+            self.assertTrue(renamed["updated"])
+            self.assertEqual(renamed["document"]["name"], "Renamed CLI")
             self.assertEqual(old_result["citations"], [])
             self.assertEqual(new_result["citations"][0]["doc_id"], doc_id)
             self.assertEqual([version["version"] for version in versions], [2, 1])
@@ -2111,6 +2123,61 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("Old revenue risk evidence.", serialized)
             self.assertNotIn("New margin upside evidence.", serialized)
             self.assertIsNone(store.reindex_document_file("doc_missing", replacement, workspace_id=workspace_id, actor_user_id="alice"))
+
+    def test_rename_document_updates_metadata_without_reindexing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "rename-doc.txt"
+            source.write_text("Document rename keeps page evidence.", encoding="utf-8")
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            other_workspace = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member")
+            store.add_workspace_member(workspace_id, "viewer", "viewer")
+            store.add_workspace_member(other_workspace, "mallory", "owner")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Original memo")
+            original_versions = store.list_document_versions(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.rename_document(doc_id, "Viewer rename", workspace_id=workspace_id, actor_user_id="viewer")
+            self.assertIsNone(store.rename_document(doc_id, "Foreign rename", workspace_id=other_workspace, actor_user_id="mallory"))
+            with self.assertRaisesRegex(ValueError, "Document name is required"):
+                store.rename_document(doc_id, " ", workspace_id=workspace_id, actor_user_id="alice")
+
+            renamed = store.rename_document(doc_id, "Renamed memo", workspace_id=workspace_id, actor_user_id="alice")
+            renamed_versions = store.list_document_versions(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            renamed_pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            rename_events = store.list_audit_events(workspace_id, "alice", action="document.rename")
+            serialized_events = json.dumps(rename_events, sort_keys=True)
+            store.set_document_access_mode(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                access_mode="restricted",
+            )
+            with self.assertRaisesRegex(PermissionError, "document write access denied"):
+                store.rename_document(doc_id, "Bob blocked", workspace_id=workspace_id, actor_user_id="bob")
+            store.grant_document_access(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="bob",
+                role="write",
+            )
+            bob_renamed = store.rename_document(doc_id, "Bob renamed", workspace_id=workspace_id, actor_user_id="bob")
+
+            self.assertEqual(renamed["name"], "Renamed memo")
+            self.assertEqual(bob_renamed["name"], "Bob renamed")
+            self.assertEqual(store.search_documents("Bob renamed", workspace_id=workspace_id, actor_user_id="alice")[0]["id"], doc_id)
+            self.assertEqual(renamed_pages["pages"][0]["content"], "Document rename keeps page evidence.")
+            self.assertEqual([version["version"] for version in renamed_versions], [1])
+            self.assertEqual(renamed_versions, original_versions)
+            self.assertEqual(rename_events[0]["target_id"], doc_id)
+            self.assertEqual(rename_events[0]["details"]["name_length"], len("Renamed memo"))
+            self.assertEqual(rename_events[0]["details"]["previous_name_length"], len("Original memo"))
+            self.assertNotIn("Original memo", serialized_events)
+            self.assertNotIn("Renamed memo", serialized_events)
 
     def test_reindex_document_file_rolls_back_when_audit_insert_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8286,6 +8353,33 @@ class EnterpriseStoreTest(unittest.TestCase):
                     {"path": str(replacement), "name": "HTTP reindexed"},
                     headers={"Authorization": f"Bearer {owner_token}"},
                 )
+                viewer_rename = _post_json(
+                    f"{base}/documents/{doc_id}/rename",
+                    {"name": "Viewer rename"},
+                    headers={"Authorization": f"Bearer {viewer_token}"},
+                    status=403,
+                )
+                foreign_rename = _post_json(
+                    f"{base}/documents/{doc_id}/rename",
+                    {"name": "Foreign rename"},
+                    headers={"Authorization": f"Bearer {other_token}"},
+                )
+                missing_rename = _post_json(
+                    f"{base}/documents/doc_missing/rename",
+                    {"name": "Missing rename"},
+                    headers={"Authorization": f"Bearer {owner_token}"},
+                )
+                bad_rename = _post_json(
+                    f"{base}/documents/{doc_id}/rename",
+                    {"name": " "},
+                    headers={"Authorization": f"Bearer {owner_token}"},
+                    status=400,
+                )
+                owner_rename = _post_json(
+                    f"{base}/documents/{doc_id}/rename",
+                    {"name": "HTTP renamed"},
+                    headers={"Authorization": f"Bearer {owner_token}"},
+                )
                 old_after_replace = _post_json(
                     f"{base}/query",
                     {"query": "legacy"},
@@ -8308,6 +8402,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     f"{base}/documents/{doc_id}/versions",
                     headers={"Authorization": f"Bearer {other_token}"},
                 )
+                docs = _get_json(f"{base}/documents", headers={"Authorization": f"Bearer {owner_token}"})
                 store = EnterpriseStore(root)
                 try:
                     stale_count = store.conn.execute(
@@ -8323,6 +8418,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertTrue(owner["updated"])
                 self.assertEqual(owner["document"]["id"], doc_id)
                 self.assertEqual(owner["document"]["name"], "HTTP reindexed")
+                self.assertEqual(viewer_rename["error"], "workspace role denied")
+                self.assertEqual(foreign_rename, {"updated": False})
+                self.assertEqual(missing_rename, {"updated": False})
+                self.assertEqual(bad_rename["error"], "Document name is required.")
+                self.assertTrue(owner_rename["updated"])
+                self.assertEqual(owner_rename["document"]["name"], "HTTP renamed")
+                self.assertEqual(docs["documents"][0]["name"], "HTTP renamed")
                 self.assertEqual(old_after_replace["citations"], [])
                 self.assertEqual(new_result["citations"][0]["doc_id"], doc_id)
                 self.assertEqual([version["version"] for version in owner_versions["versions"]], [2, 1])
@@ -9024,11 +9126,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("loadDocumentPages", body)
                     self.assertIn("pagePreviewList", body)
                     self.assertIn("data-pages-doc-id", body)
+                    self.assertIn("data-rename-doc-id", body)
                     self.assertIn("data-download-doc-id", body)
                     self.assertIn("data-reindex-doc-id", body)
                     self.assertIn("data-reindex-upload-doc-id", body)
                     self.assertIn("data-delete-doc-id", body)
                     self.assertIn("deleteDocument", body)
+                    self.assertIn("renameDocument", body)
                     self.assertIn("/access", body)
                     self.assertIn("documentAccessPanel", body)
                     self.assertIn("loadDocumentAccess", body)

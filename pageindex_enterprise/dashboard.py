@@ -843,6 +843,7 @@ DASHBOARD_HTML = """<!doctype html>
             <button class="secondary" type="button" data-pages-doc-id="${escapeHtml(doc.id)}">Preview</button>
             <button class="secondary" type="button" data-versions-doc-id="${escapeHtml(doc.id)}">Versions</button>
             <button class="secondary" type="button" data-access-doc-id="${escapeHtml(doc.id)}">Access</button>
+            <button class="secondary" type="button" data-rename-doc-id="${escapeHtml(doc.id)}" data-doc-name="${escapeHtml(doc.name)}">Rename</button>
             <button class="secondary" type="button" data-download-doc-id="${escapeHtml(doc.id)}">Download</button>
             <button class="secondary" type="button" data-reindex-doc-id="${escapeHtml(doc.id)}">Reindex</button>
             <button class="secondary" type="button" data-reindex-upload-doc-id="${escapeHtml(doc.id)}">Reindex upload</button>
@@ -858,6 +859,9 @@ DASHBOARD_HTML = """<!doctype html>
       });
       documentList.querySelectorAll("[data-access-doc-id]").forEach((button) => {
         button.addEventListener("click", () => loadDocumentAccess(button.dataset.accessDocId).catch((error) => setStatus(error.message, "error")));
+      });
+      documentList.querySelectorAll("[data-rename-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => renameDocument(button.dataset.renameDocId, button.dataset.docName).catch((error) => setStatus(error.message, "error")));
       });
       documentList.querySelectorAll("[data-download-doc-id]").forEach((button) => {
         button.addEventListener("click", () => downloadDocument(button.dataset.downloadDocId).catch((error) => setStatus(error.message, "error")));
@@ -2681,6 +2685,26 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       setStatus(`Reindexed ${payload.document.id}.`, "ok");
+      await refreshDocuments();
+    }
+
+    async function renameDocument(docId, currentName) {
+      const name = window.prompt("Rename document", currentName || "");
+      if (name === null) {
+        setStatus("Document rename cancelled.", "warn");
+        return;
+      }
+      const trimmed = name.trim();
+      if (!trimmed) {
+        setStatus("Document name required.", "warn");
+        return;
+      }
+      setStatus("Renaming document...");
+      const payload = await api(`/documents/${encodeURIComponent(docId)}/rename`, {
+        method: "POST",
+        body: JSON.stringify({ name: trimmed })
+      });
+      setStatus(payload.updated ? "Document renamed." : "Document not found.", payload.updated ? "ok" : "warn");
       await refreshDocuments();
     }
 

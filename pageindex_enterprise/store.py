@@ -299,6 +299,10 @@ def _jsonl(rows: list[dict[str, Any]]) -> str:
     return "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
 
 
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def _audit_integrity_hash(
     *,
     event_id: str,
@@ -359,6 +363,7 @@ def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
     warnings: list[str] = []
     table_counts: dict[str, int] = {}
     manifest_tables: dict[str, int] = {}
+    manifest_checksums: dict[str, str] = {}
     manifest: dict[str, Any] = {}
 
     def report() -> dict[str, Any]:
@@ -370,6 +375,7 @@ def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
             "workspace_id": manifest.get("workspace_id"),
             "table_counts": table_counts,
             "manifest_tables": manifest_tables,
+            "manifest_checksums": manifest_checksums,
             "artifact": path.name,
         }
 
@@ -425,11 +431,31 @@ def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
             if policy not in omitted_values:
                 errors.append(f"manifest omitted must include {policy!r}")
 
+        checksums = manifest.get("checksums")
+        if checksums is None:
+            warnings.append("manifest checksums are missing; bundle file integrity was not verified")
+        elif not isinstance(checksums, dict):
+            errors.append("manifest checksums must be an object")
+            checksums = {}
+        for filename, checksum in (checksums.items() if isinstance(checksums, dict) else ()):
+            if isinstance(filename, str) and isinstance(checksum, str) and re.fullmatch(r"[0-9a-f]{64}", checksum):
+                manifest_checksums[filename] = checksum
+            else:
+                errors.append(f"manifest checksum must be a lowercase sha256 hex string: {filename}")
+
         for table in WORKSPACE_EXPORT_TABLES:
             filename = f"{table}.jsonl"
             if filename not in names:
                 errors.append(f"required export table is missing: {filename}")
                 continue
+            expected_checksum = manifest_checksums.get(filename)
+            if isinstance(checksums, dict):
+                if expected_checksum is None:
+                    errors.append(f"manifest is missing checksum for file: {filename}")
+                else:
+                    actual_checksum = _sha256_bytes(archive.read(filename))
+                    if actual_checksum != expected_checksum:
+                        errors.append(f"manifest checksum mismatch for {filename}: expected {expected_checksum}, found {actual_checksum}")
             rows = _read_workspace_import_jsonl(archive, filename, errors)
             table_counts[table] = len(rows)
             expected = manifest_tables.get(table)
@@ -443,6 +469,8 @@ def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
                 errors.append(f"omitted table must not be listed in manifest tables: {table}")
             else:
                 warnings.append(f"manifest contains unknown table: {table}")
+        for filename in sorted(set(manifest_checksums) - {f"{table}.jsonl" for table in WORKSPACE_EXPORT_TABLES}):
+            warnings.append(f"manifest contains unknown checksum file: {filename}")
 
         for name in sorted(names):
             if name == "manifest.json" or name.endswith(".jsonl"):
@@ -2700,10 +2728,15 @@ class EnterpriseStore:
             "tables": {name.removesuffix(".jsonl"): len(rows) for name, rows in exports.items()},
             "omitted": ["api_tokens", "document filesystem paths"],
         }
+        export_payloads = {name: _jsonl(rows) for name, rows in exports.items()}
+        manifest["checksums"] = {
+            name: _sha256_bytes(payload.encode("utf-8"))
+            for name, payload in sorted(export_payloads.items())
+        }
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-            for name, rows in exports.items():
-                archive.writestr(name, _jsonl(rows))
+            for name, payload in export_payloads.items():
+                archive.writestr(name, payload)
         with self._atomic():
             self._insert_audit_event(
                 workspace_id,

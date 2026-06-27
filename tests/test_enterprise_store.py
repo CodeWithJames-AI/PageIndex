@@ -2962,6 +2962,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             with zipfile.ZipFile(export_path) as archive:
                 names = set(archive.namelist())
                 manifest_from_zip = json.loads(archive.read("manifest.json").decode("utf-8"))
+                documents_payload = archive.read("documents.jsonl")
                 documents = read_jsonl(archive, "documents.jsonl")
                 pages = read_jsonl(archive, "document_pages.jsonl")
                 conversations = read_jsonl(archive, "conversations.jsonl")
@@ -2974,6 +2975,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(cli_path.exists())
             self.assertEqual(manifest["format"], "pageindex.workspace-export.v1")
             self.assertEqual(manifest_from_zip["workspace_id"], workspace_id)
+            self.assertEqual(manifest_from_zip["checksums"]["documents.jsonl"], hashlib.sha256(documents_payload).hexdigest())
             self.assertEqual(cli_manifest["workspace_id"], workspace_id)
             self.assertIn("document_pages.jsonl", names)
             self.assertIn("conversation_messages.jsonl", names)
@@ -3142,12 +3144,17 @@ class EnterpriseStoreTest(unittest.TestCase):
 
             with zipfile.ZipFile(export_path) as archive:
                 manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+                documents_payload = archive.read("documents.jsonl").decode("utf-8")
             manifest["tables"]["documents"] += 1
+            tampered_documents_payload = documents_payload.replace("Invalid memo", "Changed memo").encode("utf-8")
 
             missing_manifest = store.validate_workspace_import_bundle(rewrite_zip("missing-manifest.zip", omit={"manifest.json"}))
             missing_table = store.validate_workspace_import_bundle(rewrite_zip("missing-table.zip", omit={"document_pages.jsonl"}))
             invalid_jsonl = store.validate_workspace_import_bundle(
                 rewrite_zip("invalid-jsonl.zip", replace={"documents.jsonl": b'{"id": "broken"\n'})
+            )
+            checksum_mismatch = store.validate_workspace_import_bundle(
+                rewrite_zip("checksum-mismatch.zip", replace={"documents.jsonl": tampered_documents_payload})
             )
             bad_count = store.validate_workspace_import_bundle(
                 rewrite_zip("bad-count.zip", replace={"manifest.json": json.dumps(manifest).encode("utf-8")})
@@ -3171,6 +3178,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(any("document_pages.jsonl" in error for error in missing_table["errors"]))
             self.assertFalse(invalid_jsonl["ok"])
             self.assertTrue(any("invalid JSON" in error for error in invalid_jsonl["errors"]))
+            self.assertFalse(checksum_mismatch["ok"])
+            self.assertTrue(any("checksum mismatch for documents.jsonl" in error for error in checksum_mismatch["errors"]))
             self.assertFalse(bad_count["ok"])
             self.assertTrue(any("row count mismatch for documents" in error for error in bad_count["errors"]))
             self.assertFalse(leaked["ok"])

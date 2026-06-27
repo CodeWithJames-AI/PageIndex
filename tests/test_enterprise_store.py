@@ -4954,6 +4954,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIsNone(expired_row["last_used_at"])
             self.assertEqual({token["name"]: token["expires_at"] for token in listed}["expired"], past)
             self.assertEqual({token["name"]: token["expires_at"] for token in listed}["legacy"], None)
+            self.assertEqual({token["name"]: token["active"] for token in listed}, {
+                "active": True,
+                "expired": False,
+                "legacy": True,
+            })
 
     def test_api_token_expiration_accepts_rfc3339_z_and_fails_closed_on_malformed_values(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4985,6 +4990,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(usage["active"], 1)
             self.assertEqual(usage["expired"], 1)
             self.assertEqual(usage["with_expiration"], 2)
+            self.assertEqual(
+                {token["name"]: token["active"] for token in store.list_api_tokens(workspace_id, "alice")},
+                {"malformed": False, "z-format": True},
+            )
 
     def test_api_token_policy_applies_default_expiry_and_rotation_due_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9887,6 +9896,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             full = store.create_api_token(workspace_id, "alice", name="full", scopes=["read", "write", "audit"])
             write_only = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])
             read_only = store.create_api_token(workspace_id, "alice", name="read", scopes=["read"])
+            expired = store.create_api_token(
+                workspace_id,
+                "alice",
+                name="expired",
+                expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+            )
             bob = store.create_api_token(workspace_id, "bob", name="bob")
             store.close()
             server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
@@ -9987,6 +10002,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(local_header_denied["error"], "api token required")
             self.assertEqual(read_blocked["error"], "api token scope denied")
             self.assertTrue(any(token["id"] == full["id"] for token in listed["tokens"]))
+            listed_active_by_id = {
+                token["id"]: token["active"]
+                for token in listed["tokens"]
+                if token["id"] in {full["id"], expired["id"]}
+            }
+            self.assertEqual(
+                listed_active_by_id,
+                {full["id"]: True, expired["id"]: False},
+            )
             self.assertTrue(all("token" not in token for token in listed["tokens"]))
             self.assertTrue(all("token_hash" not in token for token in listed["tokens"]))
             self.assertEqual(invalid_scope["error"], "Unsupported api token scope: admin")
@@ -15305,6 +15329,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("createApiToken", body)
                     self.assertIn("rotateApiToken", body)
                     self.assertIn("revokeApiToken", body)
+                    self.assertIn("tokenStatus", body)
+                    self.assertIn('token.active === false ? "expired" : "active"', body)
                     self.assertIn("/api-token-policy", body)
                     self.assertIn("tokenPolicyDefaultExpirationInput", body)
                     self.assertIn("tokenPolicyRotationDueInput", body)

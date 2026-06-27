@@ -3650,6 +3650,7 @@ class EnterpriseStore:
             token = dict(row)
             stored_scopes = _decode_api_token_scopes(token.pop("scopes_json")) or []
             token["scopes"] = _cap_api_token_scopes_to_role(stored_scopes, token_owner_role)
+            token["active"] = not _is_expired(token.get("expires_at"))
             token.update(_rotation_metadata(token["created_at"], policy["rotation_due_in_days"]))
             tokens.append(token)
         return tokens

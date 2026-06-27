@@ -2003,12 +2003,13 @@ DASHBOARD_HTML = """<!doctype html>
       tokenList.innerHTML = tokens.map((token) => {
         const scopes = Array.isArray(token.scopes) ? token.scopes.join(", ") : "";
         const expiry = token.expires_at || "no expiration";
+        const tokenStatus = token.active === false ? "expired" : "active";
         const rotation = token.rotation_due_at ? ` | rotation ${token.rotation_due_at}` : "";
         return `
           <article class="token" data-token-name="${escapeHtml(token.name)}">
             <strong>${escapeHtml(token.name)}</strong>
             <div class="muted">${escapeHtml(token.id)}</div>
-            <div class="muted">${escapeHtml(scopes)} | ${escapeHtml(expiry)}${escapeHtml(rotation)}</div>
+            <div class="muted">${escapeHtml(scopes)} | ${escapeHtml(tokenStatus)} | ${escapeHtml(expiry)}${escapeHtml(rotation)}</div>
             <div class="token-actions">
               <button class="secondary" type="button" data-rotate-token-id="${escapeHtml(token.id)}">Rotate</button>
               <button class="secondary" type="button" data-revoke-token-id="${escapeHtml(token.id)}">Revoke</button>

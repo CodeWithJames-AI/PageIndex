@@ -6150,6 +6150,189 @@ class EnterpriseStore:
             "result": result,
         }
 
+    def _prepare_chat_message(
+        self,
+        conversation_id: str,
+        actor_user_id: str,
+        message: str,
+        *,
+        doc_ids: list[str] | None = None,
+        expert_hints: list[str] | None = None,
+        limit: int = 8,
+        expected_workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        actor_user_id = actor_user_id.strip()
+        message = message.strip()
+        if not message:
+            raise ValueError("message is required")
+        if len(message) > MAX_CONVERSATION_MESSAGE_CHARS:
+            raise ValueError("message is too large")
+        conversation = self._conversation_for_actor(
+            conversation_id,
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+        )
+        self.require_workspace_role(conversation["workspace_id"], actor_user_id, WORKSPACE_WRITE_ROLES)
+        history_rows = self.conn.execute(
+            """
+            SELECT content
+            FROM conversation_messages
+            WHERE conversation_id = ? AND role = 'user'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 3
+            """,
+            (conversation["id"],),
+        ).fetchall()
+        history = [row["content"] for row in reversed(history_rows)]
+        retrieval_query = _conversation_query_text(message, history)
+        user_message = {
+            "id": f"msg_{uuid.uuid4().hex}",
+            "conversation_id": conversation["id"],
+            "workspace_id": conversation["workspace_id"],
+            "user_id": actor_user_id,
+            "role": "user",
+            "content": message,
+            "run_id": None,
+        }
+        source_set_id = conversation.get("source_set_id") if doc_ids is None else None
+        folder_id = conversation.get("folder_id") if doc_ids is None and not source_set_id else None
+        result = self.query_corpus(
+            retrieval_query,
+            doc_ids=doc_ids,
+            source_set_id=source_set_id,
+            folder_id=folder_id,
+            expert_hints=expert_hints,
+            workspace_id=conversation["workspace_id"],
+            limit=limit,
+            actor_user_id=actor_user_id,
+            scope_extra={
+                "conversation": {
+                    "id": conversation["id"],
+                    "user_message_id": user_message["id"],
+                    "history_user_message_count": len(history),
+                }
+            },
+            stored_query=CHAT_TRACE_QUERY,
+            redact_query_tree=True,
+        )
+        return {
+            "conversation": conversation,
+            "user_message": user_message,
+            "retrieval": {
+                "query": retrieval_query,
+                "history_user_messages": history,
+            },
+            "result": result,
+        }
+
+    def _complete_prepared_chat_message(self, prepared: dict[str, Any], assistant_content: str) -> dict[str, Any]:
+        assistant_content = assistant_content.strip()
+        if not assistant_content:
+            raise ValueError("assistant message is required")
+        prepared_conversation = dict(prepared["conversation"])
+        user_message = dict(prepared["user_message"])
+        result = prepared["result"]
+        if user_message["conversation_id"] != prepared_conversation["id"]:
+            raise ValueError("prepared conversation mismatch")
+        if user_message["workspace_id"] != prepared_conversation["workspace_id"]:
+            raise ValueError("prepared workspace mismatch")
+        with self._atomic():
+            conversation = self._conversation_for_actor(
+                prepared_conversation["id"],
+                user_message["user_id"],
+                expected_workspace_id=user_message["workspace_id"],
+            )
+            self.require_workspace_role(conversation["workspace_id"], user_message["user_id"], WORKSPACE_WRITE_ROLES)
+            user_created_at = _now()
+            user_message["created_at"] = user_created_at
+            assistant_message = {
+                "id": f"msg_{uuid.uuid4().hex}",
+                "conversation_id": conversation["id"],
+                "workspace_id": conversation["workspace_id"],
+                "user_id": user_message["user_id"],
+                "role": "assistant",
+                "content": assistant_content,
+                "run_id": result["run_id"],
+                "created_at": _now(),
+            }
+            self.conn.execute(
+                """
+                INSERT INTO conversation_messages
+                  (id, conversation_id, workspace_id, user_id, role, content, run_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_message["id"],
+                    user_message["conversation_id"],
+                    user_message["workspace_id"],
+                    user_message["user_id"],
+                    user_message["role"],
+                    user_message["content"],
+                    user_message["run_id"],
+                    user_created_at,
+                ),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO conversation_messages
+                  (id, conversation_id, workspace_id, user_id, role, content, run_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    assistant_message["id"],
+                    assistant_message["conversation_id"],
+                    assistant_message["workspace_id"],
+                    assistant_message["user_id"],
+                    assistant_message["role"],
+                    assistant_message["content"],
+                    assistant_message["run_id"],
+                    assistant_message["created_at"],
+                ),
+            )
+            generated_title = _conversation_generated_title(user_message["content"])
+            cursor = self.conn.execute(
+                """
+                UPDATE conversations
+                SET title = CASE
+                      WHEN auto_title_pending = 1
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM conversation_messages
+                         WHERE conversation_id = ?
+                           AND role = 'user'
+                           AND id <> ?
+                       )
+                      THEN ?
+                      ELSE title
+                    END,
+                    auto_title_pending = 0,
+                    updated_at = ?
+                WHERE id = ?
+                  AND archived_at IS NULL
+                """,
+                (
+                    conversation["id"],
+                    user_message["id"],
+                    generated_title,
+                    assistant_message["created_at"],
+                    conversation["id"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("conversation archived")
+            conversation = self._conversation_for_actor(
+                conversation["id"],
+                user_message["user_id"],
+                expected_workspace_id=user_message["workspace_id"],
+            )
+        return {
+            "conversation": conversation,
+            "user_message": user_message,
+            "assistant_message": assistant_message,
+            "retrieval": prepared["retrieval"],
+            "result": result,
+        }
+
     def search_documents(
         self,
         query: str,

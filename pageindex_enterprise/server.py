@@ -2073,8 +2073,6 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         model = _optional_str(payload.get("model"), "model") or "pageindex-deterministic"
         synthesis_mode = _chat_synthesis_mode(payload.get("pageindex_synthesis"))
         conversation_id = _chat_conversation_id(payload)
-        if conversation_id and synthesis_mode == "provider":
-            raise ValueError("conversation_id is not supported with provider synthesis")
         limit = int(payload.get("limit", 8))
         if synthesis_mode == "provider":
             limit = max(1, min(limit, 8))
@@ -2092,27 +2090,32 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 provider_options = store.workspace_provider_request_options(workspace_id, model)
                 model = provider_options["model"]
             conversation_metadata = None
+            prepared_provider_chat = None
             if conversation_id:
-                chat_result = store.chat_message(
-                    conversation_id,
-                    user_id,
-                    _chat_latest_user_message(messages),
-                    doc_ids=_chat_doc_ids(payload),
-                    expert_hints=_list_or_none(payload.get("expert_hints")),
-                    limit=limit,
-                    expected_workspace_id=workspace_id,
-                )
+                if synthesis_mode == "provider":
+                    chat_result = store._prepare_chat_message(
+                        conversation_id,
+                        user_id,
+                        _chat_latest_user_message(messages),
+                        doc_ids=_chat_doc_ids(payload),
+                        expert_hints=_list_or_none(payload.get("expert_hints")),
+                        limit=limit,
+                        expected_workspace_id=workspace_id,
+                    )
+                    prepared_provider_chat = chat_result
+                else:
+                    chat_result = store.chat_message(
+                        conversation_id,
+                        user_id,
+                        _chat_latest_user_message(messages),
+                        doc_ids=_chat_doc_ids(payload),
+                        expert_hints=_list_or_none(payload.get("expert_hints")),
+                        limit=limit,
+                        expected_workspace_id=workspace_id,
+                    )
+                    conversation_metadata = _chat_conversation_metadata(chat_result)
                 result = chat_result["result"]
                 query = chat_result["retrieval"]["query"]
-                conversation_metadata = {
-                    "id": chat_result["conversation"]["id"],
-                    "title": chat_result["conversation"]["title"],
-                    "source_set_id": chat_result["conversation"].get("source_set_id"),
-                    "folder_id": chat_result["conversation"].get("folder_id"),
-                    "user_message_id": chat_result["user_message"]["id"],
-                    "assistant_message_id": chat_result["assistant_message"]["id"],
-                    "history_user_message_count": len(chat_result["retrieval"]["history_user_messages"]),
-                }
             else:
                 result = store.query_corpus(
                     query,
@@ -2141,6 +2144,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 )
                 answer = synthesized["answer"]
                 synthesis = synthesized["metadata"]
+                if prepared_provider_chat is not None:
+                    chat_result = store._complete_prepared_chat_message(prepared_provider_chat, answer)
+                    conversation_metadata = _chat_conversation_metadata(chat_result)
             response_model = synthesis.get("model", model) if synthesis_mode == "provider" else model
             completion_id = f"chatcmpl_{uuid.uuid4().hex}"
             created = int(time.time())
@@ -2168,6 +2174,11 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                             raise LLMProviderError("llm provider stream missing content") from exc
                         response_model = provider_stream.metadata.get("model", model)
                         pageindex["synthesis"] = provider_stream.metadata
+                        on_complete = None
+                        if prepared_provider_chat is not None:
+                            on_complete = lambda final_answer: _chat_conversation_metadata(
+                                store._complete_prepared_chat_message(prepared_provider_chat, final_answer)
+                            )
                         self._event_stream_from_parts(
                             completion_id,
                             created,
@@ -2175,6 +2186,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                             _prepend_part(first_part, provider_chunks),
                             prompt_tokens,
                             pageindex,
+                            on_complete=on_complete,
                         )
                 else:
                     self._event_stream_from_parts(
@@ -2224,6 +2236,8 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         parts: Any,
         prompt_tokens: int,
         pageindex: dict[str, Any],
+        *,
+        on_complete: Any | None = None,
     ) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -2254,6 +2268,22 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
         }
+        if on_complete is not None:
+            try:
+                conversation_metadata = on_complete(answer)
+                if conversation_metadata is not None:
+                    pageindex["conversation"] = conversation_metadata
+            except Exception as exc:
+                payload = {
+                    "error": {
+                        "type": "conversation_persist_error",
+                        "message": str(exc),
+                    }
+                }
+                self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
         final_payload = _chat_completion_final_chunk(completion_id, created, model, usage, pageindex)
         self.wfile.write(f"data: {json.dumps(final_payload)}\n\n".encode("utf-8"))
         self.wfile.write(b"data: [DONE]\n\n")
@@ -2496,6 +2526,18 @@ def _chat_conversation_id(payload: dict[str, Any]) -> str | None:
     if not value:
         raise ValueError("conversation_id must be a string")
     return value
+
+
+def _chat_conversation_metadata(chat_result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": chat_result["conversation"]["id"],
+        "title": chat_result["conversation"]["title"],
+        "source_set_id": chat_result["conversation"].get("source_set_id"),
+        "folder_id": chat_result["conversation"].get("folder_id"),
+        "user_message_id": chat_result["user_message"]["id"],
+        "assistant_message_id": chat_result["assistant_message"]["id"],
+        "history_user_message_count": len(chat_result["retrieval"]["history_user_messages"]),
+    }
 
 
 def _chat_completion_response(

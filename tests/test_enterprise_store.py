@@ -2515,6 +2515,49 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(store.list_conversation_messages(conversation["id"], "alice"), [])
             self.assertEqual(store.conn.execute("SELECT COUNT(*) AS count FROM query_runs").fetchone()["count"], 0)
 
+    def test_prepared_provider_chat_revalidates_conversation_before_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "prepared-provider.txt"
+            source.write_text("Prepared provider evidence.", encoding="utf-8")
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Prepared provider memo")
+            conversation = store.create_conversation(workspace_id, "alice")
+            archived_conversation = store.create_conversation(workspace_id, "alice", title="Archive race")
+
+            prepared = store._prepare_chat_message(conversation["id"], "alice", "delayed provider turn")
+            renamed = store.rename_conversation(
+                conversation["id"],
+                "alice",
+                "Manual rename",
+                expected_workspace_id=workspace_id,
+            )
+            completed = store._complete_prepared_chat_message(prepared, "Provider answer")
+            messages = store.list_conversation_messages(conversation["id"], "alice")
+
+            archived_prepared = store._prepare_chat_message(
+                archived_conversation["id"],
+                "alice",
+                "archived provider turn",
+            )
+            store.archive_conversation(archived_conversation["id"], "alice", expected_workspace_id=workspace_id)
+            with self.assertRaisesRegex(PermissionError, "conversation archived"):
+                store._complete_prepared_chat_message(archived_prepared, "Should not persist")
+            archived_message_count = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM conversation_messages WHERE conversation_id = ?",
+                (archived_conversation["id"],),
+            ).fetchone()["count"]
+
+            self.assertEqual(completed["conversation"]["title"], "Manual rename")
+            self.assertEqual(completed["conversation"]["auto_title_pending"], 0)
+            self.assertGreaterEqual(messages[0]["created_at"], renamed["updated_at"])
+            self.assertEqual([message["role"] for message in messages], ["user", "assistant"])
+            self.assertEqual(messages[0]["content"], "delayed provider turn")
+            self.assertEqual(messages[1]["content"], "Provider answer")
+            self.assertEqual(archived_message_count, 0)
+
     def test_conversation_chat_does_not_put_raw_messages_in_audit_details(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -8864,16 +8907,6 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=write_headers,
                     status=403,
                 )
-                provider_denied = _post_json(
-                    f"{base}/chat/completions",
-                    {
-                        "conversation_id": conversation["id"],
-                        "pageindex_synthesis": {"mode": "provider"},
-                        "messages": [{"role": "user", "content": "alpha renewal"}],
-                    },
-                    headers=write_headers,
-                    status=400,
-                )
                 first = _post_json(
                     f"{base}/chat/completions",
                     {
@@ -8934,7 +8967,6 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(header_auth_denied["error"], "api token required")
             self.assertEqual(read_only_denied["error"], "api token scope denied")
             self.assertEqual(foreign_denied["error"], "conversation access denied")
-            self.assertEqual(provider_denied["error"], "conversation_id is not supported with provider synthesis")
             self.assertEqual(first["object"], "chat.completion")
             self.assertEqual(first["model"], "pageindex-stateful-test")
             self.assertEqual(first_conversation["id"], conversation["id"])
@@ -8956,6 +8988,135 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(rows[1]["run_id"], first["pageindex"]["run_id"])
             self.assertEqual(rows[3]["run_id"], second["pageindex"]["run_id"])
             self.assertEqual(rows[5]["run_id"], override["pageindex"]["run_id"])
+
+    def test_http_chat_completions_provider_synthesis_can_append_stateful_turns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "provider-stateful.txt"
+            source.write_text("Provider stateful evidence says renewal risk escalated after concessions.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Provider stateful memo")
+            conversation = store.create_conversation(workspace_id, "alice")
+            failed_conversation = store.create_conversation(workspace_id, "alice", title="Failed provider chat")
+            token = store.create_api_token(workspace_id, "alice", name="provider-stateful", scopes=["read", "write"])["token"]
+            store.close()
+
+            class StatefulProviderHandler(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    length = int(self.headers.get("Content-Length", "0"))
+                    payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    self.server.requests.append({"path": self.path, "authorization": self.headers.get("Authorization"), "payload": payload})
+                    prompt = "\n".join(message.get("content", "") for message in payload.get("messages", []))
+                    if "force provider failure" in prompt:
+                        body = json.dumps({"error": "provider failed"}).encode("utf-8")
+                        self.send_response(500)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
+                    body = json.dumps(
+                        {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "Provider stateful answer: renewal risk escalated [1].",
+                                    }
+                                }
+                            ]
+                        }
+                    ).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, format, *args):
+                    return
+
+            provider = ThreadingHTTPServer(("127.0.0.1", 0), StatefulProviderHandler)
+            provider.requests = []
+            provider_thread = threading.Thread(target=provider.serve_forever, daemon=True)
+            provider_thread.start()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            old_env = {name: os.environ.get(name) for name in ("PAGEINDEX_LLM_BASE_URL", "PAGEINDEX_LLM_API_KEY", "PAGEINDEX_LLM_MODEL")}
+            os.environ["PAGEINDEX_LLM_BASE_URL"] = f"http://127.0.0.1:{provider.server_port}/v1"
+            os.environ["PAGEINDEX_LLM_API_KEY"] = "secret_stateful_key"
+            os.environ["PAGEINDEX_LLM_MODEL"] = "pageindex-stateful-provider"
+            headers = {"Authorization": f"Bearer {token}"}
+            try:
+                completion = _post_json(
+                    f"{base}/chat/completions",
+                    {
+                        "conversation_id": conversation["id"],
+                        "messages": [{"role": "user", "content": "provider stateful renewal"}],
+                        "pageindex_synthesis": {"mode": "provider"},
+                    },
+                    headers=headers,
+                )
+                provider_failed = _post_json(
+                    f"{base}/chat/completions",
+                    {
+                        "conversation_id": failed_conversation["id"],
+                        "messages": [{"role": "user", "content": "force provider failure"}],
+                        "pageindex_synthesis": {"mode": "provider"},
+                    },
+                    headers=headers,
+                    status=502,
+                )
+            finally:
+                for name, value in old_env.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+                provider.shutdown()
+                provider.server_close()
+                provider_thread.join(timeout=5)
+
+            store = EnterpriseStore(root)
+            try:
+                rows = store.conn.execute(
+                    "SELECT role, content, run_id FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, id",
+                    (conversation["id"],),
+                ).fetchall()
+                failed_rows = store.conn.execute(
+                    "SELECT role, content FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, id",
+                    (failed_conversation["id"],),
+                ).fetchall()
+            finally:
+                store.close()
+
+            self.assertEqual(completion["choices"][0]["message"]["content"], "Provider stateful answer: renewal risk escalated [1].")
+            self.assertEqual(completion["model"], "pageindex-stateful-provider")
+            self.assertEqual(completion["pageindex"]["conversation"]["id"], conversation["id"])
+            self.assertEqual(completion["pageindex"]["conversation"]["title"], "Provider stateful renewal")
+            self.assertEqual(completion["pageindex"]["conversation"]["history_user_message_count"], 0)
+            self.assertTrue(completion["pageindex"]["conversation"]["assistant_message_id"].startswith("msg_"))
+            self.assertEqual(completion["pageindex"]["synthesis"]["mode"], "provider")
+            self.assertEqual(completion["pageindex"]["synthesis"]["provider"], "openai-compatible")
+            self.assertEqual([row["role"] for row in rows], ["user", "assistant"])
+            self.assertEqual(rows[0]["content"], "provider stateful renewal")
+            self.assertEqual(rows[1]["content"], "Provider stateful answer: renewal risk escalated [1].")
+            self.assertEqual(rows[1]["run_id"], completion["pageindex"]["run_id"])
+            self.assertEqual(failed_rows, [])
+            self.assertIn("llm provider request failed", provider_failed["error"])
+            self.assertEqual(len(provider.requests), 2)
+            provider_prompt = "\n".join(message["content"] for message in provider.requests[0]["payload"]["messages"])
+            self.assertIn("Provider stateful memo", provider_prompt)
+            self.assertIn("provider stateful renewal", provider_prompt)
+            self.assertEqual(provider.requests[0]["authorization"], "Bearer secret_stateful_key")
 
     def test_http_chat_completions_can_use_openai_compatible_synthesis_provider(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9546,6 +9707,188 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(scope["chat_completion"]["synthesis_mode"], "provider")
             self.assertNotIn(raw_prompt, persisted)
             self.assertNotIn("secret_stream_key", persisted)
+
+    def test_http_chat_completions_streaming_provider_conversation_persists_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "provider-stateful-stream.txt"
+            source.write_text("Provider stateful stream evidence says expansion risk is contained.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Provider stateful stream memo")
+            conversation = store.create_conversation(workspace_id, "alice")
+            token = store.create_api_token(workspace_id, "alice", name="provider-stream-stateful", scopes=["read", "write"])["token"]
+            store.close()
+
+            class StatefulStreamingProviderHandler(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    length = int(self.headers.get("Content-Length", "0"))
+                    payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    self.server.requests.append({"path": self.path, "authorization": self.headers.get("Authorization"), "payload": payload})
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    for event in (
+                        {"choices": [{"delta": {"content": "Provider stateful "}, "finish_reason": None}]},
+                        {"choices": [{"delta": {"content": "stream answer [1]."}, "finish_reason": None}]},
+                        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+                    ):
+                        self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+                    self.wfile.write(b"data: [DONE]\n\n")
+
+                def log_message(self, format, *args):
+                    return
+
+            provider = ThreadingHTTPServer(("127.0.0.1", 0), StatefulStreamingProviderHandler)
+            provider.requests = []
+            provider_thread = threading.Thread(target=provider.serve_forever, daemon=True)
+            provider_thread.start()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            old_env = {name: os.environ.get(name) for name in ("PAGEINDEX_LLM_BASE_URL", "PAGEINDEX_LLM_API_KEY", "PAGEINDEX_LLM_MODEL")}
+            os.environ["PAGEINDEX_LLM_BASE_URL"] = f"http://127.0.0.1:{provider.server_port}/v1"
+            os.environ["PAGEINDEX_LLM_API_KEY"] = "secret_stateful_stream_key"
+            os.environ["PAGEINDEX_LLM_MODEL"] = "pageindex-stateful-stream-provider"
+            try:
+                content_type, events = _post_sse(
+                    f"{base}/chat/completions",
+                    {
+                        "conversation_id": conversation["id"],
+                        "messages": [{"role": "user", "content": "provider stateful stream"}],
+                        "pageindex_synthesis": {"mode": "provider"},
+                        "stream": True,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            finally:
+                for name, value in old_env.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+                provider.shutdown()
+                provider.server_close()
+                provider_thread.join(timeout=5)
+
+            chunks = [json.loads(event) for event in events if event != "[DONE]"]
+            text = "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks)
+            finish = chunks[-1]
+            store = EnterpriseStore(root)
+            try:
+                rows = store.conn.execute(
+                    "SELECT role, content, run_id FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, id",
+                    (conversation["id"],),
+                ).fetchall()
+            finally:
+                store.close()
+
+            self.assertIn("text/event-stream", content_type)
+            self.assertEqual(events[-1], "[DONE]")
+            self.assertEqual(text, "Provider stateful stream answer [1].")
+            self.assertEqual(finish["pageindex"]["conversation"]["id"], conversation["id"])
+            self.assertEqual(finish["pageindex"]["conversation"]["title"], "Provider stateful stream")
+            self.assertEqual(finish["pageindex"]["conversation"]["history_user_message_count"], 0)
+            self.assertEqual(finish["pageindex"]["synthesis"]["mode"], "provider")
+            self.assertEqual(finish["pageindex"]["synthesis"]["stream"], True)
+            self.assertEqual([row["role"] for row in rows], ["user", "assistant"])
+            self.assertEqual(rows[0]["content"], "provider stateful stream")
+            self.assertEqual(rows[1]["content"], "Provider stateful stream answer [1].")
+            self.assertEqual(rows[1]["run_id"], finish["pageindex"]["run_id"])
+            provider_prompt = "\n".join(message["content"] for message in provider.requests[0]["payload"]["messages"])
+            self.assertIn("Provider stateful stream memo", provider_prompt)
+            self.assertIn("provider stateful stream", provider_prompt)
+            self.assertEqual(provider.requests[0]["authorization"], "Bearer secret_stateful_stream_key")
+
+    def test_http_chat_completions_streaming_provider_conversation_persist_errors_stay_in_sse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "provider-stateful-empty-stream.txt"
+            source.write_text("Provider empty stream evidence.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Provider empty stream memo")
+            conversation = store.create_conversation(workspace_id, "alice")
+            token = store.create_api_token(workspace_id, "alice", name="provider-empty-stream", scopes=["read", "write"])["token"]
+            store.close()
+
+            class EmptyStreamingProviderHandler(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    length = int(self.headers.get("Content-Length", "0"))
+                    payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    self.server.requests.append({"payload": payload})
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    self.wfile.write(
+                        f"data: {json.dumps({'choices': [{'delta': {'content': '   '}, 'finish_reason': None}]})}\n\n".encode(
+                            "utf-8"
+                        )
+                    )
+                    self.wfile.write(b"data: [DONE]\n\n")
+
+                def log_message(self, format, *args):
+                    return
+
+            provider = ThreadingHTTPServer(("127.0.0.1", 0), EmptyStreamingProviderHandler)
+            provider.requests = []
+            provider_thread = threading.Thread(target=provider.serve_forever, daemon=True)
+            provider_thread.start()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            old_env = {name: os.environ.get(name) for name in ("PAGEINDEX_LLM_BASE_URL", "PAGEINDEX_LLM_API_KEY", "PAGEINDEX_LLM_MODEL")}
+            os.environ["PAGEINDEX_LLM_BASE_URL"] = f"http://127.0.0.1:{provider.server_port}/v1"
+            os.environ["PAGEINDEX_LLM_API_KEY"] = "secret_empty_stream_key"
+            os.environ["PAGEINDEX_LLM_MODEL"] = "pageindex-empty-stream-provider"
+            try:
+                content_type, events = _post_sse(
+                    f"{base}/chat/completions",
+                    {
+                        "conversation_id": conversation["id"],
+                        "messages": [{"role": "user", "content": "provider empty stream"}],
+                        "pageindex_synthesis": {"mode": "provider"},
+                        "stream": True,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            finally:
+                for name, value in old_env.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+                provider.shutdown()
+                provider.server_close()
+                provider_thread.join(timeout=5)
+
+            chunks = [json.loads(event) for event in events if event != "[DONE]"]
+            store = EnterpriseStore(root)
+            try:
+                message_count = store.conn.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_messages WHERE conversation_id = ?",
+                    (conversation["id"],),
+                ).fetchone()["count"]
+            finally:
+                store.close()
+
+            self.assertIn("text/event-stream", content_type)
+            self.assertEqual(events[-1], "[DONE]")
+            self.assertEqual(chunks[-1]["error"]["type"], "conversation_persist_error")
+            self.assertEqual(chunks[-1]["error"]["message"], "assistant message is required")
+            self.assertEqual(message_count, 0)
 
     def test_http_provider_stream_errors_stay_inside_sse_body(self):
         with tempfile.TemporaryDirectory() as tmp:

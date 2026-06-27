@@ -370,9 +370,12 @@ DASHBOARD_HTML = """<!doctype html>
               <select id="folderSelect" aria-label="Target folder">
                 <option value="">No folder</option>
               </select>
-              <button id="refreshFoldersButton" class="secondary" type="button">Refresh folders</button>
+              <div class="provider-actions">
+                <button id="refreshFoldersButton" class="secondary" type="button">Refresh folders</button>
+                <button id="scopeFolderButton" class="secondary" type="button">Scope folder</button>
+                <button id="loadFolderAccessButton" class="secondary" type="button">Folder access</button>
+              </div>
               <div id="folderList" class="folder-list muted">No folders loaded.</div>
-              <button id="loadFolderAccessButton" class="secondary" type="button">Folder access</button>
               <div class="access-actions">
                 <input id="folderAccessUserInput" value="" placeholder="user id" aria-label="Folder access user id">
                 <button id="grantFolderAccessButton" type="button">Grant user</button>
@@ -828,6 +831,8 @@ DASHBOARD_HTML = """<!doctype html>
     let activeQueryDocs = [];
     let activeQuerySourceSetId = "";
     let activeQuerySourceSetName = "";
+    let activeQueryFolderId = "";
+    let activeQueryFolderLabel = "";
     let editingQuerySourceSetId = "";
     let workspaceExportUrl = "";
     let currentFolders = [];
@@ -862,6 +867,18 @@ DASHBOARD_HTML = """<!doctype html>
       return folderSelect.value.trim();
     }
 
+    function selectedFolder() {
+      const folderId = selectedFolderId();
+      if (!folderId) {
+        return null;
+      }
+      return currentFolders.find((folder) => folder.id === folderId) || null;
+    }
+
+    function folderScopeLabel(folder, fallbackId = "") {
+      return (folder && (folder.path || folder.name || folder.id)) || fallbackId;
+    }
+
     function withSelectedFolder(payload) {
       const folderId = selectedFolderId();
       return folderId ? { ...payload, folder_id: folderId } : payload;
@@ -870,6 +887,10 @@ DASHBOARD_HTML = """<!doctype html>
     function renderQueryScope() {
       if (activeQuerySourceSetId) {
         queryScopeLabel.textContent = `Set: ${activeQuerySourceSetName || activeQuerySourceSetId} (${activeQueryDocs.length} docs)`;
+        return;
+      }
+      if (activeQueryFolderId) {
+        queryScopeLabel.textContent = `Folder: ${activeQueryFolderLabel || activeQueryFolderId}`;
         return;
       }
       if (!activeQueryDocs.length) {
@@ -896,10 +917,16 @@ DASHBOARD_HTML = """<!doctype html>
       };
     }
 
+    function clearFolderQueryScope() {
+      activeQueryFolderId = "";
+      activeQueryFolderLabel = "";
+    }
+
     function setQueryDocumentScope(docId, docName) {
       const queryDoc = normalizeQueryDocument(docId, docName);
       activeQuerySourceSetId = "";
       activeQuerySourceSetName = "";
+      clearFolderQueryScope();
       activeQueryDocs = queryDoc ? [queryDoc] : [];
       renderQueryScope();
       queryInput.focus();
@@ -914,6 +941,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       activeQuerySourceSetId = "";
       activeQuerySourceSetName = "";
+      clearFolderQueryScope();
       const existingIndex = activeQueryDocs.findIndex((doc) => doc.id === queryDoc.id);
       if (existingIndex >= 0) {
         activeQueryDocs = activeQueryDocs.map((doc, index) => index === existingIndex ? { ...doc, name: queryDoc.name || doc.name } : doc);
@@ -931,7 +959,29 @@ DASHBOARD_HTML = """<!doctype html>
     function clearQueryScope() {
       activeQuerySourceSetId = "";
       activeQuerySourceSetName = "";
-      setQueryDocumentScope("", "");
+      clearFolderQueryScope();
+      activeQueryDocs = [];
+      renderQueryScope();
+      queryInput.focus();
+      setStatus("Query scope cleared.", "warn");
+    }
+
+    function scopeSelectedFolderForQuery() {
+      const folderId = selectedFolderId();
+      if (!folderId) {
+        setStatus("Select a folder.", "warn");
+        return;
+      }
+      const folder = selectedFolder();
+      const selectedOption = folderSelect.selectedOptions && folderSelect.selectedOptions[0];
+      activeQuerySourceSetId = "";
+      activeQuerySourceSetName = "";
+      activeQueryDocs = [];
+      activeQueryFolderId = folderId;
+      activeQueryFolderLabel = folderScopeLabel(folder, selectedOption ? selectedOption.textContent.trim() : folderId);
+      renderQueryScope();
+      queryInput.focus();
+      setStatus("Query scoped to folder.", "ok");
     }
 
     function pruneQueryDocumentScope(documents) {
@@ -968,6 +1018,8 @@ DASHBOARD_HTML = """<!doctype html>
       const docName = payload.doc_name || payload.docName || params.get("doc_name") || docId;
       const sourceSetId = payload.source_set_id || payload.sourceSetId || params.get("source_set_id") || "";
       const sourceSetName = payload.source_set_name || payload.sourceSetName || params.get("source_set_name") || sourceSetId;
+      const folderId = payload.folder_id || payload.folderId || params.get("folder_id") || "";
+      const folderLabel = payload.folder_path || payload.folderPath || payload.folder_name || payload.folderName || params.get("folder_name") || folderId;
       const payloadDocIds = Array.isArray(payload.doc_ids) ? payload.doc_ids : (Array.isArray(payload.docIds) ? payload.docIds : []);
       const payloadDocNames = Array.isArray(payload.doc_names) ? payload.doc_names : (Array.isArray(payload.docNames) ? payload.docNames : []);
       const repeatedDocIds = params.getAll("doc_id").map((value) => value.trim()).filter(Boolean);
@@ -979,11 +1031,20 @@ DASHBOARD_HTML = """<!doctype html>
       if (sourceSetId) {
         activeQuerySourceSetId = String(sourceSetId).trim();
         activeQuerySourceSetName = String(sourceSetName || sourceSetId).trim();
+        clearFolderQueryScope();
+        activeQueryDocs = [];
+        renderQueryScope();
+      } else if (folderId) {
+        activeQuerySourceSetId = "";
+        activeQuerySourceSetName = "";
+        activeQueryFolderId = String(folderId).trim();
+        activeQueryFolderLabel = String(folderLabel || folderId).trim();
         activeQueryDocs = [];
         renderQueryScope();
       } else if (docIds.length) {
         activeQuerySourceSetId = "";
         activeQuerySourceSetName = "";
+        clearFolderQueryScope();
         activeQueryDocs = docIds.map((id, index) => normalizeQueryDocument(id, payloadDocNames[index] || id)).filter(Boolean);
         renderQueryScope();
       } else if (docId) {
@@ -991,7 +1052,7 @@ DASHBOARD_HTML = """<!doctype html>
       } else {
         renderQueryScope();
       }
-      if (query || docId || docIds.length || sourceSetId) {
+      if (query || docId || docIds.length || sourceSetId || folderId) {
         setStatus("Query prefilled.", "ok");
       }
     }
@@ -1140,6 +1201,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       activeQuerySourceSetId = sourceSet.id;
       activeQuerySourceSetName = sourceSet.name || sourceSet.id;
+      clearFolderQueryScope();
       activeQueryDocs = sourceSetDocuments(sourceSet);
       renderQueryScope();
       queryInput.focus();
@@ -1157,6 +1219,7 @@ DASHBOARD_HTML = """<!doctype html>
       sourceSetDescriptionInput.value = sourceSet.description || "";
       activeQuerySourceSetId = sourceSet.id;
       activeQuerySourceSetName = sourceSet.name || sourceSet.id;
+      clearFolderQueryScope();
       activeQueryDocs = sourceSetDocuments(sourceSet);
       renderQueryScope();
       renderSourceSetEditor();
@@ -1354,6 +1417,15 @@ DASHBOARD_HTML = """<!doctype html>
       currentFolders = folders;
       const exists = folders.some((folder) => folder.id === selectedId);
       activeFolderId = exists ? selectedId : "";
+      if (activeQueryFolderId) {
+        const scopedFolder = folders.find((folder) => folder.id === activeQueryFolderId);
+        if (scopedFolder) {
+          activeQueryFolderLabel = folderScopeLabel(scopedFolder, activeQueryFolderLabel || activeQueryFolderId);
+        } else {
+          clearFolderQueryScope();
+        }
+        renderQueryScope();
+      }
       folderSelect.innerHTML = `<option value="">No folder</option>` + folders.map((folder) => `
         <option value="${escapeHtml(folder.id)}">${escapeHtml(folder.path || folder.name || folder.id)}</option>
       `).join("");
@@ -2555,6 +2627,10 @@ DASHBOARD_HTML = """<!doctype html>
         folderSelect.value = "";
         renderFolderAccess(null);
       }
+      if (payload.deleted && activeQueryFolderId === folderId) {
+        clearFolderQueryScope();
+        renderQueryScope();
+      }
       await refreshFolders({ quiet: true });
       setStatus(payload.deleted ? "Folder deleted." : "Folder not found.", payload.deleted ? "ok" : "warn");
     }
@@ -3481,6 +3557,8 @@ DASHBOARD_HTML = """<!doctype html>
       const scopedDocIds = activeQueryDocs.map((doc) => doc.id);
       if (activeQuerySourceSetId) {
         body.source_set_id = activeQuerySourceSetId;
+      } else if (activeQueryFolderId) {
+        body.folder_id = activeQueryFolderId;
       } else if (scopedDocIds.length) {
         body.doc_ids = scopedDocIds;
       }
@@ -3680,6 +3758,7 @@ DASHBOARD_HTML = """<!doctype html>
     });
     document.getElementById("createFolderButton").addEventListener("click", () => createFolder().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshFoldersButton").addEventListener("click", () => refreshFolders().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("scopeFolderButton").addEventListener("click", () => scopeSelectedFolderForQuery());
     document.getElementById("loadFolderAccessButton").addEventListener("click", () => loadFolderAccess().catch((error) => setStatus(error.message, "error")));
     document.getElementById("grantFolderAccessButton").addEventListener("click", () => grantFolderAccess().catch((error) => setStatus(error.message, "error")));
     document.getElementById("revokeFolderAccessButton").addEventListener("click", () => revokeFolderAccess().catch((error) => setStatus(error.message, "error")));

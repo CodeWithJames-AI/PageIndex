@@ -214,6 +214,39 @@ async function waitForAnyText(page, selector, expectedValues) {
     const folderId = await folderCard.getAttribute("data-folder-id");
     assert(folderId, "created folder id was not rendered");
 
+    const moveDocumentToFolderResponse = page.waitForResponse(
+      (response) => response.url().includes("/documents/")
+        && response.url().endsWith("/move")
+        && response.request().method() === "POST"
+        && (response.request().postData() || "").includes(folderId)
+    );
+    await page.locator("[data-move-doc-id]").first().click();
+    await moveDocumentToFolderResponse;
+
+    await page.click("#scopeFolderButton");
+    await waitForText(page, "#status", "Query scoped to folder.");
+    await waitForText(page, "#queryScopeLabel", "Folder: /Browser");
+    await page.fill("#queryInput", query);
+    await page.fill("#hintInput", "");
+    const folderQueryResponse = page.waitForResponse(
+      (response) => {
+        if (!response.url().endsWith("/query") || response.request().method() !== "POST") {
+          return false;
+        }
+        try {
+          const payload = JSON.parse(response.request().postData() || "{}");
+          return payload.folder_id === folderId
+            && !Object.prototype.hasOwnProperty.call(payload, "doc_ids")
+            && !Object.prototype.hasOwnProperty.call(payload, "source_set_id");
+        } catch (_error) {
+          return false;
+        }
+      }
+    );
+    await page.click("#queryButton");
+    await folderQueryResponse;
+    await waitForText(page, "#status", "Trace verified.");
+
     const loadFolderAccessResponse = page.waitForResponse(
       (response) => response.url().includes(`/folders/${folderId}/access`) && response.request().method() === "GET"
     );
@@ -706,6 +739,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       groupExercised: true,
       groupLifecycleExercised: true,
       folderExercised: true,
+      folderQueryExercised: true,
       folderLifecycleExercised: true,
       folderMoveExercised: true,
       folderAccessExercised: true,

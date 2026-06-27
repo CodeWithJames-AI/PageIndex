@@ -2187,11 +2187,13 @@ class EnterpriseStore:
                 "share_links_active": count(
                     """
                     SELECT COUNT(*) AS count
-                    FROM conversation_share_links
-                    WHERE workspace_id = ?
-                      AND revoked_at IS NULL
-                      AND (expires_at IS NULL OR expires_at > ?)
-                      AND (max_views IS NULL OR view_count < max_views)
+                    FROM conversation_share_links l
+                    JOIN conversations c ON c.id = l.conversation_id
+                    WHERE l.workspace_id = ?
+                      AND c.archived_at IS NULL
+                      AND l.revoked_at IS NULL
+                      AND (l.expires_at IS NULL OR l.expires_at > ?)
+                      AND (l.max_views IS NULL OR l.view_count < l.max_views)
                     """,
                     (workspace_id, share_now),
                 ),

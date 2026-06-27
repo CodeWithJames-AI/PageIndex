@@ -2750,6 +2750,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             archive_link = store.create_conversation_share_link(conversation["id"], "alice")
             store.archive_conversation(conversation["id"], "alice")
             archived_resolution = store.resolve_conversation_share_link(archive_link["token"])
+            usage_after_archive = store.get_workspace_usage_summary(workspace_id, "alice")["conversations"]
             auto_conversation = store.create_conversation(workspace_id, "alice")
             auto_message = "Bearer title-secret /Users/alice/title.pdf title@example.com"
             store.chat_message(auto_conversation["id"], "alice", auto_message, limit=4)
@@ -2827,6 +2828,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertFalse(revoked_again)
             self.assertIsNone(store.resolve_conversation_share_link(active["token"]))
             self.assertIsNone(archived_resolution)
+            self.assertEqual(usage_after_archive["share_links_active"], 0)
             self.assertIn("conversation.share_link_create", [event["action"] for event in audit_events])
             self.assertIn("conversation.share_link_revoke", [event["action"] for event in audit_events])
             self.assertNotIn(active["token"], serialized_audit)

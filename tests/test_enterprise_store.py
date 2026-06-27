@@ -4394,6 +4394,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.add_workspace_member(workspace_id, "viewer", "viewer")
             store.add_workspace_member(other_workspace, "mallory", "owner")
             doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Delete memo")
+            source_set = store.create_query_source_set(
+                workspace_id,
+                "alice",
+                "Delete source set",
+                [doc_id],
+            )
             store.rebuild_virtual_index()
             result = store.query_corpus("deletion target", workspace_id=workspace_id, actor_user_id="alice")
 
@@ -4422,6 +4428,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             deleted = store.delete_document(doc_id, workspace_id=workspace_id, actor_user_id="alice")
             events = store.list_audit_events(workspace_id, "alice")
             serialized = json.dumps(events, sort_keys=True)
+            source_set_after_delete = store.get_query_source_set(workspace_id, "alice", source_set["id"])
 
             self.assertTrue(deleted)
             self.assertIsNone(store.get_document(doc_id))
@@ -4444,9 +4451,19 @@ class EnterpriseStoreTest(unittest.TestCase):
                 store.conn.execute("SELECT COUNT(*) AS count FROM virtual_node_docs WHERE doc_id = ?", (doc_id,)).fetchone()["count"],
                 0,
             )
+            self.assertEqual(
+                store.conn.execute(
+                    "SELECT COUNT(*) AS count FROM query_source_set_documents WHERE doc_id = ?",
+                    (doc_id,),
+                ).fetchone()["count"],
+                0,
+            )
+            self.assertIsNotNone(source_set_after_delete)
+            self.assertEqual(source_set_after_delete["doc_ids"], [])
+            self.assertNotEqual(source_set_after_delete["updated_at"], source_set["updated_at"])
             self.assertEqual(events[0]["action"], "document.delete")
             self.assertEqual(events[0]["target_id"], doc_id)
-            self.assertEqual(events[0]["details"], {"kind": "txt", "name": "Delete memo"})
+            self.assertEqual(events[0]["details"], {"kind": "txt", "name": "Delete memo", "source_set_count": 1})
             self.assertNotIn(str(source), serialized)
             self.assertNotIn("Deletion target evidence.", serialized)
             self.assertFalse(store.delete_document("doc_missing", workspace_id=workspace_id, actor_user_id="alice"))

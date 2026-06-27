@@ -7317,7 +7317,30 @@ class EnterpriseStore:
         if workspace_id and document["workspace_id"] != workspace_id:
             return False
         self._require_document_write(document, actor_user_id)
+        affected_source_set_ids: list[str] = []
+        if document["workspace_id"]:
+            rows = self.conn.execute(
+                """
+                SELECT DISTINCT source_set_id
+                FROM query_source_set_documents
+                WHERE workspace_id = ? AND doc_id = ?
+                ORDER BY source_set_id
+                """,
+                (document["workspace_id"], doc_id),
+            ).fetchall()
+            affected_source_set_ids = [row["source_set_id"] for row in rows]
+        now = _now()
         with self._atomic():
+            if affected_source_set_ids:
+                placeholders = ",".join("?" for _ in affected_source_set_ids)
+                self.conn.execute(
+                    f"""
+                    UPDATE query_source_sets
+                    SET updated_at = ?
+                    WHERE workspace_id = ? AND id IN ({placeholders})
+                    """,
+                    (now, document["workspace_id"], *affected_source_set_ids),
+                )
             cursor = self.conn.execute(
                 "DELETE FROM documents WHERE id = ?",
                 (doc_id,),
@@ -7330,7 +7353,11 @@ class EnterpriseStore:
                     "document.delete",
                     target_type="document",
                     target_id=doc_id,
-                    details={"name": document["name"], "kind": document["kind"]},
+                    details={
+                        "name": document["name"],
+                        "kind": document["kind"],
+                        "source_set_count": len(affected_source_set_ids),
+                    },
                 )
         return deleted
 

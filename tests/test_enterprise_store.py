@@ -2362,11 +2362,26 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("Bearer", serialized_redacted)
             self.assertNotIn("store-secret", serialized_redacted)
             self.assertNotIn("doc-secret", serialized_redacted)
+            self.assertNotIn(run_id, serialized_redacted)
             self.assertNotIn("/Users/alice/private.pdf", serialized_redacted)
             self.assertNotIn("agent@example.com", serialized_redacted)
-            self.assertIn("[redacted]", redacted_resolution["citations"][run_id][0]["doc_name"])
-            self.assertIn("[redacted-path]", redacted_resolution["citations"][run_id][0]["label"])
-            self.assertIn("[redacted-email]", redacted_resolution["citations"][run_id][0]["label"])
+            for key in ("id", "workspace_id", "conversation_id", "created_by"):
+                self.assertNotIn(key, redacted_resolution["share_link"])
+            for key in ("id", "workspace_id"):
+                self.assertNotIn(key, redacted_resolution["conversation"])
+            for message in redacted_resolution["messages"]:
+                self.assertNotIn("id", message)
+            redacted_run_id = redacted_resolution["messages"][1]["run_id"]
+            self.assertNotEqual(redacted_run_id, run_id)
+            self.assertTrue(redacted_run_id.startswith("public_run_"))
+            self.assertIn(redacted_run_id, redacted_resolution["citations"])
+            redacted_citation = redacted_resolution["citations"][redacted_run_id][0]
+            for key in ("id", "doc_id", "evidence_id"):
+                self.assertNotIn(key, redacted_citation)
+            self.assertEqual(redacted_citation["run_id"], redacted_run_id)
+            self.assertIn("[redacted]", redacted_citation["doc_name"])
+            self.assertIn("[redacted-path]", redacted_citation["label"])
+            self.assertIn("[redacted-email]", redacted_citation["label"])
             self.assertIn("[redacted]", auto_redacted_resolution["conversation"]["title"])
             self.assertIn("[redacted-path]", auto_redacted_resolution["conversation"]["title"])
             self.assertIn("[redacted-email]", auto_redacted_resolution["conversation"]["title"])
@@ -7569,6 +7584,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("[redacted]", redacted_resolution["document"]["name"])
             self.assertIn("[redacted-path]", redacted_resolution["document"]["description"])
             self.assertIn("[redacted-email]", redacted_resolution["pages"][0]["content"])
+            for key in ("id", "workspace_id", "doc_id", "created_by"):
+                self.assertNotIn(key, redacted_resolution["share_link"])
+            for key in ("id", "workspace_id", "access_mode"):
+                self.assertNotIn(key, redacted_resolution["document"])
             self.assertNotIn("Bearer", serialized_redacted)
             self.assertNotIn("page-secret", serialized_redacted)
             self.assertNotIn("doc-secret", serialized_redacted)
@@ -10749,15 +10768,30 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("Bearer", serialized_redacted_public)
             self.assertNotIn("http-secret", serialized_redacted_public)
             self.assertNotIn("http-doc", serialized_redacted_public)
+            self.assertNotIn(run_id, serialized_redacted_public)
             self.assertNotIn("/Users/alice/http.txt", serialized_redacted_public)
             self.assertNotIn("/Users/alice/http-doc.txt", serialized_redacted_public)
             self.assertNotIn("person@example.com", serialized_redacted_public)
+            for key in ("id", "workspace_id", "conversation_id", "created_by"):
+                self.assertNotIn(key, redacted_public["share_link"])
+            for key in ("id", "workspace_id"):
+                self.assertNotIn(key, redacted_public["conversation"])
+            for message in redacted_public["messages"]:
+                self.assertNotIn("id", message)
+            redacted_run_id = redacted_public["messages"][1]["run_id"]
+            self.assertNotEqual(redacted_run_id, run_id)
+            self.assertTrue(redacted_run_id.startswith("public_run_"))
             self.assertEqual(len(limited["messages"]), 1)
             self.assertIn(run_id, public["citations"])
             self.assertEqual(public["citations"][run_id][0]["doc_name"], sensitive_doc_name)
-            self.assertIn("[redacted]", redacted_public["citations"][run_id][0]["doc_name"])
-            self.assertIn("[redacted-path]", redacted_public["citations"][run_id][0]["label"])
-            self.assertIn("[redacted-email]", redacted_public["citations"][run_id][0]["label"])
+            self.assertIn(redacted_run_id, redacted_public["citations"])
+            redacted_citation = redacted_public["citations"][redacted_run_id][0]
+            for key in ("id", "doc_id", "evidence_id"):
+                self.assertNotIn(key, redacted_citation)
+            self.assertEqual(redacted_citation["run_id"], redacted_run_id)
+            self.assertIn("[redacted]", redacted_citation["doc_name"])
+            self.assertIn("[redacted-path]", redacted_citation["label"])
+            self.assertIn("[redacted-email]", redacted_citation["label"])
             self.assertIn("text/html", public_html_type)
             self.assertIn("text/html", redacted_html_type)
             self.assertIn("HTTP shared chat", public_html)
@@ -10999,6 +11033,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("[redacted]", redacted_public["document"]["name"])
             self.assertIn("[redacted-path]", redacted_public["document"]["description"])
             self.assertIn("[redacted-email]", redacted_public["pages"][0]["content"])
+            for key in ("id", "workspace_id", "doc_id", "created_by"):
+                self.assertNotIn(key, redacted_public["share_link"])
+            for key in ("id", "workspace_id", "access_mode"):
+                self.assertNotIn(key, redacted_public["document"])
             self.assertNotIn("Bearer", serialized_redacted_public)
             self.assertNotIn("http-page", serialized_redacted_public)
             self.assertNotIn("http-doc", serialized_redacted_public)

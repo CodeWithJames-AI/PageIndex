@@ -742,6 +742,20 @@ def _redact_conversation_share_citation(citation: dict[str, Any]) -> dict[str, A
     return redacted
 
 
+def _minimize_redacted_public_share_link(link: dict[str, Any], target_key: str) -> dict[str, Any]:
+    public_link = dict(link)
+    for key in ("id", "workspace_id", target_key, "created_by"):
+        public_link.pop(key, None)
+    return public_link
+
+
+def _minimize_redacted_public_entity(entity: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    public_entity = dict(entity)
+    for key in keys:
+        public_entity.pop(key, None)
+    return public_entity
+
+
 def _audit_sink_secret_key(key: str) -> bool:
     key_lower = key.casefold()
     return any(secret in key_lower for secret in ("token", "secret", "authorization", "api_key", "password"))
@@ -4646,29 +4660,34 @@ class EnterpriseStore:
                     "truncated": len(content) > max_chars,
                 }
             )
-        return {
-            "share_link": _decorate_document_share_link(
-                {
-                    "id": row["share_link_id"],
-                    "workspace_id": row["workspace_id"],
-                    "doc_id": row["doc_id"],
-                    "created_by": row["created_by"],
-                    "redact_content": row["redact_content"],
-                    "created_at": row["created_at"],
-                    "expires_at": row["expires_at"],
-                    "revoked_at": row["revoked_at"],
-                }
-            ),
-            "document": {
-                "id": row["doc_id"],
+        share_link = _decorate_document_share_link(
+            {
+                "id": row["share_link_id"],
                 "workspace_id": row["workspace_id"],
-                "name": _redact_public_share_text(row["name"]) if redact_content else row["name"],
-                "description": _redact_public_share_text(row["description"]) if redact_content else row["description"],
-                "kind": row["kind"],
-                "access_mode": row["access_mode"],
-                "page_count": row["page_count"],
-                "line_count": row["line_count"],
-            },
+                "doc_id": row["doc_id"],
+                "created_by": row["created_by"],
+                "redact_content": row["redact_content"],
+                "created_at": row["created_at"],
+                "expires_at": row["expires_at"],
+                "revoked_at": row["revoked_at"],
+            }
+        )
+        document = {
+            "id": row["doc_id"],
+            "workspace_id": row["workspace_id"],
+            "name": _redact_public_share_text(row["name"]) if redact_content else row["name"],
+            "description": _redact_public_share_text(row["description"]) if redact_content else row["description"],
+            "kind": row["kind"],
+            "access_mode": row["access_mode"],
+            "page_count": row["page_count"],
+            "line_count": row["line_count"],
+        }
+        if redact_content:
+            share_link = _minimize_redacted_public_share_link(share_link, "doc_id")
+            document = _minimize_redacted_public_entity(document, ("id", "workspace_id", "access_mode"))
+        return {
+            "share_link": share_link,
+            "document": document,
             "pages": pages,
             "total_pages": total_pages,
         }
@@ -6024,7 +6043,19 @@ class EnterpriseStore:
             )
         ]
         run_ids = [message["run_id"] for message in messages if message.get("run_id")]
-        citations_by_run: dict[str, list[dict[str, Any]]] = {run_id: [] for run_id in run_ids}
+        public_run_ids = (
+            {run_id: f"public_run_{index}" for index, run_id in enumerate(run_ids, start=1)}
+            if redact_content
+            else {}
+        )
+        if redact_content:
+            for message in messages:
+                message.pop("id", None)
+                if message.get("run_id"):
+                    message["run_id"] = public_run_ids[message["run_id"]]
+        citations_by_run: dict[str, list[dict[str, Any]]] = {
+            public_run_ids.get(run_id, run_id): [] for run_id in run_ids
+        }
         if run_ids:
             placeholders = ",".join("?" for _ in run_ids)
             for citation in self.conn.execute(
@@ -6038,30 +6069,39 @@ class EnterpriseStore:
                 """,
                 tuple(run_ids),
             ):
+                citation_key = public_run_ids.get(citation["run_id"], citation["run_id"])
                 citation_payload = dict(citation)
                 if redact_content:
                     citation_payload = _redact_conversation_share_citation(citation_payload)
-                citations_by_run.setdefault(citation["run_id"], []).append(citation_payload)
-        return {
-            "share_link": _decorate_conversation_share_link(
-                {
-                    "id": row["share_link_id"],
-                    "workspace_id": row["workspace_id"],
-                    "conversation_id": row["conversation_id"],
-                    "created_by": row["created_by"],
-                    "redact_content": row["redact_content"],
-                    "created_at": row["created_at"],
-                    "expires_at": row["expires_at"],
-                    "revoked_at": row["revoked_at"],
-                }
-            ),
-            "conversation": {
-                "id": row["conversation_id"],
+                    for key in ("id", "doc_id", "evidence_id"):
+                        citation_payload.pop(key, None)
+                    citation_payload["run_id"] = citation_key
+                citations_by_run.setdefault(citation_key, []).append(citation_payload)
+        share_link = _decorate_conversation_share_link(
+            {
+                "id": row["share_link_id"],
                 "workspace_id": row["workspace_id"],
-                "title": _redact_public_share_text(row["title"]) if redact_content else row["title"],
-                "created_at": row["conversation_created_at"],
-                "updated_at": row["updated_at"],
-            },
+                "conversation_id": row["conversation_id"],
+                "created_by": row["created_by"],
+                "redact_content": row["redact_content"],
+                "created_at": row["created_at"],
+                "expires_at": row["expires_at"],
+                "revoked_at": row["revoked_at"],
+            }
+        )
+        conversation = {
+            "id": row["conversation_id"],
+            "workspace_id": row["workspace_id"],
+            "title": _redact_public_share_text(row["title"]) if redact_content else row["title"],
+            "created_at": row["conversation_created_at"],
+            "updated_at": row["updated_at"],
+        }
+        if redact_content:
+            share_link = _minimize_redacted_public_share_link(share_link, "conversation_id")
+            conversation = _minimize_redacted_public_entity(conversation, ("id", "workspace_id"))
+        return {
+            "share_link": share_link,
+            "conversation": conversation,
             "messages": messages,
             "citations": citations_by_run,
         }

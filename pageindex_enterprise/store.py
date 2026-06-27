@@ -749,6 +749,13 @@ def _minimize_redacted_public_share_link(link: dict[str, Any], target_key: str) 
     return public_link
 
 
+def _strip_public_share_link_management_fields(link: dict[str, Any]) -> dict[str, Any]:
+    public_link = dict(link)
+    for key in ("view_count", "last_viewed_at"):
+        public_link.pop(key, None)
+    return public_link
+
+
 def _minimize_redacted_public_entity(entity: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
     public_entity = dict(entity)
     for key in keys:
@@ -982,6 +989,8 @@ class EnterpriseStore:
               created_by TEXT NOT NULL,
               token_hash TEXT NOT NULL UNIQUE,
               redact_content INTEGER NOT NULL DEFAULT 0,
+              view_count INTEGER NOT NULL DEFAULT 0,
+              last_viewed_at TEXT,
               created_at TEXT NOT NULL,
               expires_at TEXT,
               revoked_at TEXT
@@ -1060,6 +1069,8 @@ class EnterpriseStore:
               created_by TEXT NOT NULL,
               token_hash TEXT NOT NULL UNIQUE,
               redact_content INTEGER NOT NULL DEFAULT 0,
+              view_count INTEGER NOT NULL DEFAULT 0,
+              last_viewed_at TEXT,
               created_at TEXT NOT NULL,
               expires_at TEXT,
               revoked_at TEXT
@@ -1246,10 +1257,14 @@ class EnterpriseStore:
             "document_share_links": {
                 "revoked_at": "TEXT",
                 "redact_content": "INTEGER NOT NULL DEFAULT 0",
+                "view_count": "INTEGER NOT NULL DEFAULT 0",
+                "last_viewed_at": "TEXT",
             },
             "conversation_share_links": {
                 "revoked_at": "TEXT",
                 "redact_content": "INTEGER NOT NULL DEFAULT 0",
+                "view_count": "INTEGER NOT NULL DEFAULT 0",
+                "last_viewed_at": "TEXT",
             },
         }
         for table, table_additions in additions.items():
@@ -4558,7 +4573,8 @@ class EnterpriseStore:
         self._require_document_write(document, actor_user_id)
         rows = self.conn.execute(
             """
-            SELECT id, workspace_id, doc_id, created_by, redact_content, created_at, expires_at, revoked_at
+            SELECT id, workspace_id, doc_id, created_by, redact_content, view_count, last_viewed_at,
+                   created_at, expires_at, revoked_at
             FROM document_share_links
             WHERE doc_id = ?
             ORDER BY created_at DESC, id
@@ -4627,7 +4643,16 @@ class EnterpriseStore:
             return False
         if row["revoked_at"] is not None or _is_expired(row["expires_at"]):
             return False
+        viewed_at = _now()
         with self._atomic():
+            self.conn.execute(
+                """
+                UPDATE document_share_links
+                SET view_count = view_count + 1, last_viewed_at = ?
+                WHERE id = ?
+                """,
+                (viewed_at, row["id"]),
+            )
             self._insert_audit_event(
                 row["workspace_id"],
                 "public",
@@ -4715,6 +4740,7 @@ class EnterpriseStore:
                 "revoked_at": row["revoked_at"],
             }
         )
+        share_link = _strip_public_share_link_management_fields(share_link)
         document = {
             "id": row["doc_id"],
             "workspace_id": row["workspace_id"],
@@ -5988,7 +6014,7 @@ class EnterpriseStore:
         )
         rows = self.conn.execute(
             """
-            SELECT id, workspace_id, conversation_id, created_by, redact_content,
+            SELECT id, workspace_id, conversation_id, created_by, redact_content, view_count, last_viewed_at,
                    created_at, expires_at, revoked_at
             FROM conversation_share_links
             WHERE conversation_id = ?
@@ -6062,7 +6088,16 @@ class EnterpriseStore:
             return False
         if row["revoked_at"] is not None or _is_expired(row["expires_at"]) or row["archived_at"] is not None:
             return False
+        viewed_at = _now()
         with self._atomic():
+            self.conn.execute(
+                """
+                UPDATE conversation_share_links
+                SET view_count = view_count + 1, last_viewed_at = ?
+                WHERE id = ?
+                """,
+                (viewed_at, row["id"]),
+            )
             self._insert_audit_event(
                 row["workspace_id"],
                 "public",
@@ -6173,6 +6208,7 @@ class EnterpriseStore:
                 "revoked_at": row["revoked_at"],
             }
         )
+        share_link = _strip_public_share_link_management_fields(share_link)
         conversation = {
             "id": row["conversation_id"],
             "workspace_id": row["workspace_id"],
@@ -7546,7 +7582,8 @@ class EnterpriseStore:
     def _document_share_link(self, share_link_id: str) -> dict[str, Any] | None:
         row = self._one(
             """
-            SELECT id, workspace_id, doc_id, created_by, redact_content, created_at, expires_at, revoked_at
+            SELECT id, workspace_id, doc_id, created_by, redact_content, view_count, last_viewed_at,
+                   created_at, expires_at, revoked_at
             FROM document_share_links
             WHERE id = ?
             """,
@@ -7557,7 +7594,7 @@ class EnterpriseStore:
     def _conversation_share_link(self, share_link_id: str) -> dict[str, Any] | None:
         row = self._one(
             """
-            SELECT id, workspace_id, conversation_id, created_by, redact_content,
+            SELECT id, workspace_id, conversation_id, created_by, redact_content, view_count, last_viewed_at,
                    created_at, expires_at, revoked_at
             FROM conversation_share_links
             WHERE id = ?
@@ -7687,6 +7724,8 @@ def _content_line_count(content: str) -> int:
 def _decorate_document_share_link(link: dict[str, Any]) -> dict[str, Any]:
     decorated = dict(link)
     decorated["redact_content"] = bool(decorated.get("redact_content"))
+    decorated["view_count"] = int(decorated.get("view_count") or 0)
+    decorated["last_viewed_at"] = decorated.get("last_viewed_at")
     decorated["active"] = decorated.get("revoked_at") is None and not _is_expired(decorated.get("expires_at"))
     return decorated
 
@@ -7694,6 +7733,8 @@ def _decorate_document_share_link(link: dict[str, Any]) -> dict[str, Any]:
 def _decorate_conversation_share_link(link: dict[str, Any]) -> dict[str, Any]:
     decorated = dict(link)
     decorated["redact_content"] = bool(decorated.get("redact_content"))
+    decorated["view_count"] = int(decorated.get("view_count") or 0)
+    decorated["last_viewed_at"] = decorated.get("last_viewed_at")
     decorated["active"] = decorated.get("revoked_at") is None and not _is_expired(decorated.get("expires_at"))
     return decorated
 

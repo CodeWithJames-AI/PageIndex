@@ -1415,7 +1415,7 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="member-row">
             <div>
               <strong>${escapeHtml(link.active ? "active" : "inactive")}</strong>
-              <div class="muted">${escapeHtml(link.id)} | ${escapeHtml(link.redact_content ? "redacted" : "raw")}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
+              <div class="muted">${escapeHtml(link.id)} | ${escapeHtml(link.redact_content ? "redacted" : "raw")} | views ${escapeHtml(link.view_count || 0)}${link.last_viewed_at ? ` | last viewed ${escapeHtml(link.last_viewed_at)}` : ""}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
             </div>
             <button class="secondary" type="button" data-revoke-share-kind="${escapeHtml(kind)}" data-revoke-share-target-id="${escapeHtml(link[targetKey] || "")}" data-revoke-share-link-path="${escapeHtml(path)}" data-revoke-share-link-id="${escapeHtml(link.id)}"${link.active ? "" : " disabled"}>Revoke</button>
           </div>

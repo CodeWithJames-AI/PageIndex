@@ -10746,6 +10746,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     action="conversation.share_link_view",
                     limit=20,
                 )
+                share_links_after_views = audit_store.list_conversation_share_links(conversation["id"], "alice")
             finally:
                 audit_store.close()
 
@@ -10762,10 +10763,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(created["token"].startswith("pcs_"))
             self.assertFalse(created["redact_content"])
             self.assertTrue(redacted_created["redact_content"])
+            self.assertEqual(created["view_count"], 0)
+            self.assertIsNone(created["last_viewed_at"])
+            self.assertEqual(redacted_created["view_count"], 0)
+            self.assertIsNone(redacted_created["last_viewed_at"])
             self.assertNotIn("token_hash", created)
             self.assertNotIn(created["token"], serialized_list)
             self.assertFalse(listed_by_id[created["id"]]["redact_content"])
             self.assertTrue(listed_by_id[redacted_created["id"]]["redact_content"])
+            self.assertEqual(listed_by_id[created["id"]]["view_count"], 0)
+            self.assertIsNone(listed_by_id[redacted_created["id"]]["last_viewed_at"])
             self.assertTrue(listed_by_id[created["id"]]["active"])
             self.assertEqual(public["conversation"]["title"], "HTTP shared chat")
             self.assertEqual([message["role"] for message in public["messages"]], ["user", "assistant"])
@@ -10796,6 +10803,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn(run_id, public["citations"])
             self.assertEqual(public["citations"][run_id][0]["doc_name"], sensitive_doc_name)
             self.assertIn(redacted_run_id, redacted_public["citations"])
+            for key in ("view_count", "last_viewed_at"):
+                self.assertNotIn(key, public["share_link"])
+                self.assertNotIn(key, redacted_public["share_link"])
+                self.assertNotIn(key, limited["share_link"])
             redacted_citation = redacted_public["citations"][redacted_run_id][0]
             for key in ("id", "doc_id", "evidence_id"):
                 self.assertNotIn(key, redacted_citation)
@@ -10842,6 +10853,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn(created["token"], serialized_share_view_events)
             self.assertNotIn(redacted_created["token"], serialized_share_view_events)
             self.assertNotIn("token_hash", serialized_share_view_events)
+            share_links_after_views_by_id = {link["id"]: link for link in share_links_after_views}
+            self.assertEqual(share_links_after_views_by_id[created["id"]]["view_count"], 3)
+            self.assertEqual(share_links_after_views_by_id[redacted_created["id"]]["view_count"], 2)
+            self.assertIsNotNone(share_links_after_views_by_id[created["id"]]["last_viewed_at"])
+            self.assertIsNotNone(share_links_after_views_by_id[redacted_created["id"]]["last_viewed_at"])
 
     def test_http_strict_document_delete_requires_write_role(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -11044,6 +11060,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     action="document.share_link_view",
                     limit=20,
                 )
+                share_links_after_views = audit_store.list_document_share_links(
+                    doc_id,
+                    workspace_id=workspace_id,
+                    actor_user_id="alice",
+                )
             finally:
                 audit_store.close()
 
@@ -11060,10 +11081,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(created["token"].startswith("pis_"))
             self.assertFalse(created["redact_content"])
             self.assertTrue(redacted_created["redact_content"])
+            self.assertEqual(created["view_count"], 0)
+            self.assertIsNone(created["last_viewed_at"])
+            self.assertEqual(redacted_created["view_count"], 0)
+            self.assertIsNone(redacted_created["last_viewed_at"])
             self.assertNotIn("token_hash", created)
             self.assertNotIn(created["token"], serialized_list)
             self.assertFalse(listed_by_id[created["id"]]["redact_content"])
             self.assertTrue(listed_by_id[redacted_created["id"]]["redact_content"])
+            self.assertEqual(listed_by_id[created["id"]]["view_count"], 0)
+            self.assertIsNone(listed_by_id[redacted_created["id"]]["last_viewed_at"])
             self.assertTrue(listed_by_id[created["id"]]["active"])
             self.assertEqual(public["document"]["id"], doc_id)
             self.assertEqual(public["document"]["name"], sensitive_doc_name)
@@ -11072,6 +11099,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("[redacted]", redacted_public["document"]["name"])
             self.assertIn("[redacted-path]", redacted_public["document"]["description"])
             self.assertIn("[redacted-email]", redacted_public["pages"][0]["content"])
+            for key in ("view_count", "last_viewed_at"):
+                self.assertNotIn(key, public["share_link"])
+                self.assertNotIn(key, redacted_public["share_link"])
             for key in ("id", "workspace_id", "doc_id", "created_by"):
                 self.assertNotIn(key, redacted_public["share_link"])
             for key in ("id", "workspace_id", "access_mode"):
@@ -11127,6 +11157,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn(created["token"], serialized_share_view_events)
             self.assertNotIn(redacted_created["token"], serialized_share_view_events)
             self.assertNotIn("token_hash", serialized_share_view_events)
+            share_links_after_views_by_id = {link["id"]: link for link in share_links_after_views}
+            self.assertEqual(share_links_after_views_by_id[created["id"]]["view_count"], 2)
+            self.assertEqual(share_links_after_views_by_id[redacted_created["id"]]["view_count"], 2)
+            self.assertIsNotNone(share_links_after_views_by_id[created["id"]]["last_viewed_at"])
+            self.assertIsNotNone(share_links_after_views_by_id[redacted_created["id"]]["last_viewed_at"])
 
     def test_http_document_access_filters_documents_query_and_pages(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -12556,6 +12591,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("documentShareRedactInput", body)
                     self.assertIn("document-share-links", body)
                     self.assertIn("redact_content: documentShareRedactInput.checked", body)
+                    self.assertIn("link.view_count || 0", body)
+                    self.assertIn("link.last_viewed_at", body)
                     self.assertIn('publicShareUrl("documents"', body)
                     self.assertIn("createDocumentShareLink", body)
                     self.assertIn("loadDocumentShareLinks", body)

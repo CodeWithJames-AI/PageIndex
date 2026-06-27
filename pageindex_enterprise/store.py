@@ -6526,6 +6526,12 @@ class EnterpriseStore:
             return False
         now = _now()
         with self._atomic():
+            share_link_count = int(
+                self._one(
+                    "SELECT COUNT(*) AS count FROM query_source_set_share_links WHERE workspace_id = ? AND source_set_id = ?",
+                    (workspace_id, source_set["id"]),
+                )["count"]
+            )
             scoped_conversation_count = int(
                 self._one(
                     "SELECT COUNT(*) AS count FROM conversations WHERE workspace_id = ? AND source_set_id = ?",
@@ -6547,7 +6553,11 @@ class EnterpriseStore:
                 "query_source_set.delete",
                 target_type="query_source_set",
                 target_id=source_set["id"],
-                details={"name": source_set["name"], "scoped_conversation_count": scoped_conversation_count},
+                details={
+                    "name": source_set["name"],
+                    "scoped_conversation_count": scoped_conversation_count,
+                    "share_link_count": share_link_count,
+                },
             )
         return True
 

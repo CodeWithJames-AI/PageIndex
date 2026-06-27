@@ -2222,6 +2222,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                 [public_doc_id, secret_doc_id],
                 shared=True,
             )
+            share_link = store.create_query_source_set_share_link(
+                workspace_id,
+                "alice",
+                source_set["id"],
+            )
 
             conversation = store.create_conversation(
                 workspace_id,
@@ -2250,6 +2255,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             stored_conversation_after_delete = dict(
                 store.conn.execute("SELECT source_set_id FROM conversations WHERE id = ?", (conversation["id"],)).fetchone()
             )
+            remaining_share_link_count = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM query_source_set_share_links WHERE source_set_id = ?",
+                (source_set["id"],),
+            ).fetchone()["count"]
             listed_after_delete = store.list_conversations(workspace_id, "bob")
             chat_after_delete = store.chat_message(conversation["id"], "bob", "renewal", limit=4)
             delete_events = store.list_audit_events(workspace_id, "alice", action="query_source_set.delete")
@@ -2270,10 +2279,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn(public_doc_id, {citation["doc_id"] for citation in fallback_chat["result"]["citations"]})
             self.assertEqual(deleted, True)
             self.assertIsNone(stored_conversation_after_delete["source_set_id"])
+            self.assertEqual(remaining_share_link_count, 0)
+            self.assertIsNone(store.resolve_query_source_set_share_link(share_link["token"]))
             self.assertIsNone(listed_after_delete[0]["source_set_id"])
             self.assertIsNone(chat_after_delete["conversation"]["source_set_id"])
             self.assertNotIn("source_set_id", chat_after_delete["result"]["trace"]["scope"])
             self.assertEqual(delete_events[0]["details"]["scoped_conversation_count"], 1)
+            self.assertEqual(delete_events[0]["details"]["share_link_count"], 1)
             with self.assertRaisesRegex(ValueError, "Query source set not found"):
                 store.create_conversation(
                     workspace_id,

@@ -15660,12 +15660,14 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["manifest_generated"], True)
         self.assertEqual(report["checks"]["dependency_inventory"], True)
         self.assertEqual(report["checks"]["dependency_pins"], True)
+        self.assertEqual(report["checks"]["wheel_record_hashes"], True)
         self.assertEqual(report["checks"]["eval_command"], True)
         self.assertEqual(report["checks"]["eval_checks"]["failed"], 0)
         self.assertEqual(Path(report["manifest"]["path"]).resolve(), manifest_path.resolve())
         self.assertEqual(report["manifest"]["artifact_count"], 1)
         self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
         self.assertEqual(report["manifest"]["direct_dependencies_pinned"], True)
+        self.assertEqual(report["manifest"]["wheel_record_hashes_valid"], True)
         self.assertEqual(manifest["schema_version"], 1)
         self.assertEqual(manifest["package"], {"name": "pageindex-enterprise-cleanroom", "version": "0.1.0"})
         self.assertEqual(manifest["source"]["commit"], report["manifest"]["source_commit"])
@@ -15677,6 +15679,12 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(manifest["artifacts"][0]["sha256"], report["manifest"]["wheel_sha256"])
         self.assertEqual(len(manifest["artifacts"][0]["sha256"]), 64)
         self.assertGreater(manifest["artifacts"][0]["size_bytes"], 0)
+        self.assertEqual(manifest["artifacts"][0]["record"]["ok"], True)
+        self.assertGreater(manifest["artifacts"][0]["record"]["entries"], 0)
+        self.assertGreater(manifest["artifacts"][0]["record"]["hashed_entries"], 0)
+        self.assertEqual(manifest["artifacts"][0]["record"]["mismatches"], [])
+        self.assertEqual(manifest["artifacts"][0]["record"]["missing"], [])
+        self.assertEqual(manifest["artifacts"][0]["record"]["unhashed_non_record"], [])
         dependency_specifiers = {dep["name"]: dep["specifier"] for dep in manifest["dependencies"]}
         dependency_pins = {dep["name"]: dep["pinned"] for dep in manifest["dependencies"]}
         self.assertEqual(

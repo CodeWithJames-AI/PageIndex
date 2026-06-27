@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -90,11 +93,13 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
         _inspect_wheel(wheel)
         dependencies = _wheel_dependencies(wheel)
         dependency_policy = _dependency_policy(dependencies)
+        wheel_record = _wheel_record_integrity(wheel)
         manifest = _artifact_manifest(
             wheel,
             source=_source_metadata(repo_root),
             dependencies=dependencies,
             dependency_policy=dependency_policy,
+            wheel_record=wheel_record,
         )
         if manifest_output is not None:
             manifest_output = manifest_output.expanduser().resolve()
@@ -110,6 +115,7 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
                 "path": str(manifest_output) if manifest_output is not None else None,
                 "source_commit": manifest["source"]["commit"],
                 "source_dirty": manifest["source"]["dirty"],
+                "wheel_record_hashes_valid": manifest["artifacts"][0]["record"]["ok"],
                 "wheel_sha256": manifest["artifacts"][0]["sha256"],
                 "wheel_size_bytes": manifest["artifacts"][0]["size_bytes"],
             },
@@ -119,6 +125,7 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
                 "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
                 "dependency_inventory": bool(manifest["dependencies"]),
                 "dependency_pins": manifest["dependency_policy"]["direct_dependencies_pinned"],
+                "wheel_record_hashes": manifest["artifacts"][0]["record"]["ok"],
                 "eval_command": eval_report.get("ok") is True,
                 "eval_checks": eval_report.get("summary", {}),
             },
@@ -154,6 +161,7 @@ def _artifact_manifest(
     source: dict[str, Any],
     dependencies: list[dict[str, Any]],
     dependency_policy: dict[str, Any],
+    wheel_record: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -167,6 +175,7 @@ def _artifact_manifest(
         "artifacts": [
             {
                 "filename": wheel.name,
+                "record": wheel_record,
                 "sha256": _sha256(wheel),
                 "size_bytes": wheel.stat().st_size,
             }
@@ -196,6 +205,71 @@ def _wheel_dependencies(wheel: Path) -> list[dict[str, Any]]:
             }
         )
     return sorted(dependencies, key=lambda dep: dep["name"])
+
+
+def _wheel_record_integrity(wheel: Path) -> dict[str, Any]:
+    record_path = f"{PACKAGE_NAME}-{VERSION}.dist-info/RECORD"
+    malformed: list[dict[str, Any]] = []
+    missing: list[str] = []
+    mismatches: list[dict[str, Any]] = []
+    unhashed_non_record: list[str] = []
+    entries = 0
+    hashed_entries = 0
+    with zipfile.ZipFile(wheel) as archive:
+        names = set(archive.namelist())
+        if record_path not in names:
+            return {
+                "ok": False,
+                "entries": 0,
+                "hashed_entries": 0,
+                "missing": [record_path],
+                "mismatches": [],
+                "unhashed_non_record": [],
+            }
+        rows = csv.reader(io.StringIO(archive.read(record_path).decode("utf-8")))
+        for row in rows:
+            entries += 1
+            if len(row) != 3:
+                malformed.append({"row": entries, "columns": len(row)})
+                continue
+            path, hash_field, size_field = row
+            if path not in names:
+                missing.append(path)
+                continue
+            data = archive.read(path)
+            if hash_field:
+                hashed_entries += 1
+                algorithm, separator, expected = hash_field.partition("=")
+                actual = _sha256_record_digest(data)
+                if algorithm != "sha256" or separator != "=":
+                    mismatches.append({"path": path, "reason": "unsupported_hash", "algorithm": algorithm})
+                elif actual != expected:
+                    mismatches.append({"path": path, "reason": "hash_mismatch"})
+            elif path != record_path:
+                unhashed_non_record.append(path)
+            if size_field:
+                try:
+                    expected_size = int(size_field)
+                except ValueError:
+                    mismatches.append({"path": path, "reason": "invalid_size"})
+                else:
+                    if len(data) != expected_size:
+                        mismatches.append({"path": path, "reason": "size_mismatch"})
+            elif path != record_path:
+                mismatches.append({"path": path, "reason": "missing_size"})
+    return {
+        "ok": not malformed and not missing and not mismatches and not unhashed_non_record,
+        "entries": entries,
+        "hashed_entries": hashed_entries,
+        "malformed": malformed,
+        "missing": missing,
+        "mismatches": mismatches,
+        "unhashed_non_record": unhashed_non_record,
+    }
+
+
+def _sha256_record_digest(data: bytes) -> str:
+    return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
 
 
 def _dependency_policy(dependencies: list[dict[str, Any]]) -> dict[str, Any]:

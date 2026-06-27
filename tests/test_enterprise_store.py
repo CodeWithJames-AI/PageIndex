@@ -6060,6 +6060,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     "alice",
                     source_set["id"],
                 )
+                source_set_usage = audit_store.get_workspace_usage_summary(workspace_id, "alice")["source_sets"]
             finally:
                 audit_store.close()
 
@@ -6166,6 +6167,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertFalse(share_links_after_views_by_id[html_link["id"]]["active"])
             self.assertIsNotNone(share_links_after_views_by_id[created["id"]]["last_viewed_at"])
             self.assertIsNotNone(share_links_after_views_by_id[html_link["id"]]["last_viewed_at"])
+            self.assertEqual(source_set_usage["count"], 1)
+            self.assertEqual(source_set_usage["shared"], 1)
+            self.assertEqual(source_set_usage["documents"], 2)
+            self.assertEqual(source_set_usage["share_links_active"], 0)
+            self.assertEqual(source_set_usage["share_links_revoked"], 1)
+            self.assertEqual(source_set_usage["share_links_expired"], 0)
+            self.assertEqual(source_set_usage["share_links_exhausted"], 1)
 
     def test_http_workspace_usage_requires_admin_audit_token(self):
         with tempfile.TemporaryDirectory() as tmp:

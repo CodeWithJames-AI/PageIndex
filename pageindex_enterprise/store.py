@@ -1887,6 +1887,50 @@ class EnterpriseStore:
                     "SELECT COUNT(*) AS count FROM conversation_share_links WHERE workspace_id = ? AND revoked_at IS NOT NULL"
                 ),
             },
+            "source_sets": {
+                "count": count("SELECT COUNT(*) AS count FROM query_source_sets WHERE workspace_id = ?"),
+                "shared": count("SELECT COUNT(*) AS count FROM query_source_sets WHERE workspace_id = ? AND shared = 1"),
+                "documents": count(
+                    "SELECT COUNT(*) AS count FROM query_source_set_documents WHERE workspace_id = ?"
+                ),
+                "share_links_active": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM query_source_set_share_links
+                    WHERE workspace_id = ?
+                      AND revoked_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > ?)
+                      AND (max_views IS NULL OR view_count < max_views)
+                    """,
+                    (workspace_id, share_now),
+                ),
+                "share_links_revoked": count(
+                    "SELECT COUNT(*) AS count FROM query_source_set_share_links WHERE workspace_id = ? AND revoked_at IS NOT NULL"
+                ),
+                "share_links_expired": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM query_source_set_share_links
+                    WHERE workspace_id = ?
+                      AND revoked_at IS NULL
+                      AND expires_at IS NOT NULL
+                      AND expires_at <= ?
+                    """,
+                    (workspace_id, share_now),
+                ),
+                "share_links_exhausted": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM query_source_set_share_links
+                    WHERE workspace_id = ?
+                      AND revoked_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > ?)
+                      AND max_views IS NOT NULL
+                      AND view_count >= max_views
+                    """,
+                    (workspace_id, share_now),
+                ),
+            },
             "retrieval": {
                 "query_runs": count("SELECT COUNT(*) AS count FROM query_runs WHERE workspace_id = ?"),
                 "evidence": count(

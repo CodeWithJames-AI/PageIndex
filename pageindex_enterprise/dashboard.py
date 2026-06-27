@@ -1830,10 +1830,11 @@ DASHBOARD_HTML = """<!doctype html>
       const team = usage.team || {};
       const tokens = usage.api_tokens || {};
       const conversations = usage.conversations || {};
+      const sourceSets = usage.source_sets || {};
       const retrieval = usage.retrieval || {};
       const audit = usage.audit || {};
       usageSummary.className = "muted";
-      usageSummary.textContent = `${documents.count || 0} docs | ${documents.pages || 0} pages | ${team.members || 0} members | ${team.groups || 0} groups | ${tokens.active || 0} tokens | ${conversations.count || 0} chats | ${retrieval.query_runs || 0} queries | ${audit.events || 0} audit events`;
+      usageSummary.textContent = `${documents.count || 0} docs | ${documents.pages || 0} pages | ${team.members || 0} members | ${team.groups || 0} groups | ${tokens.active || 0} tokens | ${conversations.count || 0} chats | ${sourceSets.count || 0} sets | ${retrieval.query_runs || 0} queries | ${audit.events || 0} audit events`;
       usageReportText.textContent = JSON.stringify(usage, null, 2);
     }
 

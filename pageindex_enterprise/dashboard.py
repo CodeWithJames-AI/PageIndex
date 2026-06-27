@@ -661,6 +661,12 @@ DASHBOARD_HTML = """<!doctype html>
                 <button id="cancelSourceSetEditButton" class="secondary" type="button" hidden>Cancel</button>
               </div>
               <div id="sourceSetList" class="member-list muted">No source sets loaded.</div>
+              <div class="import-row" style="margin-top:12px">
+                <label class="checkbox-row"><input id="sourceSetShareRedactInput" type="checkbox"> Redact share content</label>
+                <input id="sourceSetShareMaxViewsInput" value="" placeholder="max views" aria-label="Source set share max views">
+              </div>
+              <input id="sourceSetSharePasswordInput" type="password" value="" placeholder="share password" aria-label="Source set share password">
+              <div id="sourceSetShareList" class="member-list muted">No source set shares loaded.</div>
             </div>
           </section>
           <section>
@@ -861,6 +867,10 @@ DASHBOARD_HTML = """<!doctype html>
     const saveSourceSetButton = document.getElementById("saveSourceSetButton");
     const cancelSourceSetEditButton = document.getElementById("cancelSourceSetEditButton");
     const sourceSetList = document.getElementById("sourceSetList");
+    const sourceSetShareRedactInput = document.getElementById("sourceSetShareRedactInput");
+    const sourceSetShareMaxViewsInput = document.getElementById("sourceSetShareMaxViewsInput");
+    const sourceSetSharePasswordInput = document.getElementById("sourceSetSharePasswordInput");
+    const sourceSetShareList = document.getElementById("sourceSetShareList");
     let activeConversationId = "";
     let activeFolderId = "";
     let activeQueryDocs = [];
@@ -1208,6 +1218,8 @@ DASHBOARD_HTML = """<!doctype html>
             <div class="doc-actions">
               <button class="secondary" type="button" data-use-source-set-id="${escapeHtml(sourceSet.id)}">Use</button>
               <button class="secondary" type="button" data-edit-source-set-id="${escapeHtml(sourceSet.id)}">Edit</button>
+              <button class="secondary" type="button" data-share-source-set-id="${escapeHtml(sourceSet.id)}">Share</button>
+              <button class="secondary" type="button" data-shares-source-set-id="${escapeHtml(sourceSet.id)}">Shares</button>
               <button class="secondary" type="button" data-delete-source-set-id="${escapeHtml(sourceSet.id)}">Delete</button>
             </div>
           </article>
@@ -1218,6 +1230,12 @@ DASHBOARD_HTML = """<!doctype html>
       });
       sourceSetList.querySelectorAll("[data-edit-source-set-id]").forEach((button) => {
         button.addEventListener("click", () => editQuerySourceSet(button.dataset.editSourceSetId));
+      });
+      sourceSetList.querySelectorAll("[data-share-source-set-id]").forEach((button) => {
+        button.addEventListener("click", () => createSourceSetShareLink(button.dataset.shareSourceSetId).catch((error) => setStatus(error.message, "error")));
+      });
+      sourceSetList.querySelectorAll("[data-shares-source-set-id]").forEach((button) => {
+        button.addEventListener("click", () => loadSourceSetShareLinks(button.dataset.sharesSourceSetId).catch((error) => setStatus(error.message, "error")));
       });
       sourceSetList.querySelectorAll("[data-delete-source-set-id]").forEach((button) => {
         button.addEventListener("click", () => deleteQuerySourceSet(button.dataset.deleteSourceSetId).catch((error) => setStatus(error.message, "error")));
@@ -1449,15 +1467,24 @@ DASHBOARD_HTML = """<!doctype html>
       return link.max_views != null ? `${viewCount}/${link.max_views}` : `${viewCount}`;
     }
 
+    function shareKindConfig(kind) {
+      if (kind === "documents") {
+        return { empty: "No document shares loaded.", path: "document-share-links", targetKey: "doc_id" };
+      }
+      if (kind === "conversations") {
+        return { empty: "No conversation shares loaded.", path: "conversation-share-links", targetKey: "conversation_id" };
+      }
+      return { empty: "No source set shares loaded.", path: "query-source-set-share-links", targetKey: "source_set_id" };
+    }
+
     function renderShareLinks(container, kind, links) {
+      const config = shareKindConfig(kind);
       if (!links.length) {
         container.className = "member-list muted";
-        container.textContent = kind === "documents" ? "No document shares loaded." : "No conversation shares loaded.";
+        container.textContent = config.empty;
         return;
       }
       container.className = "member-list";
-      const path = kind === "documents" ? "document-share-links" : "conversation-share-links";
-      const targetKey = kind === "documents" ? "doc_id" : "conversation_id";
       container.innerHTML = links.map((link) => `
         <article class="member">
           <div class="member-row">
@@ -1465,7 +1492,7 @@ DASHBOARD_HTML = """<!doctype html>
               <strong>${escapeHtml(link.active ? "active" : "inactive")}</strong>
               <div class="muted">${escapeHtml(link.id)} | ${escapeHtml(link.redact_content ? "redacted" : "raw")}${link.password_protected ? " | protected" : ""} | views ${escapeHtml(shareViewSummary(link))}${link.last_viewed_at ? ` | last viewed ${escapeHtml(link.last_viewed_at)}` : ""}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
             </div>
-            <button class="secondary" type="button" data-revoke-share-kind="${escapeHtml(kind)}" data-revoke-share-target-id="${escapeHtml(link[targetKey] || "")}" data-revoke-share-link-path="${escapeHtml(path)}" data-revoke-share-link-id="${escapeHtml(link.id)}"${link.active ? "" : " disabled"}>Revoke</button>
+            <button class="secondary" type="button" data-revoke-share-kind="${escapeHtml(kind)}" data-revoke-share-target-id="${escapeHtml(link[config.targetKey] || "")}" data-revoke-share-link-path="${escapeHtml(config.path)}" data-revoke-share-link-id="${escapeHtml(link.id)}"${link.active ? "" : " disabled"}>Revoke</button>
           </div>
         </article>
       `).join("");
@@ -2187,6 +2214,47 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Document share created.", "ok");
     }
 
+    async function loadSourceSetShareLinks(sourceSetId) {
+      if (!sourceSetId) {
+        setStatus("Source set not found.", "warn");
+        return;
+      }
+      setStatus("Loading source set shares...");
+      const payload = await api(`/query-source-sets/${encodeURIComponent(sourceSetId)}/share-links`);
+      renderShareLinks(sourceSetShareList, "source-sets", payload.share_links || []);
+      setStatus("Source set shares loaded.", "ok");
+    }
+
+    async function createSourceSetShareLink(sourceSetId) {
+      if (!sourceSetId) {
+        setStatus("Source set not found.", "warn");
+        return;
+      }
+      const expiry = shareExpiryPayload();
+      if (expiry.cancelled) {
+        return;
+      }
+      const maxViews = shareMaxViewsPayload(sourceSetShareMaxViewsInput);
+      if (maxViews.cancelled) {
+        return;
+      }
+      setStatus("Creating source set share...");
+      const payloadBody = {
+        ...expiry.payload,
+        ...maxViews.payload,
+        ...sharePasswordPayload(sourceSetSharePasswordInput),
+        redact_content: sourceSetShareRedactInput.checked
+      };
+      const payload = await api(`/query-source-sets/${encodeURIComponent(sourceSetId)}/share-links`, {
+        method: "POST",
+        body: JSON.stringify(payloadBody)
+      });
+      const link = payload.share_link || {};
+      shareUrlOutput.value = link.token ? publicShareUrl("source-sets", link.token) : "";
+      await loadSourceSetShareLinks(sourceSetId);
+      setStatus("Source set share created.", "ok");
+    }
+
     async function loadDocumentAccess(docId) {
       if (!docId) {
         setStatus("Document not found.", "warn");
@@ -2867,6 +2935,8 @@ DASHBOARD_HTML = """<!doctype html>
         await loadDocumentShareLinks(targetId).catch(() => {});
       } else if (kind === "conversations" && targetId) {
         await loadConversationShareLinks(targetId).catch(() => {});
+      } else if (kind === "source-sets" && targetId) {
+        await loadSourceSetShareLinks(targetId).catch(() => {});
       } else if (activeConversationId) {
         await loadConversationShareLinks(activeConversationId).catch(() => {});
       }

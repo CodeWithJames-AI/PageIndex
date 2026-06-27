@@ -574,6 +574,49 @@ def _redacted_audit_export_events(events: list[dict[str, Any]]) -> list[dict[str
     return redacted_events
 
 
+def _siem_audit_export_event(event: dict[str, Any]) -> dict[str, Any]:
+    action = str(event.get("action") or "")
+    target_type = event.get("target_type")
+    target_id = event.get("target_id")
+    return {
+        "@timestamp": event.get("created_at"),
+        "message": f"PageIndex audit event {action}",
+        "event": {
+            "action": action,
+            "category": ["iam" if action.startswith(("api_token.", "workspace_member.")) else "configuration"],
+            "dataset": "pageindex.audit",
+            "id": event.get("id"),
+            "kind": "event",
+            "module": "pageindex",
+            "type": _siem_audit_event_types(action),
+        },
+        "user": {"id": event.get("user_id")},
+        "pageindex": {
+            "audit": {
+                "details": event.get("details") or {},
+                "integrity_hash": event.get("integrity_hash"),
+                "previous_integrity_hash": event.get("previous_integrity_hash"),
+            },
+            "target": {
+                "id": target_id,
+                "type": target_type,
+            },
+            "workspace_id": event.get("workspace_id"),
+        },
+    }
+
+
+def _siem_audit_event_types(action: str) -> list[str]:
+    suffix = action.rsplit(".", 1)[-1]
+    if suffix in {"create", "ingest", "upload", "import"}:
+        return ["creation"]
+    if suffix in {"clear", "delete", "purge", "remove", "revoke"}:
+        return ["deletion"]
+    if suffix in {"archive", "move", "rename", "restore", "rotate", "set", "update"}:
+        return ["change"]
+    return ["info"]
+
+
 def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
     """Validate a workspace export bundle without mutating any store state."""
     path = Path(bundle_path).expanduser()
@@ -3689,6 +3732,8 @@ class EnterpriseStore:
         export_format = format.strip().casefold()
         if export_format == "jsonl":
             return "\n".join(json.dumps(event, sort_keys=True) for event in ordered)
+        if export_format == "siem-jsonl":
+            return "\n".join(json.dumps(_siem_audit_export_event(event), sort_keys=True) for event in ordered)
         if export_format == "csv":
             output = io.StringIO()
             writer = csv.writer(output)
@@ -3722,7 +3767,7 @@ class EnterpriseStore:
                     ]
             )
             return output.getvalue()
-        raise ValueError("format must be jsonl or csv")
+        raise ValueError("format must be jsonl, csv, or siem-jsonl")
 
     def verify_audit_integrity(self, workspace_id: str, user_id: str) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, user_id, WORKSPACE_ADMIN_ROLES)

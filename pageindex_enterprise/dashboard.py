@@ -570,6 +570,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <select id="auditFormatInput" aria-label="Audit export format">
                   <option value="jsonl">jsonl</option>
                   <option value="csv">csv</option>
+                  <option value="siem-jsonl">siem jsonl</option>
                 </select>
                 <button id="refreshAuditButton" class="secondary" type="button">Refresh</button>
               </div>

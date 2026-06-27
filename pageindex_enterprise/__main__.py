@@ -282,7 +282,7 @@ def main() -> None:
     audit_export.add_argument("--event-user-id")
     audit_export.add_argument("--target-type")
     audit_export.add_argument("--target-id")
-    audit_export.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
+    audit_export.add_argument("--format", choices=["jsonl", "csv", "siem-jsonl"], default="jsonl")
 
     audit_integrity = sub.add_parser("audit-integrity")
     audit_integrity.add_argument("workspace_id")

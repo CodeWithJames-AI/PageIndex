@@ -6990,8 +6990,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                 until="2026-03-15T00:00:00Z",
                 format="csv",
             )
+            siem_export = store.export_audit_events(workspace_id, "alice", action="api_token.revoke", format="siem-jsonl")
             csv_rows = list(csv.DictReader(io.StringIO(csv_export)))
-            serialized = json.dumps({"jsonl": jsonl_export, "csv": csv_export}, sort_keys=True)
+            siem_event = json.loads(siem_export)
+            serialized = json.dumps({"jsonl": jsonl_export, "csv": csv_export, "siem": siem_export}, sort_keys=True)
 
             self.assertEqual([event["id"] for event in action_events], [second])
             self.assertEqual([event["id"] for event in user_events], [fourth])
@@ -7008,12 +7010,23 @@ class EnterpriseStoreTest(unittest.TestCase):
                 json.loads(csv_rows[1]["details_json"]),
                 {"note": "[redacted]", "source_set_link": "[redacted]"},
             )
+            self.assertEqual(siem_event["@timestamp"], "2026-03-01T00:00:00+00:00")
+            self.assertEqual(siem_event["event"]["action"], "api_token.revoke")
+            self.assertEqual(siem_event["event"]["dataset"], "pageindex.audit")
+            self.assertEqual(siem_event["event"]["type"], ["deletion"])
+            self.assertEqual(siem_event["user"]["id"], "alice")
+            self.assertEqual(siem_event["pageindex"]["workspace_id"], workspace_id)
+            self.assertEqual(siem_event["pageindex"]["target"], {"id": "tok_a", "type": "api_token"})
+            self.assertEqual(
+                siem_event["pageindex"]["audit"]["details"],
+                {"note": "[redacted]", "source_set_link": "[redacted]"},
+            )
             self.assertIsNone(json.loads(jsonl_export)["integrity_hash"])
             self.assertNotIn(secret, serialized)
             self.assertNotIn("pss_secret_should_not_export", serialized)
             self.assertNotIn("hash_should_not_export", serialized)
             self.assertNotIn("token_hash", serialized)
-            with self.assertRaisesRegex(ValueError, "format"):
+            with self.assertRaisesRegex(ValueError, "jsonl, csv, or siem-jsonl"):
                 store.export_audit_events(workspace_id, "alice", format="xml")
             with self.assertRaisesRegex(ValueError, "since must be before until"):
                 store.list_audit_events(workspace_id, "alice", since="2026-04-01T00:00:00Z", until="2026-03-01T00:00:00Z")
@@ -7495,6 +7508,23 @@ class EnterpriseStoreTest(unittest.TestCase):
                 text=True,
                 check=True,
             ).stdout
+            exported_siem = subprocess.run(
+                [
+                    *base,
+                    "audit-export",
+                    "ws_cli",
+                    "alice",
+                    "--format",
+                    "siem-jsonl",
+                    "--action",
+                    "custom.secret_probe",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
             integrity = json.loads(
                 subprocess.run(
                     [*base, "audit-integrity", "ws_cli", "alice"],
@@ -7515,6 +7545,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             serialized = json.dumps(events, sort_keys=True)
             exported_event = json.loads(exported)
             csv_rows = list(csv.DictReader(io.StringIO(exported_csv)))
+            siem_event = json.loads(exported_siem)
             secret_event_payload = next(event for event in events if event["id"] == secret_event)
 
             self.assertEqual([event["id"] for event in bob_events], [bob_event])
@@ -7524,6 +7555,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             self.assertEqual(exported_event["action"], "api_token.revoke")
             self.assertEqual([row["action"] for row in csv_rows], ["api_token.create", "api_token.revoke"])
+            self.assertEqual(siem_event["event"]["action"], "custom.secret_probe")
+            self.assertEqual(siem_event["event"]["dataset"], "pageindex.audit")
+            self.assertEqual(siem_event["pageindex"]["target"], {"id": "probe_cli", "type": "probe"})
+            self.assertEqual(
+                siem_event["pageindex"]["audit"]["details"],
+                {"note": "[redacted]", "source_set_link": "[redacted]"},
+            )
             self.assertEqual(
                 secret_event_payload["details"],
                 {"note": "[redacted]", "source_set_link": "[redacted]"},
@@ -7538,12 +7576,17 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn(token["token"], serialized)
             self.assertNotIn(token["token"], exported)
             self.assertNotIn(token["token"], exported_csv)
+            self.assertNotIn(token["token"], exported_siem)
             self.assertNotIn("pit_cli_secret_should_not_log", serialized)
+            self.assertNotIn("pit_cli_secret_should_not_log", exported_siem)
             self.assertNotIn("pss_cli_secret_should_not_log", serialized)
+            self.assertNotIn("pss_cli_secret_should_not_log", exported_siem)
             self.assertNotIn("hash_should_not_log", serialized)
+            self.assertNotIn("hash_should_not_log", exported_siem)
             self.assertNotIn("token_hash", serialized)
             self.assertNotIn("token_hash", exported)
             self.assertNotIn("token_hash", exported_csv)
+            self.assertNotIn("token_hash", exported_siem)
 
     def test_audit_retention_cli_sets_previews_and_purges_without_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -13963,6 +14006,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                     f"{base}/audit-events/export?format=csv&action=document.upload&target_type=document",
                     headers=headers,
                 )
+                exported_siem, exported_siem_type = _get_text(
+                    f"{base}/audit-events/export?format=siem-jsonl&action=custom.secret_probe",
+                    headers=headers,
+                )
                 blocked_export = _get_error(
                     f"{base}/audit-events/export?format=jsonl",
                     headers={"X-PageIndex-Workspace": workspace_id, "X-PageIndex-User": "mallory"},
@@ -13975,6 +14022,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 serialized = json.dumps({"events": events, "secret_events": secret_events}, sort_keys=True)
                 exported_event = json.loads(exported)
                 csv_rows = list(csv.DictReader(io.StringIO(exported_csv)))
+                siem_event = json.loads(exported_siem)
                 actions = {event["action"] for event in events}
                 secret_event = secret_events[0]
                 upload_target_id = upload_events[0]["target_id"]
@@ -13999,8 +14047,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertTrue(integrity["latest_integrity_hash"])
                 self.assertIn("application/x-ndjson", exported_type)
                 self.assertIn("text/csv", exported_csv_type)
+                self.assertIn("application/x-ndjson", exported_siem_type)
                 self.assertEqual(exported_event["action"], "document.upload")
                 self.assertEqual(csv_rows[0]["action"], "document.upload")
+                self.assertEqual(siem_event["event"]["action"], "custom.secret_probe")
+                self.assertEqual(siem_event["event"]["dataset"], "pageindex.audit")
+                self.assertEqual(siem_event["pageindex"]["audit"]["details"], {"note": "[redacted]", "source_set_link": "[redacted]"})
                 self.assertNotIn("audit evidence", serialized)
                 self.assertNotIn(str(source), serialized)
                 self.assertNotIn(str(structure_path), serialized)
@@ -14011,6 +14063,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertNotIn(upload_bytes.decode("utf-8"), serialized)
                 self.assertNotIn(upload_bytes.decode("utf-8"), exported)
                 self.assertNotIn(upload_bytes.decode("utf-8"), exported_csv)
+                self.assertNotIn("pit_secret_should_not_list", exported_siem)
+                self.assertNotIn("pss_secret_should_not_list", exported_siem)
+                self.assertNotIn("hash_should_not_list", exported_siem)
+                self.assertNotIn("token_hash", exported_siem)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -14721,6 +14777,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("auditTargetTypeInput", body)
                     self.assertIn("auditTargetIdInput", body)
                     self.assertIn("auditFormatInput", body)
+                    self.assertIn("siem-jsonl", body)
                     self.assertIn("auditList", body)
                     self.assertIn("auditExportText", body)
                     self.assertIn("verifyAuditIntegrityButton", body)

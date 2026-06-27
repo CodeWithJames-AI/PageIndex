@@ -26,6 +26,7 @@ WORKSPACE_ROLES = {"owner", "admin", "member", "viewer"}
 WORKSPACE_INVITATION_ROLES = {"admin", "member", "viewer"}
 WORKSPACE_ROLE_RANK = {"viewer": 0, "member": 1, "admin": 2, "owner": 3}
 DOCUMENT_ACCESS_MODES = {"workspace", "restricted"}
+DOCUMENT_ACCESS_GRANT_ROLES = {"read", "write"}
 API_TOKEN_SCOPES = ("read", "write", "audit")
 MAX_CONVERSATION_MESSAGE_CHARS = 4000
 CHAT_TRACE_QUERY = "[conversation message redacted]"
@@ -231,6 +232,13 @@ def _normalize_document_access_mode(mode: str | None) -> str:
     normalized = (mode or "workspace").strip().casefold() or "workspace"
     if normalized not in DOCUMENT_ACCESS_MODES:
         raise ValueError(f"Unsupported document access mode: {normalized}")
+    return normalized
+
+
+def _normalize_document_access_role(role: str | None) -> str:
+    normalized = (role or "read").strip().casefold() or "read"
+    if normalized not in DOCUMENT_ACCESS_GRANT_ROLES:
+        raise ValueError(f"Unsupported document access role: {normalized}")
     return normalized
 
 
@@ -1780,6 +1788,41 @@ class EnterpriseStore:
                 (document["folder_id"], document["workspace_id"], document["workspace_id"], actor_user_id),
             )
         )
+
+    def _can_write_document(self, document: dict[str, Any], actor_user_id: str | None) -> bool:
+        if not document.get("workspace_id") or document.get("access_mode", "workspace") == "workspace":
+            return True
+        if not actor_user_id:
+            return False
+        actor_user_id = actor_user_id.strip()
+        role = self.workspace_role(document["workspace_id"], actor_user_id)
+        if role in WORKSPACE_ADMIN_ROLES:
+            return True
+        if role not in WORKSPACE_WRITE_ROLES:
+            return False
+        return bool(
+            self._one(
+                "SELECT 1 FROM document_access_grants WHERE doc_id = ? AND user_id = ? AND role = 'write'",
+                (document["id"], actor_user_id),
+            )
+            or self._one(
+                """
+                SELECT 1
+                FROM document_group_access_grants dgag
+                JOIN workspace_group_members wgm ON wgm.group_id = dgag.group_id
+                WHERE dgag.doc_id = ?
+                  AND dgag.role = 'write'
+                  AND wgm.workspace_id = ?
+                  AND wgm.user_id = ?
+                """,
+                (document["id"], document["workspace_id"], actor_user_id),
+            )
+        )
+
+    def _require_document_write(self, document: dict[str, Any], actor_user_id: str | None) -> None:
+        self.require_workspace_write(document.get("workspace_id"), actor_user_id)
+        if document.get("workspace_id") and not self._can_write_document(document, actor_user_id):
+            raise PermissionError("document write access denied")
 
     def create_api_token(
         self,
@@ -3639,6 +3682,8 @@ class EnterpriseStore:
         existing = self.get_document(existing_doc_id) if existing_doc_id else None
         if existing and existing["workspace_id"] and existing["workspace_id"] != workspace_id:
             raise ValueError("Document belongs to another workspace.")
+        if existing:
+            self._require_document_write(existing, actor_user_id)
         with self._atomic():
             if existing:
                 self._purge_document_index(existing["id"])
@@ -3835,7 +3880,7 @@ class EnterpriseStore:
             return None
         if workspace_id and document["workspace_id"] != workspace_id:
             return None
-        self.require_workspace_write(document["workspace_id"], actor_user_id)
+        self._require_document_write(document, actor_user_id)
         replacement_name = document["name"] if name is None else name.strip()
         if not replacement_name:
             raise ValueError("Document name is required.")
@@ -3994,6 +4039,7 @@ class EnterpriseStore:
         workspace_id: str,
         actor_user_id: str,
         user_id: str,
+        role: str = "read",
     ) -> dict[str, Any] | None:
         document = self.get_document(doc_id.strip())
         if not document or document["workspace_id"] != workspace_id:
@@ -4003,18 +4049,21 @@ class EnterpriseStore:
         if not user_id:
             raise ValueError("User id is required.")
         self.require_workspace_access(workspace_id, user_id)
+        role = _normalize_document_access_role(role)
+        if role == "write" and self.workspace_role(workspace_id, user_id) not in WORKSPACE_WRITE_ROLES:
+            raise PermissionError("document write grant requires workspace write role")
         now = _now()
         with self._atomic():
             self.conn.execute(
                 """
                 INSERT INTO document_access_grants (doc_id, workspace_id, user_id, role, granted_by, created_at)
-                VALUES (?, ?, ?, 'read', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(doc_id, user_id) DO UPDATE SET
                   role = excluded.role,
                   granted_by = excluded.granted_by,
                   created_at = excluded.created_at
                 """,
-                (document["id"], workspace_id, user_id, actor_user_id, now),
+                (document["id"], workspace_id, user_id, role, actor_user_id, now),
             )
             self._insert_audit_event(
                 workspace_id,
@@ -4022,7 +4071,7 @@ class EnterpriseStore:
                 "document.access_grant",
                 target_type="document",
                 target_id=document["id"],
-                details={"user_id": user_id, "role": "read"},
+                details={"user_id": user_id, "role": role},
             )
         return self.list_document_access(document["id"], workspace_id=workspace_id, actor_user_id=actor_user_id)
 
@@ -4033,24 +4082,26 @@ class EnterpriseStore:
         workspace_id: str,
         actor_user_id: str,
         group_id: str,
+        role: str = "read",
     ) -> dict[str, Any] | None:
         document = self.get_document(doc_id.strip())
         if not document or document["workspace_id"] != workspace_id:
             return None
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         group = self._require_workspace_group(workspace_id, group_id)
+        role = _normalize_document_access_role(role)
         now = _now()
         with self._atomic():
             self.conn.execute(
                 """
                 INSERT INTO document_group_access_grants (doc_id, workspace_id, group_id, role, granted_by, created_at)
-                VALUES (?, ?, ?, 'read', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(doc_id, group_id) DO UPDATE SET
                   role = excluded.role,
                   granted_by = excluded.granted_by,
                   created_at = excluded.created_at
                 """,
-                (document["id"], workspace_id, group["id"], actor_user_id, now),
+                (document["id"], workspace_id, group["id"], role, actor_user_id, now),
             )
             self._insert_audit_event(
                 workspace_id,
@@ -4058,7 +4109,7 @@ class EnterpriseStore:
                 "document.group_access_grant",
                 target_type="document",
                 target_id=document["id"],
-                details={"group_id": group["id"], "group_name": group["name"], "role": "read"},
+                details={"group_id": group["id"], "group_name": group["name"], "role": role},
             )
         return self.list_document_access(document["id"], workspace_id=workspace_id, actor_user_id=actor_user_id)
 
@@ -4139,7 +4190,7 @@ class EnterpriseStore:
             return False
         if workspace_id and document["workspace_id"] != workspace_id:
             return False
-        self.require_workspace_write(document["workspace_id"], actor_user_id)
+        self._require_document_write(document, actor_user_id)
         with self._atomic():
             cursor = self.conn.execute(
                 "DELETE FROM documents WHERE id = ?",

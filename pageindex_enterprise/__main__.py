@@ -368,6 +368,7 @@ def main() -> None:
     document_access.add_argument("--revoke-user")
     document_access.add_argument("--grant-group")
     document_access.add_argument("--revoke-group")
+    document_access.add_argument("--role", choices=["read", "write"], default="read")
 
     ingest = sub.add_parser("ingest-file")
     ingest.add_argument("path")
@@ -986,6 +987,7 @@ def main() -> None:
                         workspace_id=args.workspace_id,
                         actor_user_id=args.actor_user_id,
                         user_id=args.grant_user,
+                        role=args.role,
                     )
                 )
             elif args.grant_group is not None:
@@ -995,6 +997,7 @@ def main() -> None:
                         workspace_id=args.workspace_id,
                         actor_user_id=args.actor_user_id,
                         group_id=args.grant_group,
+                        role=args.role,
                     )
                 )
             elif args.revoke_user is not None:

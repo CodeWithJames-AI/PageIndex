@@ -898,6 +898,10 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
           <div class="access-actions">
             <input id="documentAccessUserInput" value="" placeholder="user id" aria-label="Document access user id">
+            <select id="documentAccessGrantRoleInput" aria-label="Document access grant role">
+              <option value="read">read</option>
+              <option value="write">write</option>
+            </select>
             <button id="grantDocumentAccessButton" type="button">Grant</button>
             <button id="revokeDocumentAccessButton" class="secondary" type="button">Revoke</button>
           </div>
@@ -1489,12 +1493,13 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function grantDocumentAccess(docId) {
       const input = document.getElementById("documentAccessUserInput");
+      const roleInput = document.getElementById("documentAccessGrantRoleInput");
       const userId = input.value.trim();
       if (!userId) {
         setStatus("Enter a user id.", "warn");
         return;
       }
-      await updateDocumentAccess(docId, { grant_user_id: userId }, "Document access granted.");
+      await updateDocumentAccess(docId, { grant_user_id: userId, grant_role: roleInput.value }, "Document access granted.");
     }
 
     async function revokeDocumentAccess(docId, userId = "") {
@@ -1509,12 +1514,13 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function grantDocumentGroupAccess(docId, groupId = "") {
       const input = document.getElementById("documentAccessGroupInput");
+      const roleInput = document.getElementById("documentAccessGrantRoleInput");
       const targetGroupId = (groupId || (input ? input.value : "")).trim();
       if (!targetGroupId) {
         setStatus("Enter a group id.", "warn");
         return;
       }
-      await updateDocumentAccess(docId, { grant_group_id: targetGroupId }, "Document group access granted.");
+      await updateDocumentAccess(docId, { grant_group_id: targetGroupId, grant_role: roleInput.value }, "Document group access granted.");
     }
 
     async function revokeDocumentGroupAccess(docId, groupId = "") {

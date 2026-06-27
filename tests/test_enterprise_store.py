@@ -4864,8 +4864,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             tmp_path = Path(tmp)
             public = tmp_path / "public.txt"
             restricted = tmp_path / "restricted.txt"
+            replacement = tmp_path / "restricted-replacement.txt"
             public.write_text("Public roadmap renewal evidence.", encoding="utf-8")
             restricted.write_text("Secret merger diligence evidence.", encoding="utf-8")
+            replacement.write_text("Secret merger write-grant replacement evidence.", encoding="utf-8")
             store = EnterpriseStore(tmp_path / "workspace")
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
@@ -4891,6 +4893,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                     actor_user_id="bob",
                     user_id="vera",
                 )
+            with self.assertRaisesRegex(PermissionError, "write grant"):
+                store.grant_document_access(
+                    restricted_id,
+                    workspace_id=workspace_id,
+                    actor_user_id="alice",
+                    user_id="vera",
+                    role="write",
+                )
 
             granted_access = store.grant_document_access(
                 restricted_id,
@@ -4901,6 +4911,23 @@ class EnterpriseStoreTest(unittest.TestCase):
             bob_documents_after_grant = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
             bob_query_after_grant = store.query_corpus("secret merger", workspace_id=workspace_id, actor_user_id="bob")
             bob_pages_after_grant = store.list_document_pages(restricted_id, workspace_id=workspace_id, actor_user_id="bob")
+            with self.assertRaisesRegex(PermissionError, "document write access denied"):
+                store.reindex_document_file(restricted_id, replacement, workspace_id=workspace_id, actor_user_id="bob")
+            write_access = store.grant_document_access(
+                restricted_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                user_id="bob",
+                role="write",
+            )
+            bob_reindex = store.reindex_document_file(
+                restricted_id,
+                replacement,
+                workspace_id=workspace_id,
+                actor_user_id="bob",
+                name="Bob-updated secret memo",
+            )
+            bob_pages_after_write = store.list_document_pages(restricted_id, workspace_id=workspace_id, actor_user_id="bob")
             revoked = store.revoke_document_access(
                 restricted_id,
                 workspace_id=workspace_id,
@@ -4917,14 +4944,19 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(bob_pages["pages"], [])
             self.assertEqual(owner_query["citations"][0]["doc_id"], restricted_id)
             self.assertEqual(granted_access["grants"][0]["user_id"], "bob")
+            self.assertEqual(granted_access["grants"][0]["role"], "read")
             self.assertEqual({doc["id"] for doc in bob_documents_after_grant}, {public_id, restricted_id})
             self.assertEqual(bob_query_after_grant["citations"][0]["doc_id"], restricted_id)
             self.assertEqual(bob_pages_after_grant["pages"][0]["content"], "Secret merger diligence evidence.")
+            self.assertEqual(write_access["grants"][0]["role"], "write")
+            self.assertEqual(bob_reindex["name"], "Bob-updated secret memo")
+            self.assertEqual(bob_pages_after_write["pages"][0]["content"], "Secret merger write-grant replacement evidence.")
             self.assertTrue(revoked)
             self.assertEqual(bob_query_after_revoke["citations"], [])
             self.assertIn("document.access_mode", actions)
             self.assertIn("document.access_grant", actions)
             self.assertIn("document.access_revoke", actions)
+            self.assertIn("document.reindex", actions)
 
     def test_document_access_cli_filters_search_without_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5001,6 +5033,16 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            write_granted = json.loads(
+                subprocess.run(
+                    [*base, "document-access", restricted_id, "ws_acl", "alice", "--grant-user", "bob", "--role", "write"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
             bob_visible = json.loads(
                 subprocess.run(
                     [*base, "search", "secret", "--workspace-id", "ws_acl", "--user-id", "bob"],
@@ -5018,6 +5060,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("workspace role denied", member_denied.stderr)
             self.assertNotIn("Traceback", member_denied.stderr)
             self.assertEqual(granted["grants"][0]["user_id"], "bob")
+            self.assertEqual(granted["grants"][0]["role"], "read")
+            self.assertEqual(write_granted["grants"][0]["role"], "write")
             self.assertEqual(public_id.startswith("doc_"), True)
             self.assertEqual(bob_visible[0]["id"], restricted_id)
 
@@ -7537,7 +7581,9 @@ class EnterpriseStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             source = tmp_path / "access.txt"
+            replacement = tmp_path / "access-replacement.txt"
             source.write_text("Document access route evidence.", encoding="utf-8")
+            replacement.write_text("Document access write grant evidence.", encoding="utf-8")
             root = tmp_path / "workspace"
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Team")
@@ -7587,6 +7633,19 @@ class EnterpriseStoreTest(unittest.TestCase):
                 foreign_get = _get_error(access_url, headers=other_headers)
                 restricted = _post_json(access_url, {"access_mode": "restricted"}, headers=owner_headers)
                 granted = _post_json(access_url, {"grant_user_id": "bob"}, headers=owner_headers)
+                read_reindex = _put_json(
+                    f"{base}/documents/{doc_id}",
+                    {"path": str(replacement)},
+                    headers=member_headers,
+                    status=403,
+                )
+                write_granted = _post_json(access_url, {"grant_user_id": "bob", "grant_role": "write"}, headers=owner_headers)
+                write_reindex = _put_json(
+                    f"{base}/documents/{doc_id}",
+                    {"path": str(replacement), "name": "Access write memo"},
+                    headers=member_headers,
+                )
+                member_pages_after_write = _get_json(f"{base}/documents/{doc_id}/pages", headers=member_headers)
                 revoked = _post_json(access_url, {"revoke_user_id": "bob"}, headers=owner_headers)
                 revoked_again = _post_json(access_url, {"revoke_user_id": "bob"}, headers=owner_headers)
             finally:
@@ -7603,6 +7662,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(foreign_get["error"], "document not found")
             self.assertEqual(restricted["access"]["access_mode"], "restricted")
             self.assertEqual([grant["user_id"] for grant in granted["access"]["grants"]], ["bob"])
+            self.assertEqual(granted["access"]["grants"][0]["role"], "read")
+            self.assertEqual(read_reindex["error"], "document write access denied")
+            self.assertEqual(write_granted["access"]["grants"][0]["role"], "write")
+            self.assertTrue(write_reindex["updated"])
+            self.assertEqual(write_reindex["document"]["name"], "Access write memo")
+            self.assertEqual(member_pages_after_write["pages"][0]["content"], "Document access write grant evidence.")
             self.assertTrue(revoked["revoked"])
             self.assertEqual(revoked["access"]["grants"], [])
             self.assertFalse(revoked_again["revoked"])
@@ -8564,6 +8629,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("addGroupMember", body)
                     self.assertIn("removeGroupMember", body)
                     self.assertIn("documentAccessGroupInput", body)
+                    self.assertIn("documentAccessGrantRoleInput", body)
                     self.assertIn("grantDocumentGroupAccess", body)
                     self.assertIn("revokeDocumentGroupAccess", body)
                     self.assertIn("/workspace-usage", body)

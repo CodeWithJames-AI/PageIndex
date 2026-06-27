@@ -123,6 +123,16 @@ def main() -> None:
     workspace_usage.add_argument("workspace_id")
     workspace_usage.add_argument("actor_user_id")
 
+    workspace_quota_policy = sub.add_parser("workspace-quota-policy")
+    workspace_quota_policy.add_argument("workspace_id")
+    workspace_quota_policy.add_argument("user_id")
+    workspace_quota_policy.add_argument("--max-documents", type=_positive_int)
+    workspace_quota_policy.add_argument("--clear-documents", action="store_true")
+    workspace_quota_policy.add_argument("--max-pages", type=_positive_int)
+    workspace_quota_policy.add_argument("--clear-pages", action="store_true")
+    workspace_quota_policy.add_argument("--max-members", type=_positive_int)
+    workspace_quota_policy.add_argument("--clear-members", action="store_true")
+
     remove_member = sub.add_parser("remove-member")
     remove_member.add_argument("workspace_id")
     remove_member.add_argument("user_id")
@@ -576,6 +586,35 @@ def main() -> None:
                     indent=2,
                 )
             )
+        elif args.command == "workspace-quota-policy":
+            if args.max_documents is not None and args.clear_documents:
+                raise SystemExit("use --max-documents or --clear-documents, not both")
+            if args.max_pages is not None and args.clear_pages:
+                raise SystemExit("use --max-pages or --clear-pages, not both")
+            if args.max_members is not None and args.clear_members:
+                raise SystemExit("use --max-members or --clear-members, not both")
+            updates = {}
+            if args.max_documents is not None:
+                updates["max_documents"] = args.max_documents
+            elif args.clear_documents:
+                updates["max_documents"] = None
+            if args.max_pages is not None:
+                updates["max_pages"] = args.max_pages
+            elif args.clear_pages:
+                updates["max_pages"] = None
+            if args.max_members is not None:
+                updates["max_members"] = args.max_members
+            elif args.clear_members:
+                updates["max_members"] = None
+            if updates:
+                policy = _workspace_member_cli(
+                    lambda: store.set_workspace_quota_policy(args.workspace_id, args.user_id, **updates)
+                )
+            else:
+                policy = _workspace_member_cli(
+                    lambda: store.get_workspace_quota_policy(args.workspace_id, args.user_id)
+                )
+            print(json.dumps(policy, indent=2))
         elif args.command == "remove-member":
             print(
                 json.dumps(
@@ -1137,22 +1176,26 @@ def main() -> None:
             print(json.dumps(access, indent=2))
         elif args.command == "ingest-file":
             print(
-                store.ingest_file(
-                    args.path,
-                    folder_id=args.folder_id,
-                    name=args.name,
-                    workspace_id=args.workspace_id,
-                    actor_user_id=args.user_id,
+                _workspace_member_cli(
+                    lambda: store.ingest_file(
+                        args.path,
+                        folder_id=args.folder_id,
+                        name=args.name,
+                        workspace_id=args.workspace_id,
+                        actor_user_id=args.user_id,
+                    )
                 )
             )
         elif args.command == "import-structure":
             print(
-                store.import_pageindex_structure(
-                    args.path,
-                    doc_id=args.doc_id,
-                    folder_id=args.folder_id,
-                    workspace_id=args.workspace_id,
-                    actor_user_id=args.user_id,
+                _workspace_member_cli(
+                    lambda: store.import_pageindex_structure(
+                        args.path,
+                        doc_id=args.doc_id,
+                        folder_id=args.folder_id,
+                        workspace_id=args.workspace_id,
+                        actor_user_id=args.user_id,
+                    )
                 )
             )
         elif args.command == "search":

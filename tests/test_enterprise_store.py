@@ -849,6 +849,140 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("workspace role denied", denied.stderr)
             self.assertNotIn("Traceback", denied.stderr)
 
+    def test_workspace_quota_policy_cli_sets_clears_and_enforces_without_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "quota-cli-one.txt"
+            source.write_text("CLI quota evidence.", encoding="utf-8")
+            overflow = tmp_path / "quota-cli-two.txt"
+            overflow.write_text("CLI overflow evidence.", encoding="utf-8")
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run([*base, "workspace", "Team", "--workspace-id", "ws_quota"], cwd=repo_root, env=env, capture_output=True, text=True, check=True)
+            subprocess.run([*base, "add-member", "ws_quota", "alice", "--role", "owner"], cwd=repo_root, env=env, capture_output=True, text=True, check=True)
+            subprocess.run([*base, "add-member", "ws_quota", "bob", "--role", "member", "--actor-user-id", "alice"], cwd=repo_root, env=env, capture_output=True, text=True, check=True)
+
+            initial = json.loads(
+                subprocess.run(
+                    [*base, "workspace-quota-policy", "ws_quota", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            saved = json.loads(
+                subprocess.run(
+                    [
+                        *base,
+                        "workspace-quota-policy",
+                        "ws_quota",
+                        "alice",
+                        "--max-documents",
+                        "1",
+                        "--max-pages",
+                        "1",
+                        "--max-members",
+                        "2",
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            subprocess.run(
+                [*base, "ingest-file", str(source), "--workspace-id", "ws_quota", "--user-id", "alice", "--name", "CLI quota memo"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            over_document = subprocess.run(
+                [*base, "ingest-file", str(overflow), "--workspace-id", "ws_quota", "--user-id", "alice", "--name", "CLI overflow memo"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            over_member = subprocess.run(
+                [*base, "add-member", "ws_quota", "carol", "--role", "viewer", "--actor-user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            member_denied = subprocess.run(
+                [*base, "workspace-quota-policy", "ws_quota", "bob"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            invalid_combo = subprocess.run(
+                [*base, "workspace-quota-policy", "ws_quota", "alice", "--max-members", "3", "--clear-members"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            invalid_value = subprocess.run(
+                [*base, "workspace-quota-policy", "ws_quota", "alice", "--max-documents", "0"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            cleared = json.loads(
+                subprocess.run(
+                    [
+                        *base,
+                        "workspace-quota-policy",
+                        "ws_quota",
+                        "alice",
+                        "--clear-documents",
+                        "--clear-pages",
+                        "--clear-members",
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+
+            self.assertEqual(initial["usage"], {"documents": 0, "pages": 0, "members": 2})
+            self.assertIsNone(initial["max_documents"])
+            self.assertEqual(saved["max_documents"], 1)
+            self.assertEqual(saved["max_pages"], 1)
+            self.assertEqual(saved["max_members"], 2)
+            self.assertNotEqual(over_document.returncode, 0)
+            self.assertIn("workspace quota exceeded: documents", over_document.stderr)
+            self.assertNotIn("Traceback", over_document.stderr)
+            self.assertNotEqual(over_member.returncode, 0)
+            self.assertIn("workspace quota exceeded: members", over_member.stderr)
+            self.assertNotIn("Traceback", over_member.stderr)
+            self.assertNotEqual(member_denied.returncode, 0)
+            self.assertIn("workspace role denied", member_denied.stderr)
+            self.assertNotIn("Traceback", member_denied.stderr)
+            self.assertNotEqual(invalid_combo.returncode, 0)
+            self.assertIn("use --max-members or --clear-members", invalid_combo.stderr)
+            self.assertNotIn("Traceback", invalid_combo.stderr)
+            self.assertNotEqual(invalid_value.returncode, 0)
+            self.assertIn("must be a positive integer", invalid_value.stderr)
+            self.assertNotIn("Traceback", invalid_value.stderr)
+            self.assertIsNone(cleared["max_documents"])
+            self.assertIsNone(cleared["max_pages"])
+            self.assertIsNone(cleared["max_members"])
+            self.assertEqual(cleared["usage"], {"documents": 1, "pages": 1, "members": 2})
+
     def test_legacy_global_folder_path_unique_schema_is_migrated(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"

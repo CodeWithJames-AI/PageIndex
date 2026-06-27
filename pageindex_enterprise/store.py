@@ -4602,6 +4602,49 @@ class EnterpriseStore:
             )
         return True
 
+    def record_document_share_link_view(
+        self,
+        token: str,
+        *,
+        response_format: str,
+        limit: int,
+        offset: int,
+        max_chars: int,
+    ) -> bool:
+        token = token.strip()
+        if not token:
+            raise ValueError("Share token is required.")
+        token_hash = _hash_token(token)
+        row = self._one(
+            """
+            SELECT id, workspace_id, doc_id, token_hash, redact_content, expires_at, revoked_at
+            FROM document_share_links
+            WHERE token_hash = ?
+            """,
+            (token_hash,),
+        )
+        if not row or not hmac.compare_digest(row["token_hash"], token_hash):
+            return False
+        if row["revoked_at"] is not None or _is_expired(row["expires_at"]):
+            return False
+        with self._atomic():
+            self._insert_audit_event(
+                row["workspace_id"],
+                "public",
+                "document.share_link_view",
+                target_type="document",
+                target_id=row["doc_id"],
+                details={
+                    "share_link_id": row["id"],
+                    "response_format": response_format,
+                    "redact_content": bool(row["redact_content"]),
+                    "limit": limit,
+                    "offset": offset,
+                    "max_chars": max_chars,
+                },
+            )
+        return True
+
     def resolve_document_share_link(
         self,
         token: str,
@@ -5991,6 +6034,47 @@ class EnterpriseStore:
                 target_type="conversation",
                 target_id=conversation["id"],
                 details={"share_link_id": share_link_id},
+            )
+        return True
+
+    def record_conversation_share_link_view(
+        self,
+        token: str,
+        *,
+        response_format: str,
+        limit: int,
+    ) -> bool:
+        token = token.strip()
+        if not token:
+            raise ValueError("Share token is required.")
+        token_hash = _hash_token(token)
+        row = self._one(
+            """
+            SELECT l.id, l.workspace_id, l.conversation_id, l.token_hash, l.redact_content,
+                   l.expires_at, l.revoked_at, c.archived_at
+            FROM conversation_share_links l
+            JOIN conversations c ON c.id = l.conversation_id
+            WHERE l.token_hash = ?
+            """,
+            (token_hash,),
+        )
+        if not row or not hmac.compare_digest(row["token_hash"], token_hash):
+            return False
+        if row["revoked_at"] is not None or _is_expired(row["expires_at"]) or row["archived_at"] is not None:
+            return False
+        with self._atomic():
+            self._insert_audit_event(
+                row["workspace_id"],
+                "public",
+                "conversation.share_link_view",
+                target_type="conversation",
+                target_id=row["conversation_id"],
+                details={
+                    "share_link_id": row["id"],
+                    "response_format": response_format,
+                    "redact_content": bool(row["redact_content"]),
+                    "limit": limit,
+                },
             )
         return True
 

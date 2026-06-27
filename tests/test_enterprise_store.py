@@ -10738,10 +10738,21 @@ class EnterpriseStoreTest(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+            audit_store = EnterpriseStore(root)
+            try:
+                share_view_events = audit_store.list_audit_events(
+                    workspace_id,
+                    "alice",
+                    action="conversation.share_link_view",
+                    limit=20,
+                )
+            finally:
+                audit_store.close()
 
             serialized_public = json.dumps(public, sort_keys=True)
             serialized_redacted_public = json.dumps(redacted_public, sort_keys=True)
             serialized_list = json.dumps(listed, sort_keys=True)
+            serialized_share_view_events = json.dumps(share_view_events, sort_keys=True)
             listed_by_id = {link["id"]: link for link in listed}
             run_id = chat["assistant_message"]["run_id"]
             self.assertEqual(missing_auth["error"], "api token required")
@@ -10814,6 +10825,23 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(revoked, {"revoked": True})
             self.assertEqual(public_after_revoke["status"], 404)
             self.assertEqual(public_after_revoke["error"], "share link not found")
+            self.assertEqual(len(share_view_events), 5)
+            self.assertEqual({event["user_id"] for event in share_view_events}, {"public"})
+            self.assertEqual({event["target_id"] for event in share_view_events}, {conversation["id"]})
+            self.assertEqual(
+                sorted(event["details"]["response_format"] for event in share_view_events),
+                ["html", "html", "json", "json", "json"],
+            )
+            self.assertEqual(
+                sorted(event["details"]["redact_content"] for event in share_view_events),
+                [False, False, False, True, True],
+            )
+            self.assertEqual(sorted(event["details"]["limit"] for event in share_view_events), [1, 100, 100, 100, 100])
+            self.assertIn(created["id"], {event["details"]["share_link_id"] for event in share_view_events})
+            self.assertIn(redacted_created["id"], {event["details"]["share_link_id"] for event in share_view_events})
+            self.assertNotIn(created["token"], serialized_share_view_events)
+            self.assertNotIn(redacted_created["token"], serialized_share_view_events)
+            self.assertNotIn("token_hash", serialized_share_view_events)
 
     def test_http_strict_document_delete_requires_write_role(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -11008,10 +11036,21 @@ class EnterpriseStoreTest(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+            audit_store = EnterpriseStore(root)
+            try:
+                share_view_events = audit_store.list_audit_events(
+                    workspace_id,
+                    "alice",
+                    action="document.share_link_view",
+                    limit=20,
+                )
+            finally:
+                audit_store.close()
 
             serialized_public = json.dumps(public, sort_keys=True)
             serialized_redacted_public = json.dumps(redacted_public, sort_keys=True)
             serialized_list = json.dumps(listed, sort_keys=True)
+            serialized_share_view_events = json.dumps(share_view_events, sort_keys=True)
             listed_by_id = {link["id"]: link for link in listed}
             self.assertEqual(missing_auth["error"], "api token required")
             self.assertEqual(read_denied["error"], "api token scope denied")
@@ -11070,6 +11109,24 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(revoked, {"revoked": True})
             self.assertEqual(public_after_revoke["status"], 404)
             self.assertEqual(public_after_revoke["error"], "share link not found")
+            self.assertEqual(len(share_view_events), 4)
+            self.assertEqual({event["user_id"] for event in share_view_events}, {"public"})
+            self.assertEqual({event["target_id"] for event in share_view_events}, {doc_id})
+            self.assertEqual(
+                sorted(event["details"]["response_format"] for event in share_view_events),
+                ["html", "html", "json", "json"],
+            )
+            self.assertEqual(
+                sorted(event["details"]["redact_content"] for event in share_view_events),
+                [False, False, True, True],
+            )
+            self.assertTrue(all(event["details"]["limit"] == 1 for event in share_view_events))
+            self.assertTrue(all(event["details"]["max_chars"] == 200 for event in share_view_events))
+            self.assertIn(created["id"], {event["details"]["share_link_id"] for event in share_view_events})
+            self.assertIn(redacted_created["id"], {event["details"]["share_link_id"] for event in share_view_events})
+            self.assertNotIn(created["token"], serialized_share_view_events)
+            self.assertNotIn(redacted_created["token"], serialized_share_view_events)
+            self.assertNotIn("token_hash", serialized_share_view_events)
 
     def test_http_document_access_filters_documents_query_and_pages(self):
         with tempfile.TemporaryDirectory() as tmp:

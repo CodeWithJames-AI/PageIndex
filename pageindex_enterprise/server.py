@@ -953,7 +953,16 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if shared is None:
                 self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
                 return
-            if _share_response_wants_html(self.headers.get("Accept", ""), _str_param(params, "format")):
+            wants_html = _share_response_wants_html(self.headers.get("Accept", ""), _str_param(params, "format"))
+            recorded = store.record_conversation_share_link_view(
+                token,
+                response_format="html" if wants_html else "json",
+                limit=limit,
+            )
+            if not recorded:
+                self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
+                return
+            if wants_html:
                 self._html(_render_public_conversation_share(shared))
                 return
             self._json(shared)
@@ -1519,7 +1528,18 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if shared is None:
                 self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
                 return
-            if _share_response_wants_html(self.headers.get("Accept", ""), _str_param(params, "format")):
+            wants_html = _share_response_wants_html(self.headers.get("Accept", ""), _str_param(params, "format"))
+            recorded = store.record_document_share_link_view(
+                token,
+                response_format="html" if wants_html else "json",
+                limit=limit,
+                offset=offset,
+                max_chars=max_chars,
+            )
+            if not recorded:
+                self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
+                return
+            if wants_html:
                 self._html(_render_public_document_share(shared))
                 return
             self._json(shared)

@@ -7328,6 +7328,16 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            store = EnterpriseStore(root)
+            try:
+                expired = store.create_api_token(
+                    "ws_cli",
+                    "alice",
+                    name="expired",
+                    expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+                )
+            finally:
+                store.close()
             missing = subprocess.run(
                 [*base, "rotate-token", "ws_cli", "alice", "tok_missing"],
                 cwd=repo_root,
@@ -7342,16 +7352,29 @@ class EnterpriseStoreTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+            expired_rotation = subprocess.run(
+                [*base, "rotate-token", "ws_cli", "alice", expired["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
 
             self.assertNotEqual(missing.returncode, 0)
             self.assertNotEqual(foreign.returncode, 0)
+            self.assertNotEqual(expired_rotation.returncode, 0)
             self.assertIn("token not found or not owned by user", missing.stderr)
             self.assertIn("token not found or not owned by user", foreign.stderr)
+            self.assertIn("api token expired", expired_rotation.stderr)
+            self.assertNotIn("Traceback", expired_rotation.stderr)
             self.assertNotIn("pit_", missing.stdout + missing.stderr)
             self.assertNotIn("pit_", foreign.stdout + foreign.stderr)
+            self.assertNotIn("pit_", expired_rotation.stdout + expired_rotation.stderr)
             self.assertNotIn(bob["token"], foreign.stdout + foreign.stderr)
+            self.assertNotIn(expired["token"], expired_rotation.stdout + expired_rotation.stderr)
             self.assertNotIn("token_hash", missing.stdout + missing.stderr)
             self.assertNotIn("token_hash", foreign.stdout + foreign.stderr)
+            self.assertNotIn("token_hash", expired_rotation.stdout + expired_rotation.stderr)
 
     def test_audit_ledger_records_token_lifecycle_without_secret_leakage(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -833,7 +833,7 @@ def main() -> None:
         elif args.command == "revoke-token":
             print(json.dumps({"revoked": store.revoke_api_token(args.workspace_id, args.user_id, args.token_id)}))
         elif args.command == "rotate-token":
-            rotated = store.rotate_api_token(args.workspace_id, args.user_id, args.token_id)
+            rotated = _api_token_cli(lambda: store.rotate_api_token(args.workspace_id, args.user_id, args.token_id))
             if rotated is None:
                 raise SystemExit("token not found or not owned by user")
             print(json.dumps(rotated, indent=2))

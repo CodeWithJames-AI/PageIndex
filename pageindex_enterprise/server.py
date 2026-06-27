@@ -1764,7 +1764,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 required_scope=("audit", "write"),
                 require_api_token=True,
             )
-            store.require_workspace_role(workspace_id, user_id, WORKSPACE_ADMIN_ROLES)
+            store.require_workspace_role(workspace_id, user_id, {"owner"})
             report = store.import_workspace_bundle(path)
             store.record_audit_event(
                 workspace_id,

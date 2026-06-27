@@ -6062,8 +6062,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             store = EnterpriseStore(root)
             operator_workspace_id = store.create_workspace("Operators", workspace_id="ops")
             store.add_workspace_member(operator_workspace_id, "operator", "owner")
+            store.add_workspace_member(operator_workspace_id, "ada", "admin", actor_user_id="operator")
             store.add_workspace_member(operator_workspace_id, "bob", "member", actor_user_id="operator")
             owner_token = store.create_api_token(operator_workspace_id, "operator", name="owner")["token"]
+            admin_token = store.create_api_token(operator_workspace_id, "ada", name="admin")["token"]
             audit_token = store.create_api_token(operator_workspace_id, "operator", name="audit", scopes=["audit"])["token"]
             write_token = store.create_api_token(operator_workspace_id, "operator", name="write", scopes=["write"])["token"]
             member_token_record = store.create_api_token(operator_workspace_id, "bob", name="member")
@@ -6081,6 +6083,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             base = f"http://127.0.0.1:{server.server_port}"
             url = f"{base}/workspace-import"
             owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            admin_headers = {"Authorization": f"Bearer {admin_token}"}
             try:
                 missing = _post_json(url, {"path": str(export_path)}, status=403)
                 audit_denied = _post_json(
@@ -6102,6 +6105,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     status=403,
                 )
                 missing_path = _post_json(url, {}, headers=owner_headers, status=400)
+                admin_denied = _post_json(url, {"path": str(export_path)}, headers=admin_headers, status=403)
                 restored = _post_json(url, {"path": str(export_path)}, headers=owner_headers, status=201)
                 duplicate = _post_json(url, {"path": str(export_path)}, headers=owner_headers, status=400)
             finally:
@@ -6122,6 +6126,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(write_denied["error"], "api token scope denied")
             self.assertEqual(member_denied["error"], "workspace role denied")
             self.assertEqual(missing_path["error"], "path is required")
+            self.assertEqual(admin_denied["error"], "workspace role denied")
             self.assertTrue(restored["ok"], restored.get("errors"))
             self.assertEqual(restored["workspace_id"], restore_workspace_id)
             self.assertEqual(restored["inserted"]["documents"], 1)

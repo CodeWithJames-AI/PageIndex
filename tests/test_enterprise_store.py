@@ -7292,10 +7292,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             read_policy = store.get_audit_retention_policy(workspace_id, "ada")
             preview = store.purge_audit_events_by_retention(workspace_id, "alice", dry_run=True)
+            admin_preview = store.purge_audit_events_by_retention(workspace_id, "ada", dry_run=True)
             with self.assertRaisesRegex(ValueError, "legal hold"):
+                store.purge_audit_events_by_retention(workspace_id, "alice")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.purge_audit_events_by_retention(workspace_id, "ada")
             release_policy = store.set_audit_retention_policy(workspace_id, "alice", legal_hold=False)
-            purged = store.purge_audit_events_by_retention(workspace_id, "ada")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.purge_audit_events_by_retention(workspace_id, "ada")
+            purged = store.purge_audit_events_by_retention(workspace_id, "alice")
             second_purge = store.purge_audit_events_by_retention(workspace_id, "alice")
             remaining = store.list_audit_events(workspace_id, "alice", limit=20)
             other_remaining = store.list_audit_events(other_workspace, "alice", limit=20)
@@ -7314,6 +7319,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(preview["legal_hold"], True)
             self.assertEqual(preview["legal_hold_reason"], "audit freeze")
             self.assertTrue(preview["dry_run"])
+            self.assertEqual(admin_preview["matched"], 1)
+            self.assertEqual(admin_preview["purged"], 0)
+            self.assertTrue(admin_preview["dry_run"])
             self.assertEqual(release_policy["legal_hold"], False)
             self.assertIsNone(release_policy["legal_hold_reason"])
             self.assertEqual(purged["matched"], 1)
@@ -14009,8 +14017,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "ada", "admin", actor_user_id="alice")
             store.add_workspace_member(workspace_id, "mona", "member", actor_user_id="alice")
             full_token = store.create_api_token(workspace_id, "alice", name="full")["token"]
+            admin_token = store.create_api_token(workspace_id, "ada", name="admin")["token"]
             audit_only_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
             write_only_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
             member_token_record = store.create_api_token(workspace_id, "mona", name="member")
@@ -14034,6 +14044,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             thread.start()
             base = f"http://127.0.0.1:{server.server_port}"
             full_headers = {"Authorization": f"Bearer {full_token}"}
+            admin_headers = {"Authorization": f"Bearer {admin_token}"}
             audit_headers = {"Authorization": f"Bearer {audit_only_token}"}
             write_headers = {"Authorization": f"Bearer {write_only_token}"}
             member_headers = {"Authorization": f"Bearer {member_token}"}
@@ -14069,6 +14080,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     {"dry_run": True},
                     headers=full_headers,
                 )
+                admin_preview = _post_json(
+                    f"{base}/audit-retention/purge",
+                    {"dry_run": True},
+                    headers=admin_headers,
+                )
                 blocked_by_hold = _post_json(
                     f"{base}/audit-retention/purge",
                     {},
@@ -14082,6 +14098,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     status=403,
                 )
                 released_policy = _post_json(f"{base}/audit-retention", {"legal_hold": False}, headers=full_headers)
+                admin_purge_blocked = _post_json(f"{base}/audit-retention/purge", {}, headers=admin_headers, status=403)
                 purged = _post_json(f"{base}/audit-retention/purge", {}, headers=full_headers)
                 cleared = _post_json(f"{base}/audit-retention", {"clear": True}, headers=full_headers)
 
@@ -14098,10 +14115,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(preview["purged"], 0)
                 self.assertEqual(preview["legal_hold"], True)
                 self.assertEqual(preview["legal_hold_reason"], "http audit hold")
+                self.assertEqual(admin_preview["matched"], 1)
+                self.assertEqual(admin_preview["purged"], 0)
                 self.assertIn("legal hold", blocked_by_hold["error"])
                 self.assertEqual(audit_purge_blocked["error"], "api token scope denied")
                 self.assertEqual(released_policy["legal_hold"], False)
                 self.assertIsNone(released_policy["legal_hold_reason"])
+                self.assertEqual(admin_purge_blocked["error"], "workspace role denied")
                 self.assertEqual(purged["purged"], 1)
                 self.assertIsNone(cleared["retention_days"])
             finally:
@@ -14257,12 +14277,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "ada", "admin", actor_user_id="alice")
             store.add_workspace_member(workspace_id, "mona", "member", actor_user_id="alice")
             store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="HTTP retention memo")
             old = store.query_corpus("query retention", workspace_id=workspace_id, actor_user_id="alice")
             fresh = store.query_corpus("retention evidence", workspace_id=workspace_id, actor_user_id="alice")
             store.conn.execute("UPDATE query_runs SET created_at = ? WHERE id = ?", ("2000-01-01T00:00:00+00:00", old["run_id"]))
             full_token = store.create_api_token(workspace_id, "alice", name="full")["token"]
+            admin_token = store.create_api_token(workspace_id, "ada", name="admin")["token"]
             audit_only_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
             write_only_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
             member_token_record = store.create_api_token(workspace_id, "mona", name="member")
@@ -14278,6 +14300,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             thread.start()
             base = f"http://127.0.0.1:{server.server_port}"
             full_headers = {"Authorization": f"Bearer {full_token}"}
+            admin_headers = {"Authorization": f"Bearer {admin_token}"}
             audit_headers = {"Authorization": f"Bearer {audit_only_token}"}
             write_headers = {"Authorization": f"Bearer {write_only_token}"}
             member_headers = {"Authorization": f"Bearer {member_token}"}
@@ -14313,6 +14336,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     {"dry_run": True},
                     headers=full_headers,
                 )
+                admin_preview = _post_json(
+                    f"{base}/query-retention/purge",
+                    {"dry_run": True},
+                    headers=admin_headers,
+                )
                 blocked_by_hold = _post_json(
                     f"{base}/query-retention/purge",
                     {},
@@ -14326,6 +14354,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     status=403,
                 )
                 released_policy = _post_json(f"{base}/query-retention", {"legal_hold": False}, headers=full_headers)
+                admin_purge_blocked = _post_json(f"{base}/query-retention/purge", {}, headers=admin_headers, status=403)
                 purged = _post_json(f"{base}/query-retention/purge", {}, headers=full_headers)
                 cleared = _post_json(f"{base}/query-retention", {"clear": True}, headers=full_headers)
 
@@ -14342,10 +14371,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(preview["purged"], 0)
                 self.assertEqual(preview["legal_hold"], True)
                 self.assertEqual(preview["legal_hold_reason"], "http query hold")
+                self.assertEqual(admin_preview["matched"], 1)
+                self.assertEqual(admin_preview["purged"], 0)
                 self.assertIn("legal hold", blocked_by_hold["error"])
                 self.assertEqual(audit_purge_blocked["error"], "api token scope denied")
                 self.assertEqual(released_policy["legal_hold"], False)
                 self.assertIsNone(released_policy["legal_hold_reason"])
+                self.assertEqual(admin_purge_blocked["error"], "workspace role denied")
                 self.assertEqual(purged["purged"], 1)
                 self.assertIsNone(cleared["retention_days"])
             finally:

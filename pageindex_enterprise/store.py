@@ -4227,6 +4227,8 @@ class EnterpriseStore:
 
     def purge_query_runs_by_retention(self, workspace_id: str, actor_user_id: str, *, dry_run: bool = False) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        if not dry_run:
+            self.require_workspace_role(workspace_id, actor_user_id, {"owner"})
         policy = self._query_retention_policy(workspace_id)
         retention_days = policy["retention_days"]
         if retention_days is None:
@@ -4386,6 +4388,8 @@ class EnterpriseStore:
 
     def purge_audit_events_by_retention(self, workspace_id: str, actor_user_id: str, *, dry_run: bool = False) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        if not dry_run:
+            self.require_workspace_role(workspace_id, actor_user_id, {"owner"})
         policy = self._audit_retention_policy(workspace_id)
         retention_days = policy["retention_days"]
         if retention_days is None:

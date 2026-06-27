@@ -15659,11 +15659,13 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["console_script"], True)
         self.assertEqual(report["checks"]["manifest_generated"], True)
         self.assertEqual(report["checks"]["dependency_inventory"], True)
+        self.assertEqual(report["checks"]["dependency_pins"], True)
         self.assertEqual(report["checks"]["eval_command"], True)
         self.assertEqual(report["checks"]["eval_checks"]["failed"], 0)
         self.assertEqual(Path(report["manifest"]["path"]).resolve(), manifest_path.resolve())
         self.assertEqual(report["manifest"]["artifact_count"], 1)
         self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
+        self.assertEqual(report["manifest"]["direct_dependencies_pinned"], True)
         self.assertEqual(manifest["schema_version"], 1)
         self.assertEqual(manifest["package"], {"name": "pageindex-enterprise-cleanroom", "version": "0.1.0"})
         self.assertEqual(manifest["source"]["commit"], report["manifest"]["source_commit"])
@@ -15676,6 +15678,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(len(manifest["artifacts"][0]["sha256"]), 64)
         self.assertGreater(manifest["artifacts"][0]["size_bytes"], 0)
         dependency_specifiers = {dep["name"]: dep["specifier"] for dep in manifest["dependencies"]}
+        dependency_pins = {dep["name"]: dep["pinned"] for dep in manifest["dependencies"]}
         self.assertEqual(
             dependency_specifiers,
             {
@@ -15686,6 +15689,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "pyyaml": "==6.0.2",
             },
         )
+        self.assertTrue(all(dependency_pins.values()))
+        self.assertEqual(manifest["dependency_policy"], {"direct_dependencies_pinned": True, "unpinned": []})
 
     def test_deployment_check_reports_readiness_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:

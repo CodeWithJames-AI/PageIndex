@@ -89,7 +89,13 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
         eval_report = json.loads(eval_result.stdout)
         _inspect_wheel(wheel)
         dependencies = _wheel_dependencies(wheel)
-        manifest = _artifact_manifest(wheel, source=_source_metadata(repo_root), dependencies=dependencies)
+        dependency_policy = _dependency_policy(dependencies)
+        manifest = _artifact_manifest(
+            wheel,
+            source=_source_metadata(repo_root),
+            dependencies=dependencies,
+            dependency_policy=dependency_policy,
+        )
         if manifest_output is not None:
             manifest_output = manifest_output.expanduser().resolve()
             manifest_output.parent.mkdir(parents=True, exist_ok=True)
@@ -100,6 +106,7 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
             "manifest": {
                 "artifact_count": len(manifest["artifacts"]),
                 "dependency_count": len(manifest["dependencies"]),
+                "direct_dependencies_pinned": manifest["dependency_policy"]["direct_dependencies_pinned"],
                 "path": str(manifest_output) if manifest_output is not None else None,
                 "source_commit": manifest["source"]["commit"],
                 "source_dirty": manifest["source"]["dirty"],
@@ -111,6 +118,7 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
                 "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
                 "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
                 "dependency_inventory": bool(manifest["dependencies"]),
+                "dependency_pins": manifest["dependency_policy"]["direct_dependencies_pinned"],
                 "eval_command": eval_report.get("ok") is True,
                 "eval_checks": eval_report.get("summary", {}),
             },
@@ -144,7 +152,8 @@ def _artifact_manifest(
     wheel: Path,
     *,
     source: dict[str, Any],
-    dependencies: list[dict[str, str | None]],
+    dependencies: list[dict[str, Any]],
+    dependency_policy: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -154,6 +163,7 @@ def _artifact_manifest(
         },
         "source": source,
         "dependencies": dependencies,
+        "dependency_policy": dependency_policy,
         "artifacts": [
             {
                 "filename": wheel.name,
@@ -164,9 +174,9 @@ def _artifact_manifest(
     }
 
 
-def _wheel_dependencies(wheel: Path) -> list[dict[str, str | None]]:
+def _wheel_dependencies(wheel: Path) -> list[dict[str, Any]]:
     metadata_path = f"{PACKAGE_NAME}-{VERSION}.dist-info/METADATA"
-    dependencies: list[dict[str, str | None]] = []
+    dependencies: list[dict[str, Any]] = []
     with zipfile.ZipFile(wheel) as archive:
         metadata = archive.read(metadata_path).decode("utf-8")
     for line in metadata.splitlines():
@@ -180,11 +190,24 @@ def _wheel_dependencies(wheel: Path) -> list[dict[str, str | None]]:
         dependencies.append(
             {
                 "name": name.lower().replace("_", "-"),
+                "pinned": _is_exact_pin(specifier),
                 "requirement": requirement,
                 "specifier": specifier,
             }
         )
     return sorted(dependencies, key=lambda dep: dep["name"])
+
+
+def _dependency_policy(dependencies: list[dict[str, Any]]) -> dict[str, Any]:
+    unpinned = [str(dep["name"]) for dep in dependencies if not dep.get("pinned")]
+    return {
+        "direct_dependencies_pinned": bool(dependencies) and not unpinned,
+        "unpinned": unpinned,
+    }
+
+
+def _is_exact_pin(specifier: str | None) -> bool:
+    return bool(specifier and re.fullmatch(r"==[^,;\\s]+", specifier))
 
 
 def _requirement_specifier(rest: str) -> str | None:

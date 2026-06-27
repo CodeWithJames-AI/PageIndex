@@ -433,6 +433,18 @@ def main() -> None:
     document_access.add_argument("--revoke-group")
     document_access.add_argument("--role", choices=["read", "write"], default="read")
 
+    document_share = sub.add_parser("document-share")
+    document_share.add_argument("workspace_id")
+    document_share.add_argument("user_id")
+    document_share.add_argument("--share")
+    document_share.add_argument("--shares")
+    document_share.add_argument("--revoke-share")
+    document_share.add_argument("--share-redact", action="store_true")
+    document_share.add_argument("--share-expires-at")
+    document_share.add_argument("--share-expires-in-days", type=_positive_int)
+    document_share.add_argument("--share-max-views", type=_positive_int)
+    document_share.add_argument("--share-password")
+
     ingest = sub.add_parser("ingest-file")
     ingest.add_argument("path")
     ingest.add_argument("--name")
@@ -1282,6 +1294,65 @@ def main() -> None:
             if access is None:
                 raise SystemExit("document not found")
             print(json.dumps(access, indent=2))
+        elif args.command == "document-share":
+            selected_actions = [
+                bool(args.share),
+                bool(args.shares),
+                bool(args.revoke_share),
+            ]
+            if sum(selected_actions) != 1:
+                raise SystemExit("choose --share, --shares, or --revoke-share")
+            share_option_used = (
+                args.share_redact
+                or args.share_expires_at is not None
+                or args.share_expires_in_days is not None
+                or args.share_max_views is not None
+                or args.share_password is not None
+            )
+            if share_option_used and not args.share:
+                raise SystemExit("share options require --share")
+            if args.share_expires_at is not None and args.share_expires_in_days is not None:
+                raise SystemExit("use --share-expires-at or --share-expires-in-days, not both")
+            if args.share:
+                expires_at = args.share_expires_at
+                if args.share_expires_in_days is not None:
+                    expires_at = expires_at_from_days(args.share_expires_in_days)
+                share_link = _workspace_member_cli(
+                    lambda: store.create_document_share_link(
+                        args.share,
+                        workspace_id=args.workspace_id,
+                        actor_user_id=args.user_id,
+                        expires_at=expires_at,
+                        redact_content=args.share_redact,
+                        max_views=args.share_max_views,
+                        password=args.share_password,
+                    )
+                )
+                if share_link is None:
+                    raise SystemExit("document not found")
+                print(json.dumps(share_link, indent=2))
+            elif args.shares:
+                print(
+                    json.dumps(
+                        _workspace_member_cli(
+                            lambda: store.list_document_share_links(
+                                args.shares,
+                                workspace_id=args.workspace_id,
+                                actor_user_id=args.user_id,
+                            )
+                        ),
+                        indent=2,
+                    )
+                )
+            else:
+                revoked = _workspace_member_cli(
+                    lambda: store.revoke_document_share_link(
+                        args.revoke_share,
+                        workspace_id=args.workspace_id,
+                        actor_user_id=args.user_id,
+                    )
+                )
+                print(json.dumps({"revoked": revoked}, indent=2))
         elif args.command == "ingest-file":
             print(
                 _workspace_member_cli(

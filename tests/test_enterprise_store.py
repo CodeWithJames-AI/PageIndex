@@ -15658,10 +15658,12 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["wheel_built"], True)
         self.assertEqual(report["checks"]["console_script"], True)
         self.assertEqual(report["checks"]["manifest_generated"], True)
+        self.assertEqual(report["checks"]["dependency_inventory"], True)
         self.assertEqual(report["checks"]["eval_command"], True)
         self.assertEqual(report["checks"]["eval_checks"]["failed"], 0)
         self.assertEqual(Path(report["manifest"]["path"]).resolve(), manifest_path.resolve())
         self.assertEqual(report["manifest"]["artifact_count"], 1)
+        self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
         self.assertEqual(manifest["schema_version"], 1)
         self.assertEqual(manifest["package"], {"name": "pageindex-enterprise-cleanroom", "version": "0.1.0"})
         self.assertEqual(manifest["source"]["commit"], report["manifest"]["source_commit"])
@@ -15673,6 +15675,17 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(manifest["artifacts"][0]["sha256"], report["manifest"]["wheel_sha256"])
         self.assertEqual(len(manifest["artifacts"][0]["sha256"]), 64)
         self.assertGreater(manifest["artifacts"][0]["size_bytes"], 0)
+        dependency_specifiers = {dep["name"]: dep["specifier"] for dep in manifest["dependencies"]}
+        self.assertEqual(
+            dependency_specifiers,
+            {
+                "litellm": "==1.83.7",
+                "pymupdf": "==1.26.4",
+                "pypdf2": "==3.0.1",
+                "python-dotenv": "==1.2.2",
+                "pyyaml": "==6.0.2",
+            },
+        )
 
     def test_deployment_check_reports_readiness_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:

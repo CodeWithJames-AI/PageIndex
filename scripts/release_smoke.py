@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -87,7 +88,8 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
         )
         eval_report = json.loads(eval_result.stdout)
         _inspect_wheel(wheel)
-        manifest = _artifact_manifest(wheel, source=_source_metadata(repo_root))
+        dependencies = _wheel_dependencies(wheel)
+        manifest = _artifact_manifest(wheel, source=_source_metadata(repo_root), dependencies=dependencies)
         if manifest_output is not None:
             manifest_output = manifest_output.expanduser().resolve()
             manifest_output.parent.mkdir(parents=True, exist_ok=True)
@@ -97,6 +99,7 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
             "wheel": wheel.name,
             "manifest": {
                 "artifact_count": len(manifest["artifacts"]),
+                "dependency_count": len(manifest["dependencies"]),
                 "path": str(manifest_output) if manifest_output is not None else None,
                 "source_commit": manifest["source"]["commit"],
                 "source_dirty": manifest["source"]["dirty"],
@@ -107,6 +110,7 @@ def run_release_smoke(repo_root: Path, *, manifest_output: Path | None = None) -
                 "wheel_built": wheel.name == f"{PACKAGE_NAME}-{VERSION}-py3-none-any.whl",
                 "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
                 "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
+                "dependency_inventory": bool(manifest["dependencies"]),
                 "eval_command": eval_report.get("ok") is True,
                 "eval_checks": eval_report.get("summary", {}),
             },
@@ -136,7 +140,12 @@ def _inspect_wheel(wheel: Path) -> None:
         raise AssertionError("wheel console entrypoint is missing")
 
 
-def _artifact_manifest(wheel: Path, *, source: dict[str, Any]) -> dict[str, Any]:
+def _artifact_manifest(
+    wheel: Path,
+    *,
+    source: dict[str, Any],
+    dependencies: list[dict[str, str | None]],
+) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "package": {
@@ -144,6 +153,7 @@ def _artifact_manifest(wheel: Path, *, source: dict[str, Any]) -> dict[str, Any]
             "version": VERSION,
         },
         "source": source,
+        "dependencies": dependencies,
         "artifacts": [
             {
                 "filename": wheel.name,
@@ -152,6 +162,40 @@ def _artifact_manifest(wheel: Path, *, source: dict[str, Any]) -> dict[str, Any]
             }
         ],
     }
+
+
+def _wheel_dependencies(wheel: Path) -> list[dict[str, str | None]]:
+    metadata_path = f"{PACKAGE_NAME}-{VERSION}.dist-info/METADATA"
+    dependencies: list[dict[str, str | None]] = []
+    with zipfile.ZipFile(wheel) as archive:
+        metadata = archive.read(metadata_path).decode("utf-8")
+    for line in metadata.splitlines():
+        if not line.startswith("Requires-Dist: "):
+            continue
+        requirement = line.removeprefix("Requires-Dist: ").strip()
+        match = re.match(r"^([A-Za-z0-9_.-]+)(.*)$", requirement)
+        name = match.group(1) if match else requirement
+        rest = match.group(2).strip() if match else ""
+        specifier = _requirement_specifier(rest)
+        dependencies.append(
+            {
+                "name": name.lower().replace("_", "-"),
+                "requirement": requirement,
+                "specifier": specifier,
+            }
+        )
+    return sorted(dependencies, key=lambda dep: dep["name"])
+
+
+def _requirement_specifier(rest: str) -> str | None:
+    if not rest:
+        return None
+    marker_index = rest.find(";")
+    if marker_index >= 0:
+        rest = rest[:marker_index].strip()
+    if rest.startswith("(") and rest.endswith(")"):
+        rest = rest[1:-1].strip()
+    return rest or None
 
 
 def _source_metadata(repo_root: Path) -> dict[str, Any]:

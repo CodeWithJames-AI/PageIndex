@@ -1326,6 +1326,78 @@ class EnterpriseStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Conversation not found"):
                 store.list_conversation_messages(markdown_conversation["id"], "alice")
 
+    def test_conversation_share_links_publish_bounded_transcripts_with_citations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share-chat.txt"
+            source.write_text("Shared chat evidence points to renewal risk.", encoding="utf-8")
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "owner")
+            store.add_workspace_member(workspace_id, "vivi", "member")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Shared chat memo")
+            conversation = store.create_conversation(workspace_id, "alice", title="Share this chat")
+            viewer_conversation = store.create_conversation(workspace_id, "vivi", title="Viewer legacy")
+            store.add_workspace_member(workspace_id, "vivi", "viewer", actor_user_id="alice")
+            chat = store.chat_message(conversation["id"], "alice", "renewal risk", limit=4)
+
+            with self.assertRaisesRegex(PermissionError, "conversation access denied"):
+                store.create_conversation_share_link(conversation["id"], "bob")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.create_conversation_share_link(viewer_conversation["id"], "vivi")
+
+            active = store.create_conversation_share_link(
+                conversation["id"],
+                "alice",
+                expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            )
+            expired = store.create_conversation_share_link(
+                conversation["id"],
+                "alice",
+                expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+            )
+            listed = store.list_conversation_share_links(conversation["id"], "alice")
+            resolved = store.resolve_conversation_share_link(active["token"])
+            limited = store.resolve_conversation_share_link(active["token"], limit=1)
+            expired_resolution = store.resolve_conversation_share_link(expired["token"])
+            usage = store.get_workspace_usage_summary(workspace_id, "alice")["conversations"]
+            revoked = store.revoke_conversation_share_link(active["id"], "alice")
+            revoked_again = store.revoke_conversation_share_link(active["id"], "alice")
+            archive_link = store.create_conversation_share_link(conversation["id"], "alice")
+            store.archive_conversation(conversation["id"], "alice")
+            archived_resolution = store.resolve_conversation_share_link(archive_link["token"])
+            audit_events = store.list_audit_events(workspace_id, "alice", limit=20)
+
+            serialized_list = json.dumps(listed, sort_keys=True)
+            serialized_resolved = json.dumps(resolved, sort_keys=True)
+            serialized_audit = json.dumps(audit_events, sort_keys=True)
+            run_id = chat["assistant_message"]["run_id"]
+            self.assertTrue(active["token"].startswith("pcs_"))
+            self.assertNotIn("token_hash", active)
+            self.assertNotIn(active["token"], serialized_list)
+            self.assertNotIn("token_hash", serialized_list)
+            self.assertEqual(resolved["conversation"]["title"], "Share this chat")
+            self.assertEqual([message["role"] for message in resolved["messages"]], ["user", "assistant"])
+            self.assertEqual(resolved["messages"][0]["content"], "renewal risk")
+            self.assertEqual(resolved["messages"][1]["run_id"], run_id)
+            self.assertEqual(limited["messages"][0]["role"], "user")
+            self.assertEqual(len(limited["messages"]), 1)
+            self.assertIn(run_id, resolved["citations"])
+            self.assertEqual(resolved["citations"][run_id][0]["doc_name"], "Shared chat memo")
+            self.assertNotIn("source_path", serialized_resolved)
+            self.assertNotIn("token_hash", serialized_resolved)
+            self.assertIsNone(expired_resolution)
+            self.assertEqual(usage["share_links_active"], 1)
+            self.assertTrue(revoked)
+            self.assertFalse(revoked_again)
+            self.assertIsNone(store.resolve_conversation_share_link(active["token"]))
+            self.assertIsNone(archived_resolution)
+            self.assertIn("conversation.share_link_create", [event["action"] for event in audit_events])
+            self.assertIn("conversation.share_link_revoke", [event["action"] for event in audit_events])
+            self.assertNotIn(active["token"], serialized_audit)
+            self.assertNotIn("token_hash", serialized_audit)
+
     def test_conversation_rename_updates_title_and_enforces_owner_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = EnterpriseStore(Path(tmp) / "workspace")
@@ -8160,6 +8232,75 @@ class EnterpriseStoreTest(unittest.TestCase):
             serialized_export_events = json.dumps(export_events, sort_keys=True)
             self.assertEqual({event["details"]["format"] for event in export_events}, {"jsonl", "markdown"})
             self.assertNotIn("renewal risk", serialized_export_events)
+
+    def test_http_conversation_share_links_require_owner_and_public_token_resolves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "conversation-share.txt"
+            source.write_text("HTTP conversation share evidence.", encoding="utf-8")
+            root = tmp_path / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "owner")
+            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Conversation share memo")
+            conversation = store.create_conversation(workspace_id, "alice", title="HTTP shared chat")
+            chat = store.chat_message(conversation["id"], "alice", "conversation share", limit=4)
+            owner_write_token = store.create_api_token(workspace_id, "alice", name="owner-write", scopes=["write"])["token"]
+            owner_read_token = store.create_api_token(workspace_id, "alice", name="owner-read", scopes=["read"])["token"]
+            bob_token = store.create_api_token(workspace_id, "bob", name="bob")["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            url = f"{base}/conversations/{conversation['id']}/share-links"
+            owner_write_headers = {"Authorization": f"Bearer {owner_write_token}"}
+            try:
+                missing_auth = _post_json(url, {}, status=403)
+                read_denied = _post_json(url, {}, headers={"Authorization": f"Bearer {owner_read_token}"}, status=403)
+                bob_denied = _post_json(url, {}, headers={"Authorization": f"Bearer {bob_token}"}, status=403)
+                created = _post_json(
+                    url,
+                    {"expires_in_days": 1},
+                    headers=owner_write_headers,
+                    status=201,
+                )["share_link"]
+                listed = _get_json(url, headers=owner_write_headers)["share_links"]
+                public = _get_json(f"{base}/public/conversations/{created['token']}")
+                limited = _get_json(f"{base}/public/conversations/{created['token']}?limit=1")
+                revoked = _delete_json(
+                    f"{base}/conversation-share-links/{created['id']}",
+                    headers=owner_write_headers,
+                )
+                public_after_revoke = _get_error(f"{base}/public/conversations/{created['token']}")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            serialized_public = json.dumps(public, sort_keys=True)
+            serialized_list = json.dumps(listed, sort_keys=True)
+            run_id = chat["assistant_message"]["run_id"]
+            self.assertEqual(missing_auth["error"], "api token required")
+            self.assertEqual(read_denied["error"], "api token scope denied")
+            self.assertEqual(bob_denied["error"], "conversation access denied")
+            self.assertTrue(created["token"].startswith("pcs_"))
+            self.assertNotIn("token_hash", created)
+            self.assertNotIn(created["token"], serialized_list)
+            self.assertEqual(listed[0]["id"], created["id"])
+            self.assertTrue(listed[0]["active"])
+            self.assertEqual(public["conversation"]["title"], "HTTP shared chat")
+            self.assertEqual([message["role"] for message in public["messages"]], ["user", "assistant"])
+            self.assertEqual(public["messages"][1]["run_id"], run_id)
+            self.assertEqual(len(limited["messages"]), 1)
+            self.assertIn(run_id, public["citations"])
+            self.assertEqual(public["citations"][run_id][0]["doc_name"], "Conversation share memo")
+            self.assertNotIn("source_path", serialized_public)
+            self.assertNotIn("token_hash", serialized_public)
+            self.assertEqual(revoked, {"revoked": True})
+            self.assertEqual(public_after_revoke["status"], 404)
+            self.assertEqual(public_after_revoke["error"], "share link not found")
 
     def test_http_strict_document_delete_requires_write_role(self):
         with tempfile.TemporaryDirectory() as tmp:

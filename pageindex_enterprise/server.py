@@ -50,6 +50,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if public_document_share_token:
                 self._public_document_share(public_document_share_token, parsed.query)
                 return
+            public_conversation_share_token = _public_conversation_share_path(parsed.path)
+            if public_conversation_share_token:
+                self._public_conversation_share(public_conversation_share_token, parsed.query)
+                return
             if parsed.path in {"/", "/dashboard"}:
                 self._html(DASHBOARD_HTML)
                 return
@@ -116,6 +120,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     )
                 finally:
                     store.close()
+                return
+            conversation_share_links_id = _conversation_share_links_path(parsed.path)
+            if conversation_share_links_id:
+                self._list_conversation_share_links(conversation_share_links_id)
                 return
             if parsed.path == "/audit-events/export":
                 params = parse_qs(parsed.query)
@@ -452,6 +460,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/conversations":
                 self._create_conversation(payload)
                 return
+            conversation_share_links_id = _conversation_share_links_path(parsed.path)
+            if conversation_share_links_id:
+                self._create_conversation_share_link(conversation_share_links_id, payload)
+                return
             conversation_rename_id = _conversation_rename_path(parsed.path)
             if conversation_rename_id:
                 self._rename_conversation(conversation_rename_id, payload)
@@ -672,6 +684,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            conversation_share_link_id = _conversation_share_link_path(parsed.path)
+            if conversation_share_link_id:
+                self._revoke_conversation_share_link(conversation_share_link_id)
+                return
             doc_id = _document_path(parsed.path)
             if doc_id:
                 store = EnterpriseStore(self.server.root)
@@ -762,6 +778,71 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     )
                 }
             )
+        finally:
+            store.close()
+
+    def _list_conversation_share_links(self, conversation_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            self._json(
+                {
+                    "share_links": store.list_conversation_share_links(
+                        conversation_id,
+                        user_id,
+                        expected_workspace_id=workspace_id,
+                    )
+                }
+            )
+        finally:
+            store.close()
+
+    def _create_conversation_share_link(self, conversation_id: str, payload: dict[str, Any]) -> None:
+        if payload.get("expires_at") is not None and payload.get("expires_in_days") is not None:
+            raise ValueError("choose expires_at or expires_in_days")
+        expires_at = _optional_str(payload.get("expires_at"), "expires_at")
+        if payload.get("expires_in_days") is not None:
+            expires_at = expires_at_from_days(_optional_positive_int(payload.get("expires_in_days"), "expires_in_days"))
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            self._json(
+                {
+                    "share_link": store.create_conversation_share_link(
+                        conversation_id,
+                        user_id,
+                        expected_workspace_id=workspace_id,
+                        expires_at=expires_at,
+                    )
+                },
+                HTTPStatus.CREATED,
+            )
+        finally:
+            store.close()
+
+    def _revoke_conversation_share_link(self, share_link_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="write")
+            revoked = store.revoke_conversation_share_link(
+                share_link_id,
+                user_id,
+                expected_workspace_id=workspace_id,
+            )
+            self._json({"revoked": revoked})
+        finally:
+            store.close()
+
+    def _public_conversation_share(self, token: str, query: str) -> None:
+        params = parse_qs(query)
+        limit = max(1, min(_int_param(params, "limit", 100), 500))
+        store = EnterpriseStore(self.server.root)
+        try:
+            shared = store.resolve_conversation_share_link(token, limit=limit)
+            if shared is None:
+                self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._json(shared)
         finally:
             store.close()
 
@@ -2297,6 +2378,27 @@ def _conversation_export_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "export":
         return parts[1]
+    return None
+
+
+def _conversation_share_links_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "share-links":
+        return unquote(parts[1])
+    return None
+
+
+def _conversation_share_link_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "conversation-share-links":
+        return unquote(parts[1])
+    return None
+
+
+def _public_conversation_share_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "public" and parts[1] == "conversations":
+        return unquote(parts[2])
     return None
 
 

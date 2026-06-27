@@ -910,6 +910,17 @@ class EnterpriseStore:
               archived_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS conversation_share_links (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+              created_by TEXT NOT NULL,
+              token_hash TEXT NOT NULL UNIQUE,
+              created_at TEXT NOT NULL,
+              expires_at TEXT,
+              revoked_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS conversation_messages (
               id TEXT PRIMARY KEY,
               conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -1070,6 +1081,9 @@ class EnterpriseStore:
                 "line_end": "INTEGER",
             },
             "document_share_links": {
+                "revoked_at": "TEXT",
+            },
+            "conversation_share_links": {
                 "revoked_at": "TEXT",
             },
         }
@@ -1561,6 +1575,19 @@ class EnterpriseStore:
             "conversations": {
                 "count": count("SELECT COUNT(*) AS count FROM conversations WHERE workspace_id = ?"),
                 "messages": count("SELECT COUNT(*) AS count FROM conversation_messages WHERE workspace_id = ?"),
+                "share_links_active": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM conversation_share_links
+                    WHERE workspace_id = ?
+                      AND revoked_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > ?)
+                    """,
+                    (workspace_id, share_now),
+                ),
+                "share_links_revoked": count(
+                    "SELECT COUNT(*) AS count FROM conversation_share_links WHERE workspace_id = ? AND revoked_at IS NOT NULL"
+                ),
             },
             "retrieval": {
                 "query_runs": count("SELECT COUNT(*) AS count FROM query_runs WHERE workspace_id = ?"),
@@ -5007,6 +5034,202 @@ class EnterpriseStore:
         self._commit()
         return transcript
 
+    def create_conversation_share_link(
+        self,
+        conversation_id: str,
+        actor_user_id: str,
+        *,
+        expected_workspace_id: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        conversation = self._conversation_for_actor(
+            conversation_id,
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+        )
+        self.require_workspace_role(conversation["workspace_id"], actor_user_id, WORKSPACE_WRITE_ROLES)
+        expires_at = _normalize_expires_at(expires_at)
+        token = f"pcs_{secrets.token_urlsafe(32)}"
+        share_link_id = f"csl_{uuid.uuid4().hex}"
+        created_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO conversation_share_links (
+                  id, workspace_id, conversation_id, created_by, token_hash, created_at, expires_at, revoked_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    share_link_id,
+                    conversation["workspace_id"],
+                    conversation["id"],
+                    actor_user_id.strip(),
+                    _hash_token(token),
+                    created_at,
+                    expires_at,
+                ),
+            )
+            self._insert_audit_event(
+                conversation["workspace_id"],
+                actor_user_id,
+                "conversation.share_link_create",
+                target_type="conversation",
+                target_id=conversation["id"],
+                details={"share_link_id": share_link_id, "expires_at": expires_at},
+            )
+        link = self._conversation_share_link(share_link_id)
+        assert link is not None
+        link["token"] = token
+        return link
+
+    def list_conversation_share_links(
+        self,
+        conversation_id: str,
+        actor_user_id: str,
+        *,
+        expected_workspace_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        conversation = self._conversation_for_actor(
+            conversation_id,
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+            allow_archived=True,
+        )
+        rows = self.conn.execute(
+            """
+            SELECT id, workspace_id, conversation_id, created_by, created_at, expires_at, revoked_at
+            FROM conversation_share_links
+            WHERE conversation_id = ?
+            ORDER BY created_at DESC, id
+            """,
+            (conversation["id"],),
+        )
+        return [_decorate_conversation_share_link(dict(row)) for row in rows]
+
+    def revoke_conversation_share_link(
+        self,
+        share_link_id: str,
+        actor_user_id: str,
+        *,
+        expected_workspace_id: str | None = None,
+    ) -> bool:
+        share_link_id = share_link_id.strip()
+        if not share_link_id:
+            raise ValueError("Share link id is required.")
+        link = self._one("SELECT * FROM conversation_share_links WHERE id = ?", (share_link_id,))
+        if not link:
+            return False
+        conversation = self._conversation_for_actor(
+            link["conversation_id"],
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+            allow_archived=True,
+        )
+        if link["workspace_id"] != conversation["workspace_id"]:
+            return False
+        if link["revoked_at"] is not None:
+            return False
+        revoked_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                "UPDATE conversation_share_links SET revoked_at = ? WHERE id = ?",
+                (revoked_at, share_link_id),
+            )
+            self._insert_audit_event(
+                conversation["workspace_id"],
+                actor_user_id,
+                "conversation.share_link_revoke",
+                target_type="conversation",
+                target_id=conversation["id"],
+                details={"share_link_id": share_link_id},
+            )
+        return True
+
+    def resolve_conversation_share_link(
+        self,
+        token: str,
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any] | None:
+        token = token.strip()
+        if not token:
+            raise ValueError("Share token is required.")
+        token_hash = _hash_token(token)
+        row = self._one(
+            """
+            SELECT l.id AS share_link_id, l.workspace_id, l.conversation_id, l.created_by,
+                   l.token_hash, l.created_at, l.expires_at, l.revoked_at,
+                   c.title, c.created_at AS conversation_created_at, c.updated_at, c.archived_at
+            FROM conversation_share_links l
+            JOIN conversations c ON c.id = l.conversation_id
+            WHERE l.token_hash = ?
+            """,
+            (token_hash,),
+        )
+        if not row or not hmac.compare_digest(row["token_hash"], token_hash):
+            return None
+        if row["revoked_at"] is not None or _is_expired(row["expires_at"]) or row["archived_at"] is not None:
+            return None
+        limit = max(1, min(int(limit), 500))
+        messages = [
+            {
+                "id": message["id"],
+                "role": message["role"],
+                "content": message["content"],
+                "run_id": message["run_id"],
+                "created_at": message["created_at"],
+            }
+            for message in self.conn.execute(
+                """
+                SELECT id, role, content, run_id, created_at
+                FROM conversation_messages
+                WHERE conversation_id = ?
+                ORDER BY created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (row["conversation_id"], limit),
+            )
+        ]
+        run_ids = [message["run_id"] for message in messages if message.get("run_id")]
+        citations_by_run: dict[str, list[dict[str, Any]]] = {run_id: [] for run_id in run_ids}
+        if run_ids:
+            placeholders = ",".join("?" for _ in run_ids)
+            for citation in self.conn.execute(
+                f"""
+                SELECT c.id, c.run_id, c.evidence_id, c.doc_id, d.name AS doc_name,
+                       c.label, c.page_start, c.page_end, c.line_start, c.line_end, c.created_at
+                FROM citations c
+                JOIN documents d ON d.id = c.doc_id
+                WHERE c.run_id IN ({placeholders})
+                ORDER BY c.created_at, c.id
+                """,
+                tuple(run_ids),
+            ):
+                citations_by_run.setdefault(citation["run_id"], []).append(dict(citation))
+        return {
+            "share_link": _decorate_conversation_share_link(
+                {
+                    "id": row["share_link_id"],
+                    "workspace_id": row["workspace_id"],
+                    "conversation_id": row["conversation_id"],
+                    "created_by": row["created_by"],
+                    "created_at": row["created_at"],
+                    "expires_at": row["expires_at"],
+                    "revoked_at": row["revoked_at"],
+                }
+            ),
+            "conversation": {
+                "id": row["conversation_id"],
+                "workspace_id": row["workspace_id"],
+                "title": row["title"],
+                "created_at": row["conversation_created_at"],
+                "updated_at": row["updated_at"],
+            },
+            "messages": messages,
+            "citations": citations_by_run,
+        }
+
     def chat_message(
         self,
         conversation_id: str,
@@ -6137,6 +6360,17 @@ class EnterpriseStore:
         )
         return _decorate_document_share_link(dict(row)) if row else None
 
+    def _conversation_share_link(self, share_link_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            """
+            SELECT id, workspace_id, conversation_id, created_by, created_at, expires_at, revoked_at
+            FROM conversation_share_links
+            WHERE id = ?
+            """,
+            (share_link_id,),
+        )
+        return _decorate_conversation_share_link(dict(row)) if row else None
+
     def _ensure_virtual_node(
         self,
         *,
@@ -6256,6 +6490,12 @@ def _content_line_count(content: str) -> int:
 
 
 def _decorate_document_share_link(link: dict[str, Any]) -> dict[str, Any]:
+    decorated = dict(link)
+    decorated["active"] = decorated.get("revoked_at") is None and not _is_expired(decorated.get("expires_at"))
+    return decorated
+
+
+def _decorate_conversation_share_link(link: dict[str, Any]) -> dict[str, Any]:
     decorated = dict(link)
     decorated["active"] = decorated.get("revoked_at") is None and not _is_expired(decorated.get("expires_at"))
     return decorated

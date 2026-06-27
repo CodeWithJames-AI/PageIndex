@@ -635,6 +635,7 @@ DASHBOARD_HTML = """<!doctype html>
               <div class="provider-actions">
                 <button id="refreshSourceSetsButton" class="secondary" type="button">Refresh</button>
                 <button id="saveSourceSetButton" type="button">Save scope</button>
+                <button id="cancelSourceSetEditButton" class="secondary" type="button" hidden>Cancel</button>
               </div>
               <div id="sourceSetList" class="member-list muted">No source sets loaded.</div>
             </div>
@@ -819,12 +820,15 @@ DASHBOARD_HTML = """<!doctype html>
     const queryRetentionSummary = document.getElementById("queryRetentionSummary");
     const sourceSetNameInput = document.getElementById("sourceSetNameInput");
     const sourceSetDescriptionInput = document.getElementById("sourceSetDescriptionInput");
+    const saveSourceSetButton = document.getElementById("saveSourceSetButton");
+    const cancelSourceSetEditButton = document.getElementById("cancelSourceSetEditButton");
     const sourceSetList = document.getElementById("sourceSetList");
     let activeConversationId = "";
     let activeFolderId = "";
     let activeQueryDocs = [];
     let activeQuerySourceSetId = "";
     let activeQuerySourceSetName = "";
+    let editingQuerySourceSetId = "";
     let workspaceExportUrl = "";
     let currentFolders = [];
     let currentSourceSets = [];
@@ -1088,6 +1092,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderSourceSets(sourceSets) {
       currentSourceSets = sourceSets || [];
+      renderSourceSetEditor();
       if (!currentSourceSets.length) {
         sourceSetList.className = "member-list muted";
         sourceSetList.textContent = "No source sets loaded.";
@@ -1105,6 +1110,7 @@ DASHBOARD_HTML = """<!doctype html>
             ${preview ? `<div class="muted">${escapeHtml(preview)}${docs.length > 3 ? ", ..." : ""}</div>` : ""}
             <div class="doc-actions">
               <button class="secondary" type="button" data-use-source-set-id="${escapeHtml(sourceSet.id)}">Use</button>
+              <button class="secondary" type="button" data-edit-source-set-id="${escapeHtml(sourceSet.id)}">Edit</button>
               <button class="secondary" type="button" data-delete-source-set-id="${escapeHtml(sourceSet.id)}">Delete</button>
             </div>
           </article>
@@ -1113,9 +1119,17 @@ DASHBOARD_HTML = """<!doctype html>
       sourceSetList.querySelectorAll("[data-use-source-set-id]").forEach((button) => {
         button.addEventListener("click", () => useQuerySourceSet(button.dataset.useSourceSetId));
       });
+      sourceSetList.querySelectorAll("[data-edit-source-set-id]").forEach((button) => {
+        button.addEventListener("click", () => editQuerySourceSet(button.dataset.editSourceSetId));
+      });
       sourceSetList.querySelectorAll("[data-delete-source-set-id]").forEach((button) => {
         button.addEventListener("click", () => deleteQuerySourceSet(button.dataset.deleteSourceSetId).catch((error) => setStatus(error.message, "error")));
       });
+    }
+
+    function renderSourceSetEditor() {
+      saveSourceSetButton.textContent = editingQuerySourceSetId ? "Update scope" : "Save scope";
+      cancelSourceSetEditButton.hidden = !editingQuerySourceSetId;
     }
 
     function useQuerySourceSet(sourceSetId) {
@@ -1130,6 +1144,34 @@ DASHBOARD_HTML = """<!doctype html>
       renderQueryScope();
       queryInput.focus();
       setStatus(`Query scoped to ${activeQuerySourceSetName}.`, "ok");
+    }
+
+    function editQuerySourceSet(sourceSetId) {
+      const sourceSet = currentSourceSets.find((item) => item.id === sourceSetId);
+      if (!sourceSet) {
+        setStatus("Source set not found.", "warn");
+        return;
+      }
+      editingQuerySourceSetId = sourceSet.id;
+      sourceSetNameInput.value = sourceSet.name || "";
+      sourceSetDescriptionInput.value = sourceSet.description || "";
+      activeQuerySourceSetId = sourceSet.id;
+      activeQuerySourceSetName = sourceSet.name || sourceSet.id;
+      activeQueryDocs = sourceSetDocuments(sourceSet);
+      renderQueryScope();
+      renderSourceSetEditor();
+      sourceSetNameInput.focus();
+      setStatus("Editing source set.", "ok");
+    }
+
+    function cancelQuerySourceSetEdit(options = {}) {
+      editingQuerySourceSetId = "";
+      sourceSetNameInput.value = "";
+      sourceSetDescriptionInput.value = "";
+      renderSourceSetEditor();
+      if (!options.quiet) {
+        setStatus("Source set edit cancelled.", "warn");
+      }
     }
 
     function renderDocumentAccess(docId, access) {
@@ -1867,20 +1909,24 @@ DASHBOARD_HTML = """<!doctype html>
         setStatus("Choose one or more scoped documents first.", "warn");
         return;
       }
-      setStatus("Saving source set...");
-      const payload = await api("/query-source-sets", {
-        method: "POST",
+      setStatus(editingQuerySourceSetId ? "Updating source set..." : "Saving source set...");
+      const sourceSetPath = editingQuerySourceSetId ? `/query-source-sets/${encodeURIComponent(editingQuerySourceSetId)}` : "/query-source-sets";
+      const wasEditing = Boolean(editingQuerySourceSetId);
+      const payload = await api(sourceSetPath, {
+        method: editingQuerySourceSetId ? "PUT" : "POST",
         body: JSON.stringify({
           name,
           description: sourceSetDescriptionInput.value.trim(),
           doc_ids: docIds
         })
       });
+      editingQuerySourceSetId = "";
       sourceSetNameInput.value = "";
       sourceSetDescriptionInput.value = "";
+      renderSourceSetEditor();
       renderSourceSets([payload, ...currentSourceSets.filter((sourceSet) => sourceSet.id !== payload.id)]);
       useQuerySourceSet(payload.id);
-      setStatus("Source set saved.", "ok");
+      setStatus(wasEditing ? "Source set updated." : "Source set saved.", "ok");
     }
 
     async function deleteQuerySourceSet(sourceSetId) {
@@ -1897,6 +1943,9 @@ DASHBOARD_HTML = """<!doctype html>
         method: "DELETE"
       });
       await refreshQuerySourceSets({ quiet: true });
+      if (editingQuerySourceSetId === sourceSetId) {
+        cancelQuerySourceSetEdit({ quiet: true });
+      }
       if (activeQuerySourceSetId === sourceSetId) {
         clearQueryScope();
       }
@@ -3644,7 +3693,8 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("queryButton").addEventListener("click", () => queryCorpus().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearQueryScopeButton").addEventListener("click", () => clearQueryScope());
     document.getElementById("refreshSourceSetsButton").addEventListener("click", () => refreshQuerySourceSets().catch((error) => setStatus(error.message, "error")));
-    document.getElementById("saveSourceSetButton").addEventListener("click", () => saveQuerySourceSet().catch((error) => setStatus(error.message, "error")));
+    saveSourceSetButton.addEventListener("click", () => saveQuerySourceSet().catch((error) => setStatus(error.message, "error")));
+    cancelSourceSetEditButton.addEventListener("click", () => cancelQuerySourceSetEdit());
     document.getElementById("refreshQueryRunsButton").addEventListener("click", () => refreshQueryRuns().catch((error) => setStatus(error.message, "error")));
     document.getElementById("exportQueryRunsButton").addEventListener("click", () => exportQueryRuns().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshQueryRetentionButton").addEventListener("click", () => refreshQueryRetention().catch((error) => setStatus(error.message, "error")));

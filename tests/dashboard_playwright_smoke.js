@@ -578,8 +578,36 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#sourceSetList", "Browser source set");
     await waitForText(page, "#queryScopeLabel", "Set: Browser source set");
 
+    await page.click(`[data-edit-source-set-id="${sourceSet.id}"]`);
+    await waitForText(page, "#status", "Editing source set.");
+    await page.fill("#sourceSetNameInput", "Browser source set updated");
+    await page.fill("#sourceSetDescriptionInput", "Browser updated scoped query");
+    const updateSourceSetResponse = page.waitForResponse(
+      (response) => {
+        if (!response.url().endsWith(`/query-source-sets/${sourceSet.id}`) || response.request().method() !== "PUT") {
+          return false;
+        }
+        try {
+          const payload = JSON.parse(response.request().postData() || "{}");
+          return payload.name === "Browser source set updated"
+            && payload.description === "Browser updated scoped query"
+            && Array.isArray(payload.doc_ids)
+            && payload.doc_ids.includes(sourceSet.doc_ids[0]);
+        } catch (_error) {
+          return false;
+        }
+      }
+    );
+    await page.click("#saveSourceSetButton");
+    const updatedSourceSetResponse = await updateSourceSetResponse;
+    const updatedSourceSet = await updatedSourceSetResponse.json();
+    assert(updatedSourceSet.id === sourceSet.id, "updated source set changed ids");
+    await waitForText(page, "#status", "Source set updated.");
+    await waitForText(page, "#sourceSetList", "Browser source set updated");
+    await waitForText(page, "#queryScopeLabel", "Set: Browser source set updated");
+
     await page.click(`[data-use-source-set-id="${sourceSet.id}"]`);
-    await waitForText(page, "#queryScopeLabel", "Set: Browser source set");
+    await waitForText(page, "#queryScopeLabel", "Set: Browser source set updated");
 
     await page.fill("#conversationTitleInput", "Browser scoped chat");
     const createScopedConversationResponse = page.waitForResponse(
@@ -694,6 +722,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       providerExercised: true,
       queryHistoryExercised: true,
       sourceSetExercised: true,
+      sourceSetUpdateExercised: true,
       conversationSourceSetExercised: true,
       screenshotPath: screenshotPath || null
     }));

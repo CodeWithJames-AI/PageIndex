@@ -635,6 +635,11 @@ DASHBOARD_HTML = """<!doctype html>
             <div class="stack">
               <input id="sourceSetNameInput" value="" placeholder="source set name" aria-label="Source set name">
               <input id="sourceSetDescriptionInput" value="" placeholder="description" aria-label="Source set description">
+              <div class="scope-row" aria-label="Source set visibility">
+                <label><input id="sourceSetSharedInput" type="checkbox">shared</label>
+                <span></span>
+                <span></span>
+              </div>
               <div class="provider-actions">
                 <button id="refreshSourceSetsButton" class="secondary" type="button">Refresh</button>
                 <button id="saveSourceSetButton" type="button">Save scope</button>
@@ -823,6 +828,7 @@ DASHBOARD_HTML = """<!doctype html>
     const queryRetentionSummary = document.getElementById("queryRetentionSummary");
     const sourceSetNameInput = document.getElementById("sourceSetNameInput");
     const sourceSetDescriptionInput = document.getElementById("sourceSetDescriptionInput");
+    const sourceSetSharedInput = document.getElementById("sourceSetSharedInput");
     const saveSourceSetButton = document.getElementById("saveSourceSetButton");
     const cancelSourceSetEditButton = document.getElementById("cancelSourceSetEditButton");
     const sourceSetList = document.getElementById("sourceSetList");
@@ -1163,10 +1169,11 @@ DASHBOARD_HTML = """<!doctype html>
       sourceSetList.innerHTML = currentSourceSets.map((sourceSet) => {
         const docs = sourceSetDocuments(sourceSet);
         const preview = docs.slice(0, 3).map((doc) => doc.name || doc.id).join(", ");
+        const visibility = sourceSet.shared ? "shared" : "private";
         return `
           <article class="member">
             <strong>${escapeHtml(sourceSet.name)}</strong>
-            <div class="muted">${escapeHtml(sourceSet.id)} | ${docs.length} docs</div>
+            <div class="muted">${escapeHtml(sourceSet.id)} | ${docs.length} docs | ${visibility}</div>
             ${sourceSet.description ? `<div class="muted">${escapeHtml(sourceSet.description)}</div>` : ""}
             ${preview ? `<div class="muted">${escapeHtml(preview)}${docs.length > 3 ? ", ..." : ""}</div>` : ""}
             <div class="doc-actions">
@@ -1217,6 +1224,7 @@ DASHBOARD_HTML = """<!doctype html>
       editingQuerySourceSetId = sourceSet.id;
       sourceSetNameInput.value = sourceSet.name || "";
       sourceSetDescriptionInput.value = sourceSet.description || "";
+      sourceSetSharedInput.checked = Boolean(sourceSet.shared);
       activeQuerySourceSetId = sourceSet.id;
       activeQuerySourceSetName = sourceSet.name || sourceSet.id;
       clearFolderQueryScope();
@@ -1231,6 +1239,7 @@ DASHBOARD_HTML = """<!doctype html>
       editingQuerySourceSetId = "";
       sourceSetNameInput.value = "";
       sourceSetDescriptionInput.value = "";
+      sourceSetSharedInput.checked = false;
       renderSourceSetEditor();
       if (!options.quiet) {
         setStatus("Source set edit cancelled.", "warn");
@@ -1997,12 +2006,14 @@ DASHBOARD_HTML = """<!doctype html>
         body: JSON.stringify({
           name,
           description: sourceSetDescriptionInput.value.trim(),
+          shared: sourceSetSharedInput.checked,
           doc_ids: docIds
         })
       });
       editingQuerySourceSetId = "";
       sourceSetNameInput.value = "";
       sourceSetDescriptionInput.value = "";
+      sourceSetSharedInput.checked = false;
       renderSourceSetEditor();
       renderSourceSets([payload, ...currentSourceSets.filter((sourceSet) => sourceSet.id !== payload.id)]);
       useQuerySourceSet(payload.id);

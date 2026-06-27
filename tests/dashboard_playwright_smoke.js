@@ -626,19 +626,33 @@ async function waitForAnyText(page, selector, expectedValues) {
     await page.fill("#sourceSetNameInput", "Browser source set");
     await page.fill("#sourceSetDescriptionInput", "Browser scoped query");
     const saveSourceSetResponse = page.waitForResponse(
-      (response) => response.url().endsWith("/query-source-sets") && response.request().method() === "POST"
+      (response) => {
+        if (!response.url().endsWith("/query-source-sets") || response.request().method() !== "POST") {
+          return false;
+        }
+        try {
+          const payload = JSON.parse(response.request().postData() || "{}");
+          return payload.shared === false;
+        } catch (_error) {
+          return false;
+        }
+      }
     );
     await page.click("#saveSourceSetButton");
     const sourceSetResponse = await saveSourceSetResponse;
     const sourceSet = await sourceSetResponse.json();
+    assert(sourceSet.shared === false, "saved source set should default private");
+    assert(!(await page.isChecked("#sourceSetSharedInput")), "source set checkbox should stay clear after private save");
     await waitForText(page, "#status", "Source set saved.");
     await waitForText(page, "#sourceSetList", "Browser source set");
+    await waitForText(page, "#sourceSetList", "private");
     await waitForText(page, "#queryScopeLabel", "Set: Browser source set");
 
     await page.click(`[data-edit-source-set-id="${sourceSet.id}"]`);
     await waitForText(page, "#status", "Editing source set.");
     await page.fill("#sourceSetNameInput", "Browser source set updated");
     await page.fill("#sourceSetDescriptionInput", "Browser updated scoped query");
+    await page.check("#sourceSetSharedInput");
     const updateSourceSetResponse = page.waitForResponse(
       (response) => {
         if (!response.url().endsWith(`/query-source-sets/${sourceSet.id}`) || response.request().method() !== "PUT") {
@@ -648,6 +662,7 @@ async function waitForAnyText(page, selector, expectedValues) {
           const payload = JSON.parse(response.request().postData() || "{}");
           return payload.name === "Browser source set updated"
             && payload.description === "Browser updated scoped query"
+            && payload.shared === true
             && Array.isArray(payload.doc_ids)
             && payload.doc_ids.includes(sourceSet.doc_ids[0]);
         } catch (_error) {
@@ -659,9 +674,17 @@ async function waitForAnyText(page, selector, expectedValues) {
     const updatedSourceSetResponse = await updateSourceSetResponse;
     const updatedSourceSet = await updatedSourceSetResponse.json();
     assert(updatedSourceSet.id === sourceSet.id, "updated source set changed ids");
+    assert(updatedSourceSet.shared === true, "updated source set should be shared");
+    assert(!(await page.isChecked("#sourceSetSharedInput")), "source set checkbox was not cleared after shared save");
     await waitForText(page, "#status", "Source set updated.");
     await waitForText(page, "#sourceSetList", "Browser source set updated");
+    await waitForText(page, "#sourceSetList", "shared");
     await waitForText(page, "#queryScopeLabel", "Set: Browser source set updated");
+
+    await page.click(`[data-edit-source-set-id="${sourceSet.id}"]`);
+    assert(await page.isChecked("#sourceSetSharedInput"), "edit did not hydrate shared source set checkbox");
+    await page.click("#cancelSourceSetEditButton");
+    assert(!(await page.isChecked("#sourceSetSharedInput")), "cancel did not clear source set checkbox");
 
     await page.click(`[data-use-source-set-id="${sourceSet.id}"]`);
     await waitForText(page, "#queryScopeLabel", "Set: Browser source set updated");

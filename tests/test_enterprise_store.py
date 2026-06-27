@@ -1165,7 +1165,7 @@ class EnterpriseStoreTest(unittest.TestCase):
 
             first = store.chat_message(conversation["id"], "alice", "renewal", limit=4)
             second = store.chat_message(conversation["id"], "alice", "risk", limit=4)
-            store.chat_message(markdown_conversation["id"], "alice", "```spoof\n# heading", limit=4)
+            spoof_chat = store.chat_message(markdown_conversation["id"], "alice", "```spoof\n# heading", limit=4)
             conversations = store.list_conversations(workspace_id, "alice")
             messages = store.list_conversation_messages(conversation["id"], "alice")
             bob_conversations = store.list_conversations(workspace_id, "bob")
@@ -1175,6 +1175,17 @@ class EnterpriseStoreTest(unittest.TestCase):
             export_events = store.list_audit_events(workspace_id, "alice", action="conversation.export")
             export_lines = [json.loads(line) for line in jsonl_export.splitlines()]
             serialized_export_events = json.dumps(export_events, sort_keys=True)
+            deleted_spoof = store.delete_conversation(markdown_conversation["id"], "alice")
+            remaining_spoof_messages = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM conversation_messages WHERE conversation_id = ?",
+                (markdown_conversation["id"],),
+            ).fetchone()["count"]
+            spoof_trace = store.get_query_trace(spoof_chat["result"]["run_id"], workspace_id=workspace_id, actor_user_id="alice")
+            delete_events = store.list_audit_events(workspace_id, "alice", action="conversation.delete")
+            serialized_delete_events = json.dumps(delete_events, sort_keys=True)
+            archived_for_delete = store.create_conversation(workspace_id, "alice", title="Archive then delete")
+            store.archive_conversation(archived_for_delete["id"], "alice")
+            deleted_archived = store.delete_conversation(archived_for_delete["id"], "alice")
 
             self.assertEqual(conversation["title"], "Renewal review")
             listed_conversation = next(item for item in conversations if item["id"] == conversation["id"])
@@ -1202,6 +1213,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual({event["details"]["format"] for event in export_events}, {"jsonl", "markdown"})
             self.assertNotIn("renewal", serialized_export_events)
             self.assertNotIn("risk", serialized_export_events)
+            self.assertTrue(deleted_spoof)
+            self.assertTrue(deleted_archived)
+            self.assertEqual(remaining_spoof_messages, 0)
+            self.assertIsNotNone(spoof_trace)
+            self.assertEqual(delete_events[0]["target_id"], markdown_conversation["id"])
+            self.assertEqual(delete_events[0]["details"]["message_count"], 2)
+            self.assertEqual(delete_events[0]["details"]["was_archived"], False)
+            self.assertNotIn("spoof", serialized_delete_events)
             archived = store.archive_conversation(conversation["id"], "alice")
             hidden_conversations = store.list_conversations(workspace_id, "alice")
             archived_conversations = store.list_conversations(workspace_id, "alice", include_archived=True)
@@ -1233,12 +1252,18 @@ class EnterpriseStoreTest(unittest.TestCase):
                 store.chat_message(conversation["id"], "bob", "show me alice history")
             with self.assertRaisesRegex(PermissionError, "conversation access denied"):
                 store.archive_conversation(conversation["id"], "bob")
+            with self.assertRaisesRegex(PermissionError, "conversation access denied"):
+                store.delete_conversation(conversation["id"], "bob")
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.create_conversation(workspace_id, "vivi", title="blocked")
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.chat_message(viewer_conversation["id"], "vivi", "blocked")
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.archive_conversation(viewer_conversation["id"], "vivi")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.delete_conversation(viewer_conversation["id"], "vivi")
+            with self.assertRaisesRegex(ValueError, "Conversation not found"):
+                store.list_conversation_messages(markdown_conversation["id"], "alice")
 
     def test_conversation_rename_updates_title_and_enforces_owner_access(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1675,6 +1700,33 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            deleted = json.loads(
+                subprocess.run(
+                    [*base, "delete-conversation", conversation["id"], "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            after_delete_conversations = json.loads(
+                subprocess.run(
+                    [*base, "list-conversations", "ws_cli", "alice", "--include-archived"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            deleted_messages = subprocess.run(
+                [*base, "conversation-messages", conversation["id"], "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
             exported_lines = [json.loads(line) for line in exported_jsonl.splitlines()]
 
             self.assertEqual(renamed["title"], "CLI renamed")
@@ -1696,6 +1748,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("Traceback", blocked_messages.stderr)
             self.assertIsNone(restored["archived_at"])
             self.assertEqual(restored_conversations[0]["id"], conversation["id"])
+            self.assertTrue(deleted["deleted"])
+            self.assertEqual(after_delete_conversations, [])
+            self.assertNotEqual(deleted_messages.returncode, 0)
+            self.assertIn("Conversation not found", deleted_messages.stderr)
+            self.assertNotIn("Traceback", deleted_messages.stderr)
 
     def test_conversation_cli_errors_do_not_print_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7749,6 +7806,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=alice_read_headers,
                     status=403,
                 )
+                read_delete = _delete_json(
+                    f"{base}/conversations/{conversation['id']}",
+                    headers=alice_read_headers,
+                    status=403,
+                )
                 alice_conversations = _get_json(f"{base}/conversations", headers=alice_headers)["conversations"]
                 bob_conversations = _get_json(f"{base}/conversations", headers=bob_headers)["conversations"]
                 messages = _get_json(
@@ -7825,6 +7887,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=bob_headers,
                     status=403,
                 )
+                bob_delete = _delete_json(
+                    f"{base}/conversations/{conversation['id']}",
+                    headers=bob_headers,
+                    status=403,
+                )
                 viewer_create = _post_json(
                     f"{base}/conversations",
                     {"title": "viewer blocked"},
@@ -7837,11 +7904,24 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=charlie_headers,
                     status=403,
                 )
+                deleted = _delete_json(
+                    f"{base}/conversations/{conversation['id']}",
+                    headers=alice_headers,
+                )
+                after_delete_conversations = _get_json(
+                    f"{base}/conversations?include_archived=true",
+                    headers=alice_headers,
+                )["conversations"]
+                deleted_messages = _get_error(
+                    f"{base}/conversations/{conversation['id']}/messages",
+                    headers=alice_headers,
+                )
 
                 self.assertEqual(alice_conversations[0]["id"], conversation["id"])
                 self.assertEqual(renamed["title"], "HTTP renamed")
                 self.assertEqual(bad_rename["error"], "title is required")
                 self.assertEqual(read_rename["error"], "api token scope denied")
+                self.assertEqual(read_delete["error"], "api token scope denied")
                 self.assertEqual(bob_conversations, [])
                 self.assertEqual([message["role"] for message in messages], ["user", "assistant"])
                 self.assertEqual(messages[1]["run_id"], chat["result"]["run_id"])
@@ -7867,8 +7947,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(bob_append["error"], "conversation access denied")
                 self.assertEqual(bob_rename["error"], "conversation access denied")
                 self.assertEqual(bob_archive["error"], "conversation access denied")
+                self.assertEqual(bob_delete["error"], "conversation access denied")
                 self.assertEqual(viewer_create["error"], "workspace role denied")
                 self.assertEqual(viewer_append["error"], "workspace role denied")
+                self.assertTrue(deleted["deleted"])
+                self.assertEqual(after_delete_conversations, [])
+                self.assertEqual(deleted_messages["status"], 400)
+                self.assertIn("Conversation not found", deleted_messages["error"])
                 self.assertTrue(chat["result"]["verification"]["ok"], chat["result"]["verification"]["errors"])
                 self.assertTrue(chat["result"]["citations"])
             finally:
@@ -8714,6 +8799,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=token_headers,
                     status=403,
                 )
+                token_delete = _delete_json(
+                    f"{strict_base}/conversations/{conversation['id']}",
+                    headers=token_headers,
+                    status=403,
+                )
 
                 self.assertEqual(token_read["status"], 403)
                 self.assertEqual(token_read["error"], "conversation access denied")
@@ -8721,6 +8811,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(token_export["error"], "conversation access denied")
                 self.assertEqual(token_append["error"], "conversation access denied")
                 self.assertEqual(token_rename["error"], "conversation access denied")
+                self.assertEqual(token_delete["error"], "conversation access denied")
             finally:
                 strict.shutdown()
                 strict.server_close()
@@ -8755,6 +8846,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=header_context,
                     status=403,
                 )
+                header_delete = _delete_json(
+                    f"{local_base}/conversations/{conversation['id']}",
+                    headers=header_context,
+                    status=403,
+                )
 
                 self.assertEqual(header_read["status"], 403)
                 self.assertEqual(header_read["error"], "conversation access denied")
@@ -8762,6 +8858,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(header_export["error"], "conversation access denied")
                 self.assertEqual(header_append["error"], "conversation access denied")
                 self.assertEqual(header_rename["error"], "conversation access denied")
+                self.assertEqual(header_delete["error"], "conversation access denied")
             finally:
                 local.shutdown()
                 local.server_close()
@@ -9312,6 +9409,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("archiveConversation", body)
                     self.assertIn("data-archive-conversation-id", body)
                     self.assertIn("data-archive-state", body)
+                    self.assertIn("deleteConversation", body)
+                    self.assertIn("data-delete-conversation-id", body)
                     self.assertIn("conversationList", body)
                     self.assertIn("chatInput", body)
                     self.assertIn("chatButton", body)

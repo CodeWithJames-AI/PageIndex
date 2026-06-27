@@ -1197,6 +1197,7 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="doc-actions">
             <button class="secondary" type="button" data-rename-conversation-id="${escapeHtml(conversation.id)}" data-conversation-title="${escapeHtml(conversation.title)}">Rename</button>
             <button class="secondary" type="button" data-archive-conversation-id="${escapeHtml(conversation.id)}" data-archive-state="${conversation.archived_at ? "restore" : "archive"}">${conversation.archived_at ? "Restore" : "Archive"}</button>
+            <button class="secondary" type="button" data-delete-conversation-id="${escapeHtml(conversation.id)}">Delete</button>
           </div>
         </article>
       `).join("");
@@ -1208,6 +1209,9 @@ DASHBOARD_HTML = """<!doctype html>
       });
       conversationList.querySelectorAll("[data-archive-conversation-id]").forEach((button) => {
         button.addEventListener("click", () => archiveConversation(button.dataset.archiveConversationId, button.dataset.archiveState === "restore").catch((error) => setStatus(error.message, "error")));
+      });
+      conversationList.querySelectorAll("[data-delete-conversation-id]").forEach((button) => {
+        button.addEventListener("click", () => deleteConversation(button.dataset.deleteConversationId).catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -2119,6 +2123,23 @@ DASHBOARD_HTML = """<!doctype html>
       }
       await refreshConversations();
       setStatus(restore ? "Conversation restored." : "Conversation archived.", "ok");
+    }
+
+    async function deleteConversation(conversationId) {
+      if (!window.confirm("Delete this conversation?")) {
+        setStatus("Delete cancelled.", "warn");
+        return;
+      }
+      setStatus("Deleting conversation...");
+      const payload = await api(`/conversations/${encodeURIComponent(conversationId)}`, {
+        method: "DELETE"
+      });
+      if (payload.deleted && activeConversationId === conversationId) {
+        activeConversationId = "";
+        renderMessages([]);
+      }
+      await refreshConversations();
+      setStatus(payload.deleted ? "Conversation deleted." : "Conversation not found.", payload.deleted ? "ok" : "warn");
     }
 
     async function saveMember() {

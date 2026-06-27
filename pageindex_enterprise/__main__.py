@@ -324,6 +324,10 @@ def main() -> None:
     rename_conversation.add_argument("user_id")
     rename_conversation.add_argument("title")
 
+    delete_conversation = sub.add_parser("delete-conversation")
+    delete_conversation.add_argument("conversation_id")
+    delete_conversation.add_argument("user_id")
+
     conversation_messages = sub.add_parser("conversation-messages")
     conversation_messages.add_argument("conversation_id")
     conversation_messages.add_argument("user_id")
@@ -927,6 +931,17 @@ def main() -> None:
                     _conversation_cli(
                         lambda: store.rename_conversation(args.conversation_id, args.user_id, args.title)
                     ),
+                    indent=2,
+                )
+            )
+        elif args.command == "delete-conversation":
+            print(
+                json.dumps(
+                    {
+                        "deleted": _conversation_cli(
+                            lambda: store.delete_conversation(args.conversation_id, args.user_id)
+                        )
+                    },
                     indent=2,
                 )
             )

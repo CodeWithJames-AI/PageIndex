@@ -620,6 +620,20 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            conversation_id = _conversation_path(parsed.path)
+            if conversation_id:
+                store = EnterpriseStore(self.server.root)
+                try:
+                    workspace_id, user_id = self._workspace_context(store, required_scope="write")
+                    deleted = store.delete_conversation(
+                        conversation_id,
+                        user_id,
+                        expected_workspace_id=workspace_id,
+                    )
+                    self._json({"deleted": deleted})
+                finally:
+                    store.close()
+                return
             doc_id = _document_path(parsed.path)
             if doc_id:
                 store = EnterpriseStore(self.server.root)
@@ -2122,6 +2136,13 @@ def _conversation_archive_path(path: str) -> str | None:
 def _conversation_rename_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "rename":
+        return parts[1]
+    return None
+
+
+def _conversation_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "conversations":
         return parts[1]
     return None
 

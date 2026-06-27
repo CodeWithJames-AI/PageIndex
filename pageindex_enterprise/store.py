@@ -4564,6 +4564,45 @@ class EnterpriseStore:
             expected_workspace_id=expected_workspace_id,
         )
 
+    def delete_conversation(
+        self,
+        conversation_id: str,
+        actor_user_id: str,
+        *,
+        expected_workspace_id: str | None = None,
+    ) -> bool:
+        actor_user_id = actor_user_id.strip()
+        conversation = self._conversation_for_actor(
+            conversation_id,
+            actor_user_id,
+            expected_workspace_id=expected_workspace_id,
+            allow_archived=True,
+        )
+        self.require_workspace_role(conversation["workspace_id"], actor_user_id, WORKSPACE_WRITE_ROLES)
+        message_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM conversation_messages WHERE conversation_id = ?",
+            (conversation["id"],),
+        ).fetchone()["count"]
+        with self._atomic():
+            cursor = self.conn.execute(
+                "DELETE FROM conversations WHERE id = ?",
+                (conversation["id"],),
+            )
+            deleted = cursor.rowcount > 0
+            if deleted:
+                self._insert_audit_event(
+                    conversation["workspace_id"],
+                    actor_user_id,
+                    "conversation.delete",
+                    target_type="conversation",
+                    target_id=conversation["id"],
+                    details={
+                        "message_count": message_count,
+                        "was_archived": bool(conversation.get("archived_at")),
+                    },
+                )
+        return deleted
+
     def list_conversation_messages(
         self,
         conversation_id: str,

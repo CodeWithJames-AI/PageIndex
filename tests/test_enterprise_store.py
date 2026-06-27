@@ -1542,6 +1542,81 @@ class EnterpriseStoreTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+            created_share = subprocess.run(
+                [
+                    *base,
+                    "query-source-set",
+                    workspace_id,
+                    "alice",
+                    "--share",
+                    created_source_set["id"],
+                    "--share-redact",
+                    "--share-expires-in-days",
+                    "1",
+                    "--share-max-views",
+                    "2",
+                    "--share-password",
+                    "cli-open",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            share_link = json.loads(created_share.stdout)
+            listed_shares = subprocess.run(
+                [*base, "query-source-set", workspace_id, "alice", "--shares", created_source_set["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            member_share_denied = subprocess.run(
+                [*base, "query-source-set", workspace_id, "bob", "--shares", created_source_set["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            share_option_without_share = subprocess.run(
+                [*base, "query-source-set", workspace_id, "alice", "--shares", created_source_set["id"], "--share-redact"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            source_set_option_without_mutation = subprocess.run(
+                [*base, "query-source-set", workspace_id, "alice", "--shares", created_source_set["id"], "--shared"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            missing_share_source_set = subprocess.run(
+                [*base, "query-source-set", workspace_id, "alice", "--share", "qss_missing"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            revoked_share = subprocess.run(
+                [*base, "query-source-set", workspace_id, "alice", "--revoke-share", share_link["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            listed_shares_after_revoke = subprocess.run(
+                [*base, "query-source-set", workspace_id, "alice", "--shares", created_source_set["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
             deleted = subprocess.run(
                 [*base, "query-source-set", workspace_id, "alice", "--delete", created_source_set["id"]],
                 cwd=repo_root,
@@ -1557,6 +1632,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             reshared_source_set = json.loads(reshared.stdout)
             bob_shared_source_sets = json.loads(bob_listed_shared.stdout)
             query_result = json.loads(queried.stdout)
+            listed_share_links = json.loads(listed_shares.stdout)
+            revoke_result = json.loads(revoked_share.stdout)
+            share_links_after_revoke = json.loads(listed_shares_after_revoke.stdout)
             delete_result = json.loads(deleted.stdout)
             self.assertEqual(created_source_set["shared"], True)
             self.assertEqual(created_source_set["doc_ids"], [doc_id])
@@ -1573,6 +1651,28 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn(replacement_doc_id, {citation["doc_id"] for citation in query_result["citations"]})
             self.assertNotEqual(conflict.returncode, 0)
             self.assertIn("use --doc-id or --source-set-id", conflict.stderr)
+            self.assertTrue(share_link["token"].startswith("pss_"))
+            self.assertTrue(share_link["redact_content"])
+            self.assertEqual(share_link["max_views"], 2)
+            self.assertEqual(share_link["view_count"], 0)
+            self.assertTrue(share_link["password_protected"])
+            self.assertTrue(share_link["active"])
+            self.assertNotIn("token_hash", share_link)
+            self.assertEqual(listed_share_links[0]["id"], share_link["id"])
+            self.assertTrue(listed_share_links[0]["password_protected"])
+            self.assertNotIn(share_link["token"], listed_shares.stdout)
+            self.assertNotIn("cli-open", listed_shares.stdout)
+            self.assertNotIn("password_hash", listed_shares.stdout)
+            self.assertNotEqual(member_share_denied.returncode, 0)
+            self.assertIn("workspace role denied", member_share_denied.stderr)
+            self.assertNotEqual(share_option_without_share.returncode, 0)
+            self.assertIn("share options require --share", share_option_without_share.stderr)
+            self.assertNotEqual(source_set_option_without_mutation.returncode, 0)
+            self.assertIn("source set options require --create or --update", source_set_option_without_mutation.stderr)
+            self.assertNotEqual(missing_share_source_set.returncode, 0)
+            self.assertIn("source set not found", missing_share_source_set.stderr)
+            self.assertEqual(revoke_result, {"revoked": True})
+            self.assertFalse(share_links_after_revoke[0]["active"])
             self.assertTrue(delete_result["deleted"])
 
     def test_folder_scoped_query_limits_store_cli_and_http(self):

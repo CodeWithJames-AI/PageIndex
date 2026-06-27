@@ -467,6 +467,14 @@ def main() -> None:
     query_source_set.add_argument("--shared", action="store_true")
     query_source_set.add_argument("--private", action="store_true")
     query_source_set.add_argument("--delete")
+    query_source_set.add_argument("--share")
+    query_source_set.add_argument("--shares")
+    query_source_set.add_argument("--revoke-share")
+    query_source_set.add_argument("--share-redact", action="store_true")
+    query_source_set.add_argument("--share-expires-at")
+    query_source_set.add_argument("--share-expires-in-days", type=_positive_int)
+    query_source_set.add_argument("--share-max-views", type=_positive_int)
+    query_source_set.add_argument("--share-password")
 
     query_tree = sub.add_parser("query-tree")
     query_tree.add_argument("query")
@@ -1324,11 +1332,38 @@ def main() -> None:
                 )
             )
         elif args.command == "query-source-set":
-            selected_actions = [bool(args.create), bool(args.update), bool(args.delete)]
+            selected_actions = [
+                bool(args.create),
+                bool(args.update),
+                bool(args.delete),
+                bool(args.share),
+                bool(args.shares),
+                bool(args.revoke_share),
+            ]
             if sum(selected_actions) > 1:
-                raise SystemExit("use --create, --update, or --delete, not more than one")
+                raise SystemExit("use only one query-source-set action")
             if args.shared and args.private:
                 raise SystemExit("use --shared or --private, not both")
+            source_set_option_used = (
+                args.name is not None
+                or args.description is not None
+                or args.doc_ids is not None
+                or args.shared
+                or args.private
+            )
+            if source_set_option_used and not (args.create or args.update):
+                raise SystemExit("source set options require --create or --update")
+            share_option_used = (
+                args.share_redact
+                or args.share_expires_at is not None
+                or args.share_expires_in_days is not None
+                or args.share_max_views is not None
+                or args.share_password is not None
+            )
+            if share_option_used and not args.share:
+                raise SystemExit("share options require --share")
+            if args.share_expires_at is not None and args.share_expires_in_days is not None:
+                raise SystemExit("use --share-expires-at or --share-expires-in-days, not both")
             if args.delete:
                 deleted = _workspace_member_cli(
                     lambda: store.delete_query_source_set(args.workspace_id, args.user_id, args.delete)
@@ -1361,6 +1396,46 @@ def main() -> None:
                     )
                 )
                 print(json.dumps(source_set, indent=2))
+            elif args.share:
+                expires_at = args.share_expires_at
+                if args.share_expires_in_days is not None:
+                    expires_at = expires_at_from_days(args.share_expires_in_days)
+                share_link = _workspace_member_cli(
+                    lambda: store.create_query_source_set_share_link(
+                        args.workspace_id,
+                        args.user_id,
+                        args.share,
+                        expires_at=expires_at,
+                        redact_content=args.share_redact,
+                        max_views=args.share_max_views,
+                        password=args.share_password,
+                    )
+                )
+                if share_link is None:
+                    raise SystemExit("source set not found")
+                print(json.dumps(share_link, indent=2))
+            elif args.shares:
+                print(
+                    json.dumps(
+                        _workspace_member_cli(
+                            lambda: store.list_query_source_set_share_links(
+                                args.workspace_id,
+                                args.user_id,
+                                args.shares,
+                            )
+                        ),
+                        indent=2,
+                    )
+                )
+            elif args.revoke_share:
+                revoked = _workspace_member_cli(
+                    lambda: store.revoke_query_source_set_share_link(
+                        args.workspace_id,
+                        args.user_id,
+                        args.revoke_share,
+                    )
+                )
+                print(json.dumps({"revoked": revoked}, indent=2))
             else:
                 print(
                     json.dumps(

@@ -2280,6 +2280,24 @@ class EnterpriseStore:
         group = self._workspace_group(workspace_id, group_id)
         if group is None:
             return False
+        member_count = int(
+            self._one(
+                "SELECT COUNT(*) AS count FROM workspace_group_members WHERE workspace_id = ? AND group_id = ?",
+                (workspace_id, group["id"]),
+            )["count"]
+        )
+        document_group_grant_count = int(
+            self._one(
+                "SELECT COUNT(*) AS count FROM document_group_access_grants WHERE workspace_id = ? AND group_id = ?",
+                (workspace_id, group["id"]),
+            )["count"]
+        )
+        folder_group_grant_count = int(
+            self._one(
+                "SELECT COUNT(*) AS count FROM folder_group_access_grants WHERE workspace_id = ? AND group_id = ?",
+                (workspace_id, group["id"]),
+            )["count"]
+        )
         with self._atomic():
             cursor = self.conn.execute(
                 "DELETE FROM workspace_groups WHERE workspace_id = ? AND id = ?",
@@ -2293,7 +2311,12 @@ class EnterpriseStore:
                     "workspace_group.delete",
                     target_type="workspace_group",
                     target_id=group["id"],
-                    details={"name": group["name"]},
+                    details={
+                        "name": group["name"],
+                        "member_count": member_count,
+                        "document_group_grant_count": document_group_grant_count,
+                        "folder_group_grant_count": folder_group_grant_count,
+                    },
                 )
         return deleted
 

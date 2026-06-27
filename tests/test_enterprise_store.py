@@ -9083,6 +9083,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            folder_id = store.create_folder("Delete group folder", workspace_id=workspace_id, actor_user_id="alice")
             doc_id = store.ingest_file(restricted, workspace_id=workspace_id, actor_user_id="alice", name="Delete group secret")
             store.set_document_access_mode(
                 doc_id,
@@ -9105,25 +9106,44 @@ class EnterpriseStoreTest(unittest.TestCase):
                 actor_user_id="alice",
                 group_id=group["id"],
             )
+            folder_granted = store.grant_folder_group_access(
+                folder_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                group_id=group["id"],
+            )
             bob_visible = store.query_corpus("visibility evidence", workspace_id=workspace_id, actor_user_id="bob")
             deleted = store.delete_workspace_group(workspace_id, "alice", group["id"])
             deleted_again = store.delete_workspace_group(workspace_id, "alice", group["id"])
             bob_hidden = store.query_corpus("visibility evidence", workspace_id=workspace_id, actor_user_id="bob")
             access_after_delete = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            folder_access_after_delete = store.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id="alice")
             groups_after_delete = store.list_workspace_groups(workspace_id, "alice")
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.delete_workspace_group(workspace_id, "bob", "missing")
             events = store.list_audit_events(workspace_id, "alice", limit=50)
             actions = [event["action"] for event in events]
+            delete_event = next(event for event in events if event["action"] == "workspace_group.delete")
 
             self.assertEqual(renamed["name"], "Compliance")
             self.assertEqual(granted["group_grants"][0]["group_name"], "Compliance")
+            self.assertEqual(folder_granted["group_grants"][0]["group_name"], "Compliance")
             self.assertEqual(bob_visible["citations"][0]["doc_id"], doc_id)
             self.assertTrue(deleted)
             self.assertFalse(deleted_again)
             self.assertEqual(bob_hidden["citations"], [])
             self.assertEqual(access_after_delete["group_grants"], [])
+            self.assertEqual(folder_access_after_delete["group_grants"], [])
             self.assertEqual([group["name"] for group in groups_after_delete], ["Archive"])
+            self.assertEqual(
+                delete_event["details"],
+                {
+                    "name": "Compliance",
+                    "member_count": 1,
+                    "document_group_grant_count": 1,
+                    "folder_group_grant_count": 1,
+                },
+            )
             self.assertIn("workspace_group.rename", actions)
             self.assertIn("workspace_group.delete", actions)
 

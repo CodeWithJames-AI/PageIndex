@@ -1306,10 +1306,14 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         legal_hold = payload.get("legal_hold")
         if has_legal_hold and not isinstance(legal_hold, bool):
             raise ValueError("legal_hold must be a boolean")
+        has_legal_hold_reason = "legal_hold_reason" in payload
+        legal_hold_reason = payload.get("legal_hold_reason")
+        if has_legal_hold_reason and legal_hold_reason is not None and not isinstance(legal_hold_reason, str):
+            raise ValueError("legal_hold_reason must be a string")
         if clear and has_retention_days:
             raise ValueError("choose retention_days or clear")
-        if not clear and not has_retention_days and not has_legal_hold:
-            raise ValueError("retention_days or legal_hold is required")
+        if not clear and not has_retention_days and not has_legal_hold and not has_legal_hold_reason:
+            raise ValueError("retention_days, legal_hold, or legal_hold_reason is required")
         retention_days = None
         if has_retention_days:
             retention_days = payload["retention_days"]
@@ -1324,6 +1328,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     user_id,
                     retention_days=None if clear else (retention_days if has_retention_days else _UNSET),
                     legal_hold=legal_hold if has_legal_hold else _UNSET,
+                    legal_hold_reason=legal_hold_reason if has_legal_hold_reason else _UNSET,
                 )
             )
         finally:
@@ -1338,10 +1343,14 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         legal_hold = payload.get("legal_hold")
         if has_legal_hold and not isinstance(legal_hold, bool):
             raise ValueError("legal_hold must be a boolean")
+        has_legal_hold_reason = "legal_hold_reason" in payload
+        legal_hold_reason = payload.get("legal_hold_reason")
+        if has_legal_hold_reason and legal_hold_reason is not None and not isinstance(legal_hold_reason, str):
+            raise ValueError("legal_hold_reason must be a string")
         if clear and has_retention_days:
             raise ValueError("choose retention_days or clear")
-        if not clear and not has_retention_days and not has_legal_hold:
-            raise ValueError("retention_days or legal_hold is required")
+        if not clear and not has_retention_days and not has_legal_hold and not has_legal_hold_reason:
+            raise ValueError("retention_days, legal_hold, or legal_hold_reason is required")
         retention_days = None
         if has_retention_days:
             retention_days = payload["retention_days"]
@@ -1356,6 +1365,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     user_id,
                     retention_days=None if clear else (retention_days if has_retention_days else _UNSET),
                     legal_hold=legal_hold if has_legal_hold else _UNSET,
+                    legal_hold_reason=legal_hold_reason if has_legal_hold_reason else _UNSET,
                 )
             )
         finally:

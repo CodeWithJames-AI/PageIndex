@@ -981,7 +981,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             store._commit()
 
             policy = store.set_query_retention_policy(workspace_id, "alice", retention_days=30)
-            hold_policy = store.set_query_retention_policy(workspace_id, "alice", legal_hold=True)
+            hold_policy = store.set_query_retention_policy(
+                workspace_id,
+                "alice",
+                legal_hold=True,
+                legal_hold_reason=" investigation  42 ",
+            )
             preview = store.purge_query_runs_by_retention(workspace_id, "alice", dry_run=True)
             with self.assertRaisesRegex(ValueError, "legal hold"):
                 store.purge_query_runs_by_retention(workspace_id, "alice")
@@ -1006,6 +1011,8 @@ class EnterpriseStoreTest(unittest.TestCase):
 
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.set_query_retention_policy(workspace_id, "bob", retention_days=7)
+            with self.assertRaisesRegex(ValueError, "requires legal_hold"):
+                store.set_query_retention_policy(other_workspace, "mallory", legal_hold_reason="orphan reason")
             with self.assertRaisesRegex(ValueError, "query retention policy is not set"):
                 store.purge_query_runs_by_retention(other_workspace, "mallory")
 
@@ -1013,10 +1020,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(policy["legal_hold"], False)
             self.assertEqual(hold_policy["retention_days"], 30)
             self.assertEqual(hold_policy["legal_hold"], True)
+            self.assertEqual(hold_policy["legal_hold_reason"], "investigation 42")
             self.assertEqual(preview["matched"], 2)
             self.assertEqual(preview["purged"], 0)
             self.assertEqual(preview["legal_hold"], True)
+            self.assertEqual(preview["legal_hold_reason"], "investigation 42")
             self.assertEqual(release_policy["legal_hold"], False)
+            self.assertIsNone(release_policy["legal_hold_reason"])
             self.assertEqual(purged["matched"], 2)
             self.assertEqual(purged["purged"], 2)
             self.assertEqual([run["id"] for run in remaining_runs], [fresh["run_id"]])
@@ -3021,7 +3031,19 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.create_api_token(workspace_id, "alice", name="secret-token")
             store.query_corpus("dry-run", workspace_id=workspace_id, actor_user_id="alice")
             store.set_query_retention_policy(workspace_id, "alice", retention_days=45)
-            store.set_query_retention_policy(workspace_id, "alice", legal_hold=True)
+            store.set_query_retention_policy(
+                workspace_id,
+                "alice",
+                legal_hold=True,
+                legal_hold_reason="query preservation order",
+            )
+            store.set_audit_retention_policy(workspace_id, "alice", retention_days=90)
+            store.set_audit_retention_policy(
+                workspace_id,
+                "alice",
+                legal_hold=True,
+                legal_hold_reason="audit preservation order",
+            )
             store.set_workspace_provider_config(
                 workspace_id,
                 "alice",
@@ -3083,6 +3105,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )
                 restored_runs = restored_store.list_query_runs(workspace_id, "alice")
                 restored_query_retention = restored_store.get_query_retention_policy(workspace_id, "alice")
+                restored_audit_retention = restored_store.get_audit_retention_policy(workspace_id, "alice")
                 restored_provider = restored_store.get_workspace_provider_config(workspace_id, "alice")
                 restored_audit_events = restored_store.list_audit_events(workspace_id, "alice")
                 restored_integrity = restored_store.verify_audit_integrity(workspace_id, "alice")
@@ -3110,6 +3133,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(restored_runs[0]["actor_user_id"], "alice")
             self.assertEqual(restored_query_retention["retention_days"], 45)
             self.assertEqual(restored_query_retention["legal_hold"], True)
+            self.assertEqual(restored_query_retention["legal_hold_reason"], "query preservation order")
+            self.assertEqual(restored_audit_retention["retention_days"], 90)
+            self.assertEqual(restored_audit_retention["legal_hold"], True)
+            self.assertEqual(restored_audit_retention["legal_hold_reason"], "audit preservation order")
             self.assertEqual(restored_provider["model"], "restore-model")
             self.assertEqual(restored_provider["api_key_env_var"], "PAGEINDEX_RESTORE_PROVIDER_KEY")
             self.assertTrue(any(event.get("integrity_hash") for event in restored_audit_events))
@@ -3993,7 +4020,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             store._commit()
 
             policy = store.set_audit_retention_policy(workspace_id, "alice", retention_days=30)
-            hold_policy = store.set_audit_retention_policy(workspace_id, "alice", legal_hold=True)
+            hold_policy = store.set_audit_retention_policy(
+                workspace_id,
+                "alice",
+                legal_hold=True,
+                legal_hold_reason=" audit freeze  ",
+            )
             read_policy = store.get_audit_retention_policy(workspace_id, "ada")
             preview = store.purge_audit_events_by_retention(workspace_id, "alice", dry_run=True)
             with self.assertRaisesRegex(ValueError, "legal hold"):
@@ -4008,14 +4040,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(policy["retention_days"], 30)
             self.assertEqual(hold_policy["retention_days"], 30)
             self.assertEqual(hold_policy["legal_hold"], True)
+            self.assertEqual(hold_policy["legal_hold_reason"], "audit freeze")
             self.assertEqual(read_policy["retention_days"], 30)
             self.assertEqual(read_policy["legal_hold"], True)
+            self.assertEqual(read_policy["legal_hold_reason"], "audit freeze")
             self.assertEqual(read_policy["updated_by"], "alice")
             self.assertEqual(preview["matched"], 1)
             self.assertEqual(preview["purged"], 0)
             self.assertEqual(preview["legal_hold"], True)
+            self.assertEqual(preview["legal_hold_reason"], "audit freeze")
             self.assertTrue(preview["dry_run"])
             self.assertEqual(release_policy["legal_hold"], False)
+            self.assertIsNone(release_policy["legal_hold_reason"])
             self.assertEqual(purged["matched"], 1)
             self.assertEqual(purged["purged"], 1)
             self.assertFalse(purged["dry_run"])
@@ -4032,6 +4068,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 store.get_audit_retention_policy(workspace_id, "mona")
             with self.assertRaises(PermissionError):
                 store.set_audit_retention_policy(workspace_id, "mona", retention_days=7)
+            with self.assertRaisesRegex(ValueError, "requires legal_hold"):
+                store.set_audit_retention_policy(other_workspace, "alice", legal_hold_reason="orphan reason")
             with self.assertRaisesRegex(ValueError, "policy is not set"):
                 store.purge_audit_events_by_retention(workspace_id, "alice")
 
@@ -4271,7 +4309,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             hold_policy = json.loads(
                 subprocess.run(
-                    [*base, "audit-retention", "ws_cli", "alice", "--legal-hold"],
+                    [
+                        *base,
+                        "audit-retention",
+                        "ws_cli",
+                        "alice",
+                        "--legal-hold",
+                        "--legal-hold-reason",
+                        "cli audit hold",
+                    ],
                     cwd=repo_root,
                     env=env,
                     capture_output=True,
@@ -4330,6 +4376,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+            invalid_reason = subprocess.run(
+                [*base, "audit-retention", "ws_cli", "alice", "--clear-legal-hold", "--legal-hold-reason", "orphan"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
             cleared = json.loads(
                 subprocess.run(
                     [*base, "audit-retention", "ws_cli", "alice", "--clear"],
@@ -4349,13 +4402,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(policy["retention_days"], 30)
             self.assertEqual(read_policy["retention_days"], 30)
             self.assertEqual(hold_policy["legal_hold"], True)
+            self.assertEqual(hold_policy["legal_hold_reason"], "cli audit hold")
             self.assertEqual(preview["matched"], 1)
             self.assertEqual(preview["purged"], 0)
             self.assertEqual(preview["legal_hold"], True)
+            self.assertEqual(preview["legal_hold_reason"], "cli audit hold")
             self.assertNotEqual(blocked_purge.returncode, 0)
             self.assertIn("legal hold", blocked_purge.stderr)
             self.assertNotIn("Traceback", blocked_purge.stderr)
             self.assertEqual(release_policy["legal_hold"], False)
+            self.assertIsNone(release_policy["legal_hold_reason"])
             self.assertEqual(purged["purged"], 1)
             self.assertNotIn(old, remaining_ids)
             self.assertIsNone(cleared["retention_days"])
@@ -4365,6 +4421,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotEqual(invalid.returncode, 0)
             self.assertIn("choose --retention-days or --clear", invalid.stderr)
             self.assertNotIn("Traceback", invalid.stderr)
+            self.assertNotEqual(invalid_reason.returncode, 0)
+            self.assertIn("choose --clear-legal-hold or --legal-hold-reason", invalid_reason.stderr)
+            self.assertNotIn("Traceback", invalid_reason.stderr)
 
     def test_query_retention_cli_sets_previews_and_purges_without_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4435,7 +4494,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             hold_policy = json.loads(
                 subprocess.run(
-                    [*base, "query-retention", "ws_cli", "alice", "--legal-hold"],
+                    [
+                        *base,
+                        "query-retention",
+                        "ws_cli",
+                        "alice",
+                        "--legal-hold",
+                        "--legal-hold-reason",
+                        "cli query hold",
+                    ],
                     cwd=repo_root,
                     env=env,
                     capture_output=True,
@@ -4494,6 +4561,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+            invalid_reason = subprocess.run(
+                [*base, "query-retention", "ws_cli", "alice", "--clear-legal-hold", "--legal-hold-reason", "orphan"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
             cleared = json.loads(
                 subprocess.run(
                     [*base, "query-retention", "ws_cli", "alice", "--clear"],
@@ -4514,13 +4588,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(policy["retention_days"], 30)
             self.assertEqual(read_policy["retention_days"], 30)
             self.assertEqual(hold_policy["legal_hold"], True)
+            self.assertEqual(hold_policy["legal_hold_reason"], "cli query hold")
             self.assertEqual(preview["matched"], 1)
             self.assertEqual(preview["purged"], 0)
             self.assertEqual(preview["legal_hold"], True)
+            self.assertEqual(preview["legal_hold_reason"], "cli query hold")
             self.assertNotEqual(blocked_purge.returncode, 0)
             self.assertIn("legal hold", blocked_purge.stderr)
             self.assertNotIn("Traceback", blocked_purge.stderr)
             self.assertEqual(release_policy["legal_hold"], False)
+            self.assertIsNone(release_policy["legal_hold_reason"])
             self.assertEqual(purged["purged"], 1)
             self.assertEqual([run["id"] for run in remaining_runs], [fresh["run_id"]])
             self.assertIsNone(old_trace)
@@ -4531,6 +4608,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotEqual(invalid.returncode, 0)
             self.assertIn("choose --retention-days or --clear", invalid.stderr)
             self.assertNotIn("Traceback", invalid.stderr)
+            self.assertNotEqual(invalid_reason.returncode, 0)
+            self.assertIn("choose --clear-legal-hold or --legal-hold-reason", invalid_reason.stderr)
+            self.assertNotIn("Traceback", invalid_reason.stderr)
 
     def test_query_export_cli_returns_jsonl_and_csv_without_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8426,7 +8506,17 @@ class EnterpriseStoreTest(unittest.TestCase):
                 member_blocked = _get_error(f"{base}/audit-retention", headers=member_headers)
                 policy = _post_json(f"{base}/audit-retention", {"retention_days": 30}, headers=full_headers)
                 read_policy = _get_json(f"{base}/audit-retention", headers=audit_headers)
-                hold_policy = _post_json(f"{base}/audit-retention", {"legal_hold": True}, headers=full_headers)
+                orphan_reason = _post_json(
+                    f"{base}/audit-retention",
+                    {"legal_hold_reason": "orphan"},
+                    headers=full_headers,
+                    status=400,
+                )
+                hold_policy = _post_json(
+                    f"{base}/audit-retention",
+                    {"legal_hold": True, "legal_hold_reason": "http audit hold"},
+                    headers=full_headers,
+                )
                 preview = _post_json(
                     f"{base}/audit-retention/purge",
                     {"dry_run": True},
@@ -8454,13 +8544,17 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(member_blocked["error"], "workspace role denied")
                 self.assertEqual(policy["retention_days"], 30)
                 self.assertEqual(read_policy["retention_days"], 30)
+                self.assertIn("requires legal_hold", orphan_reason["error"])
                 self.assertEqual(hold_policy["legal_hold"], True)
+                self.assertEqual(hold_policy["legal_hold_reason"], "http audit hold")
                 self.assertEqual(preview["matched"], 1)
                 self.assertEqual(preview["purged"], 0)
                 self.assertEqual(preview["legal_hold"], True)
+                self.assertEqual(preview["legal_hold_reason"], "http audit hold")
                 self.assertIn("legal hold", blocked_by_hold["error"])
                 self.assertEqual(audit_purge_blocked["error"], "api token scope denied")
                 self.assertEqual(released_policy["legal_hold"], False)
+                self.assertIsNone(released_policy["legal_hold_reason"])
                 self.assertEqual(purged["purged"], 1)
                 self.assertIsNone(cleared["retention_days"])
             finally:
@@ -8523,7 +8617,17 @@ class EnterpriseStoreTest(unittest.TestCase):
                 member_blocked = _get_error(f"{base}/query-retention", headers=member_headers)
                 policy = _post_json(f"{base}/query-retention", {"retention_days": 30}, headers=full_headers)
                 read_policy = _get_json(f"{base}/query-retention", headers=audit_headers)
-                hold_policy = _post_json(f"{base}/query-retention", {"legal_hold": True}, headers=full_headers)
+                orphan_reason = _post_json(
+                    f"{base}/query-retention",
+                    {"legal_hold_reason": "orphan"},
+                    headers=full_headers,
+                    status=400,
+                )
+                hold_policy = _post_json(
+                    f"{base}/query-retention",
+                    {"legal_hold": True, "legal_hold_reason": "http query hold"},
+                    headers=full_headers,
+                )
                 preview = _post_json(
                     f"{base}/query-retention/purge",
                     {"dry_run": True},
@@ -8551,13 +8655,17 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(member_blocked["error"], "workspace role denied")
                 self.assertEqual(policy["retention_days"], 30)
                 self.assertEqual(read_policy["retention_days"], 30)
+                self.assertIn("requires legal_hold", orphan_reason["error"])
                 self.assertEqual(hold_policy["legal_hold"], True)
+                self.assertEqual(hold_policy["legal_hold_reason"], "http query hold")
                 self.assertEqual(preview["matched"], 1)
                 self.assertEqual(preview["purged"], 0)
                 self.assertEqual(preview["legal_hold"], True)
+                self.assertEqual(preview["legal_hold_reason"], "http query hold")
                 self.assertIn("legal hold", blocked_by_hold["error"])
                 self.assertEqual(audit_purge_blocked["error"], "api token scope denied")
                 self.assertEqual(released_policy["legal_hold"], False)
+                self.assertIsNone(released_policy["legal_hold_reason"])
                 self.assertEqual(purged["purged"], 1)
                 self.assertIsNone(cleared["retention_days"])
             finally:
@@ -8788,6 +8896,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("/audit-retention", body)
                     self.assertIn("/audit-retention/purge", body)
                     self.assertIn("auditRetentionDaysInput", body)
+                    self.assertIn("auditLegalHoldReasonInput", body)
                     self.assertIn("auditRetentionSummary", body)
                     self.assertIn("enableAuditLegalHoldButton", body)
                     self.assertIn("clearAuditLegalHoldButton", body)
@@ -8800,6 +8909,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("/query-retention", body)
                     self.assertIn("/query-retention/purge", body)
                     self.assertIn("queryRetentionDaysInput", body)
+                    self.assertIn("queryLegalHoldReasonInput", body)
                     self.assertIn("queryRetentionSummary", body)
                     self.assertIn("enableQueryLegalHoldButton", body)
                     self.assertIn("clearQueryLegalHoldButton", body)

@@ -29,6 +29,7 @@ DOCUMENT_ACCESS_MODES = {"workspace", "restricted"}
 DOCUMENT_ACCESS_GRANT_ROLES = {"read", "write"}
 API_TOKEN_SCOPES = ("read", "write", "audit")
 MAX_CONVERSATION_MESSAGE_CHARS = 4000
+MAX_LEGAL_HOLD_REASON_CHARS = 500
 CHAT_TRACE_QUERY = "[conversation message redacted]"
 WORKSPACE_EXPORT_FORMAT = "pageindex.workspace-export.v1"
 WORKSPACE_EXPORT_TABLES = (
@@ -155,6 +156,19 @@ def _normalize_policy_days(days: int | None, name: str) -> int | None:
     if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return days
+
+
+def _normalize_legal_hold_reason(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    if not isinstance(reason, str):
+        raise ValueError("legal_hold_reason must be a string")
+    normalized = " ".join(reason.split())
+    if not normalized:
+        return None
+    if len(normalized) > MAX_LEGAL_HOLD_REASON_CHARS:
+        raise ValueError(f"legal_hold_reason must be {MAX_LEGAL_HOLD_REASON_CHARS} characters or fewer")
+    return normalized
 
 
 def _normalize_provider_timeout(timeout_seconds: float | None) -> float | None:
@@ -714,6 +728,7 @@ class EnterpriseStore:
               workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
               retention_days INTEGER,
               legal_hold INTEGER NOT NULL DEFAULT 0,
+              legal_hold_reason TEXT,
               updated_at TEXT NOT NULL,
               updated_by TEXT NOT NULL
             );
@@ -722,6 +737,7 @@ class EnterpriseStore:
               workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
               retention_days INTEGER,
               legal_hold INTEGER NOT NULL DEFAULT 0,
+              legal_hold_reason TEXT,
               updated_at TEXT NOT NULL,
               updated_by TEXT NOT NULL
             );
@@ -961,9 +977,11 @@ class EnterpriseStore:
             },
             "audit_retention_policies": {
                 "legal_hold": "INTEGER NOT NULL DEFAULT 0",
+                "legal_hold_reason": "TEXT",
             },
             "query_retention_policies": {
                 "legal_hold": "INTEGER NOT NULL DEFAULT 0",
+                "legal_hold_reason": "TEXT",
             },
             "workspace_provider_configs": {
                 "provider": "TEXT",
@@ -2872,7 +2890,7 @@ class EnterpriseStore:
         self._require_workspace(workspace_id)
         row = self._one(
             """
-            SELECT workspace_id, retention_days, legal_hold, updated_at, updated_by
+            SELECT workspace_id, retention_days, legal_hold, legal_hold_reason, updated_at, updated_by
             FROM query_retention_policies
             WHERE workspace_id = ?
             """,
@@ -2883,6 +2901,7 @@ class EnterpriseStore:
                 "workspace_id": workspace_id,
                 "retention_days": None,
                 "legal_hold": False,
+                "legal_hold_reason": None,
                 "updated_at": None,
                 "updated_by": None,
             }
@@ -2901,10 +2920,11 @@ class EnterpriseStore:
         *,
         retention_days: int | None | object = _UNSET,
         legal_hold: bool | object = _UNSET,
+        legal_hold_reason: str | None | object = _UNSET,
     ) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
-        if retention_days is _UNSET and legal_hold is _UNSET:
-            raise ValueError("choose retention_days or legal_hold")
+        if retention_days is _UNSET and legal_hold is _UNSET and legal_hold_reason is _UNSET:
+            raise ValueError("choose retention_days, legal_hold, or legal_hold_reason")
         current = self._query_retention_policy(workspace_id)
         next_retention_days = (
             current["retention_days"]
@@ -2917,21 +2937,37 @@ class EnterpriseStore:
             if not isinstance(legal_hold, bool):
                 raise ValueError("legal_hold must be a boolean")
             next_legal_hold = legal_hold
+        if legal_hold_reason is _UNSET:
+            next_legal_hold_reason = current["legal_hold_reason"] if next_legal_hold else None
+        else:
+            next_legal_hold_reason = _normalize_legal_hold_reason(legal_hold_reason)
+        if next_legal_hold_reason and not next_legal_hold:
+            raise ValueError("legal_hold_reason requires legal_hold")
+        if not next_legal_hold:
+            next_legal_hold_reason = None
         updated_at = _now()
         with self._atomic():
             self.conn.execute(
                 """
                 INSERT INTO query_retention_policies (
-                  workspace_id, retention_days, legal_hold, updated_at, updated_by
+                  workspace_id, retention_days, legal_hold, legal_hold_reason, updated_at, updated_by
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id) DO UPDATE SET
                   retention_days = excluded.retention_days,
                   legal_hold = excluded.legal_hold,
+                  legal_hold_reason = excluded.legal_hold_reason,
                   updated_at = excluded.updated_at,
                   updated_by = excluded.updated_by
                 """,
-                (workspace_id, next_retention_days, int(next_legal_hold), updated_at, actor_user_id.strip()),
+                (
+                    workspace_id,
+                    next_retention_days,
+                    int(next_legal_hold),
+                    next_legal_hold_reason,
+                    updated_at,
+                    actor_user_id.strip(),
+                ),
             )
             self._insert_audit_event(
                 workspace_id,
@@ -2939,7 +2975,11 @@ class EnterpriseStore:
                 "query.retention_policy_update",
                 target_type="query_retention_policy",
                 target_id=workspace_id,
-                details={"retention_days": next_retention_days, "legal_hold": next_legal_hold},
+                details={
+                    "retention_days": next_retention_days,
+                    "legal_hold": next_legal_hold,
+                    "legal_hold_reason": next_legal_hold_reason,
+                },
             )
         return self._query_retention_policy(workspace_id)
 
@@ -2969,6 +3009,7 @@ class EnterpriseStore:
                 "purged": 0,
                 "dry_run": True,
                 "legal_hold": bool(policy["legal_hold"]),
+                "legal_hold_reason": policy["legal_hold_reason"],
             }
         if policy["legal_hold"]:
             raise ValueError("query retention legal hold is enabled")
@@ -3001,13 +3042,14 @@ class EnterpriseStore:
             "purged": purged,
             "dry_run": False,
             "legal_hold": False,
+            "legal_hold_reason": None,
         }
 
     def _audit_retention_policy(self, workspace_id: str) -> dict[str, Any]:
         self._require_workspace(workspace_id)
         row = self._one(
             """
-            SELECT workspace_id, retention_days, legal_hold, updated_at, updated_by
+            SELECT workspace_id, retention_days, legal_hold, legal_hold_reason, updated_at, updated_by
             FROM audit_retention_policies
             WHERE workspace_id = ?
             """,
@@ -3018,6 +3060,7 @@ class EnterpriseStore:
                 "workspace_id": workspace_id,
                 "retention_days": None,
                 "legal_hold": False,
+                "legal_hold_reason": None,
                 "updated_at": None,
                 "updated_by": None,
             }
@@ -3036,10 +3079,11 @@ class EnterpriseStore:
         *,
         retention_days: int | None | object = _UNSET,
         legal_hold: bool | object = _UNSET,
+        legal_hold_reason: str | None | object = _UNSET,
     ) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
-        if retention_days is _UNSET and legal_hold is _UNSET:
-            raise ValueError("choose retention_days or legal_hold")
+        if retention_days is _UNSET and legal_hold is _UNSET and legal_hold_reason is _UNSET:
+            raise ValueError("choose retention_days, legal_hold, or legal_hold_reason")
         current = self._audit_retention_policy(workspace_id)
         next_retention_days = (
             current["retention_days"]
@@ -3052,21 +3096,37 @@ class EnterpriseStore:
             if not isinstance(legal_hold, bool):
                 raise ValueError("legal_hold must be a boolean")
             next_legal_hold = legal_hold
+        if legal_hold_reason is _UNSET:
+            next_legal_hold_reason = current["legal_hold_reason"] if next_legal_hold else None
+        else:
+            next_legal_hold_reason = _normalize_legal_hold_reason(legal_hold_reason)
+        if next_legal_hold_reason and not next_legal_hold:
+            raise ValueError("legal_hold_reason requires legal_hold")
+        if not next_legal_hold:
+            next_legal_hold_reason = None
         updated_at = _now()
         with self._atomic():
             self.conn.execute(
                 """
                 INSERT INTO audit_retention_policies (
-                  workspace_id, retention_days, legal_hold, updated_at, updated_by
+                  workspace_id, retention_days, legal_hold, legal_hold_reason, updated_at, updated_by
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id) DO UPDATE SET
                   retention_days = excluded.retention_days,
                   legal_hold = excluded.legal_hold,
+                  legal_hold_reason = excluded.legal_hold_reason,
                   updated_at = excluded.updated_at,
                   updated_by = excluded.updated_by
                 """,
-                (workspace_id, next_retention_days, int(next_legal_hold), updated_at, actor_user_id.strip()),
+                (
+                    workspace_id,
+                    next_retention_days,
+                    int(next_legal_hold),
+                    next_legal_hold_reason,
+                    updated_at,
+                    actor_user_id.strip(),
+                ),
             )
             self._insert_audit_event(
                 workspace_id,
@@ -3074,7 +3134,11 @@ class EnterpriseStore:
                 "audit.retention_policy_update",
                 target_type="audit_retention_policy",
                 target_id=workspace_id,
-                details={"retention_days": next_retention_days, "legal_hold": next_legal_hold},
+                details={
+                    "retention_days": next_retention_days,
+                    "legal_hold": next_legal_hold,
+                    "legal_hold_reason": next_legal_hold_reason,
+                },
             )
         return self._audit_retention_policy(workspace_id)
 
@@ -3104,6 +3168,7 @@ class EnterpriseStore:
                 "purged": 0,
                 "dry_run": True,
                 "legal_hold": bool(policy["legal_hold"]),
+                "legal_hold_reason": policy["legal_hold_reason"],
             }
         if policy["legal_hold"]:
             raise ValueError("audit retention legal hold is enabled")
@@ -3136,6 +3201,7 @@ class EnterpriseStore:
             "purged": purged,
             "dry_run": False,
             "legal_hold": False,
+            "legal_hold_reason": None,
         }
         return result
 

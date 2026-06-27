@@ -554,6 +554,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <button id="enableAuditLegalHoldButton" class="secondary" type="button">Hold</button>
                 <button id="clearAuditLegalHoldButton" class="secondary" type="button">Release</button>
               </div>
+              <input id="auditLegalHoldReasonInput" value="" placeholder="legal hold reason" aria-label="Audit legal hold reason">
               <button id="clearAuditRetentionButton" class="secondary" type="button">Clear retention</button>
               <div id="auditRetentionSummary" class="muted">Retention not loaded.</div>
               <div id="auditIntegritySummary" class="muted">Integrity not checked.</div>
@@ -671,6 +672,7 @@ DASHBOARD_HTML = """<!doctype html>
               <button id="enableQueryLegalHoldButton" class="secondary" type="button">Hold</button>
               <button id="clearQueryLegalHoldButton" class="secondary" type="button">Release</button>
             </div>
+            <input id="queryLegalHoldReasonInput" value="" placeholder="legal hold reason" aria-label="Query legal hold reason">
             <div id="queryRetentionSummary" class="muted">Retention not loaded.</div>
             <div id="queryRunList" class="query-run-list muted">No query runs loaded.</div>
             <textarea id="queryRunExportText" readonly placeholder="query run export output" aria-label="Query run export output"></textarea>
@@ -716,6 +718,7 @@ DASHBOARD_HTML = """<!doctype html>
     const auditFormatInput = document.getElementById("auditFormatInput");
     const auditExportText = document.getElementById("auditExportText");
     const auditRetentionDaysInput = document.getElementById("auditRetentionDaysInput");
+    const auditLegalHoldReasonInput = document.getElementById("auditLegalHoldReasonInput");
     const auditRetentionSummary = document.getElementById("auditRetentionSummary");
     const auditIntegritySummary = document.getElementById("auditIntegritySummary");
     const auditIntegrityReportText = document.getElementById("auditIntegrityReportText");
@@ -764,6 +767,7 @@ DASHBOARD_HTML = """<!doctype html>
     const queryRunExportFormatInput = document.getElementById("queryRunExportFormatInput");
     const queryRunExportText = document.getElementById("queryRunExportText");
     const queryRetentionDaysInput = document.getElementById("queryRetentionDaysInput");
+    const queryLegalHoldReasonInput = document.getElementById("queryLegalHoldReasonInput");
     const queryRetentionSummary = document.getElementById("queryRetentionSummary");
     let activeConversationId = "";
     let activeFolderId = "";
@@ -1139,15 +1143,17 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderQueryRetention(policy) {
       const holdText = policy && policy.legal_hold ? "legal hold on" : "legal hold off";
+      const holdReason = policy && policy.legal_hold_reason ? ` | reason ${policy.legal_hold_reason}` : "";
+      queryLegalHoldReasonInput.value = policy && policy.legal_hold_reason ? policy.legal_hold_reason : "";
       if (!policy || policy.retention_days == null) {
         queryRetentionDaysInput.value = "";
         queryRetentionSummary.className = policy && policy.legal_hold ? "status warn" : "muted";
-        queryRetentionSummary.textContent = `Retention not set. | ${holdText}`;
+        queryRetentionSummary.textContent = `Retention not set. | ${holdText}${holdReason}`;
         return;
       }
       queryRetentionDaysInput.value = String(policy.retention_days);
       queryRetentionSummary.className = policy.legal_hold ? "status warn" : "muted";
-      queryRetentionSummary.textContent = `${policy.retention_days} days | ${holdText} | updated ${policy.updated_at || "unknown"}`;
+      queryRetentionSummary.textContent = `${policy.retention_days} days | ${holdText}${holdReason} | updated ${policy.updated_at || "unknown"}`;
     }
 
     function renderQueryPurgeResult(result) {
@@ -1354,15 +1360,17 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderAuditRetention(policy) {
       const holdText = policy && policy.legal_hold ? "legal hold on" : "legal hold off";
+      const holdReason = policy && policy.legal_hold_reason ? ` | reason ${policy.legal_hold_reason}` : "";
+      auditLegalHoldReasonInput.value = policy && policy.legal_hold_reason ? policy.legal_hold_reason : "";
       if (!policy || policy.retention_days == null) {
         auditRetentionDaysInput.value = "";
         auditRetentionSummary.className = policy && policy.legal_hold ? "status warn" : "muted";
-        auditRetentionSummary.textContent = `Retention not set. | ${holdText}`;
+        auditRetentionSummary.textContent = `Retention not set. | ${holdText}${holdReason}`;
         return;
       }
       auditRetentionDaysInput.value = String(policy.retention_days);
       auditRetentionSummary.className = policy.legal_hold ? "status warn" : "muted";
-      auditRetentionSummary.textContent = `${policy.retention_days} days | ${holdText} | updated ${policy.updated_at || "unknown"}`;
+      auditRetentionSummary.textContent = `${policy.retention_days} days | ${holdText}${holdReason} | updated ${policy.updated_at || "unknown"}`;
     }
 
     function renderAuditPurgeResult(result) {
@@ -2444,9 +2452,11 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function setAuditLegalHold(enabled) {
       setStatus(enabled ? "Enabling legal hold..." : "Releasing legal hold...");
+      const reason = auditLegalHoldReasonInput.value.trim();
+      const body = enabled && reason ? { legal_hold: true, legal_hold_reason: reason } : { legal_hold: enabled };
       const policy = await api("/audit-retention", {
         method: "POST",
-        body: JSON.stringify({ legal_hold: enabled })
+        body: JSON.stringify(body)
       });
       renderAuditRetention(policy);
       setStatus(enabled ? "Legal hold enabled." : "Legal hold released.", "ok");
@@ -2798,9 +2808,11 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function setQueryLegalHold(enabled) {
       setStatus(enabled ? "Enabling query legal hold..." : "Releasing query legal hold...");
+      const reason = queryLegalHoldReasonInput.value.trim();
+      const body = enabled && reason ? { legal_hold: true, legal_hold_reason: reason } : { legal_hold: enabled };
       const policy = await api("/query-retention", {
         method: "POST",
-        body: JSON.stringify({ legal_hold: enabled })
+        body: JSON.stringify(body)
       });
       renderQueryRetention(policy);
       setStatus(enabled ? "Query legal hold enabled." : "Query legal hold released.", "ok");

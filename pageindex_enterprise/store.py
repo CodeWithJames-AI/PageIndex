@@ -135,8 +135,14 @@ WORKSPACE_IMPORT_DB_TABLES = {
     "workspace_quota_policy": "workspace_quota_policies",
     "provider_config": "workspace_provider_configs",
 }
-WORKSPACE_EXPORT_OMITTED_TABLES = ("api_tokens",)
-WORKSPACE_EXPORT_OMITTED_POLICIES = ("api_tokens", "document filesystem paths")
+WORKSPACE_EXPORT_OMITTED_TABLES = (
+    "api_tokens",
+    "document_share_links",
+    "conversation_share_links",
+    "query_source_set_share_links",
+)
+WORKSPACE_EXPORT_REQUIRED_OMITTED_POLICIES = ("api_tokens", "document filesystem paths")
+WORKSPACE_EXPORT_OMITTED_POLICIES = (*WORKSPACE_EXPORT_REQUIRED_OMITTED_POLICIES, "public share link secrets")
 _UNSET = object()
 _AUDIT_SINK_SECRET_VALUE = re.compile(r"(pit_[A-Za-z0-9_-]+|Bearer\s+\S+|sk-[A-Za-z0-9_-]+)", re.IGNORECASE)
 _EMAIL_ADDRESS = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
@@ -628,7 +634,7 @@ def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
             omitted_values: set[str] = set()
         else:
             omitted_values = set(omitted)
-        for policy in WORKSPACE_EXPORT_OMITTED_POLICIES:
+        for policy in WORKSPACE_EXPORT_REQUIRED_OMITTED_POLICIES:
             if policy not in omitted_values:
                 errors.append(f"manifest omitted must include {policy!r}")
 
@@ -774,7 +780,16 @@ def _scan_workspace_import_entry(archive: zipfile.ZipFile, name: str, errors: li
         text = archive.read(name).decode("utf-8")
     except UnicodeDecodeError:
         return
-    forbidden_markers = ("pit_", "token_hash", "source_path")
+    forbidden_markers = (
+        "pit_",
+        "pis_",
+        "pcs_",
+        "pss_",
+        "token_hash",
+        "password_hash",
+        "password_salt",
+        "source_path",
+    )
     for marker in forbidden_markers:
         if marker in text:
             errors.append(f"{name} contains forbidden export marker: {marker}")
@@ -3588,7 +3603,7 @@ class EnterpriseStore:
             "exported_at": _now(),
             "artifact": output.name,
             "tables": {name.removesuffix(".jsonl"): len(rows) for name, rows in exports.items()},
-            "omitted": ["api_tokens", "document filesystem paths"],
+            "omitted": list(WORKSPACE_EXPORT_OMITTED_POLICIES),
         }
         export_payloads = {name: _jsonl(rows) for name, rows in exports.items()}
         manifest["checksums"] = {

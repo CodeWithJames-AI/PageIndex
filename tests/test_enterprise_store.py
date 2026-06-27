@@ -5189,6 +5189,25 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.query_corpus("backup", workspace_id=workspace_id, actor_user_id="alice")
             conversation = store.create_conversation(workspace_id, "alice", title="Export chat")
             store.chat_message(conversation["id"], "alice", "backup question")
+            document_share = store.create_document_share_link(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                password="document-export-secret",
+            )
+            conversation_share = store.create_conversation_share_link(
+                conversation["id"],
+                "alice",
+                expected_workspace_id=workspace_id,
+                password="conversation-export-secret",
+            )
+            source_set = store.create_query_source_set(workspace_id, "alice", "Export source set", [doc_id], shared=True)
+            source_set_share = store.create_query_source_set_share_link(
+                workspace_id,
+                "alice",
+                source_set["id"],
+                password="source-set-export-secret",
+            )
             archived_conversation = store.archive_conversation(conversation["id"], "alice")
             store.set_workspace_quota_policy(workspace_id, "alice", max_documents=10, max_pages=20, max_members=5)
             store.set_workspace_provider_config(
@@ -5245,10 +5264,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(cli_path.exists())
             self.assertEqual(manifest["format"], "pageindex.workspace-export.v1")
             self.assertEqual(manifest_from_zip["workspace_id"], workspace_id)
+            self.assertIn("public share link secrets", manifest_from_zip["omitted"])
             self.assertEqual(manifest_from_zip["checksums"]["documents.jsonl"], hashlib.sha256(documents_payload).hexdigest())
             self.assertEqual(cli_manifest["workspace_id"], workspace_id)
             self.assertIn("document_pages.jsonl", names)
             self.assertIn("conversation_messages.jsonl", names)
+            self.assertNotIn("document_share_links.jsonl", names)
+            self.assertNotIn("conversation_share_links.jsonl", names)
+            self.assertNotIn("query_source_set_share_links.jsonl", names)
             self.assertEqual(documents[0]["id"], doc_id)
             self.assertEqual(pages[0]["content"], "Workspace export content for backup.")
             self.assertEqual(conversations[0]["title"], "Export chat")
@@ -5264,8 +5287,19 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("workspace role denied", member_denied.stderr)
             self.assertNotIn("Traceback", member_denied.stderr)
             self.assertNotIn(created_token["token"], serialized_bundle)
+            self.assertNotIn(document_share["token"], serialized_bundle)
+            self.assertNotIn(conversation_share["token"], serialized_bundle)
+            self.assertNotIn(source_set_share["token"], serialized_bundle)
             self.assertNotIn("pit_", serialized_bundle)
+            self.assertNotIn("pis_", serialized_bundle)
+            self.assertNotIn("pcs_", serialized_bundle)
+            self.assertNotIn("pss_", serialized_bundle)
             self.assertNotIn("token_hash", serialized_bundle)
+            self.assertNotIn("password_hash", serialized_bundle)
+            self.assertNotIn("password_salt", serialized_bundle)
+            self.assertNotIn("document-export-secret", serialized_bundle)
+            self.assertNotIn("conversation-export-secret", serialized_bundle)
+            self.assertNotIn("source-set-export-secret", serialized_bundle)
             self.assertNotIn("source_path", serialized_bundle)
             self.assertNotIn(str(source), serialized_bundle)
 
@@ -5521,6 +5555,17 @@ class EnterpriseStoreTest(unittest.TestCase):
                     },
                 )
             )
+            leaked_source_set_share = store.validate_workspace_import_bundle(
+                rewrite_zip(
+                    "leaked-source-set-share.zip",
+                    extra={
+                        "query_source_set_share_links.jsonl": (
+                            b'{"id":"qssl_leak","workspace_id":"ws_import_invalid",'
+                            b'"password_hash":"hash","password_salt":"salt"}\n'
+                        )
+                    },
+                )
+            )
             store.close()
 
             self.assertFalse(missing_manifest["ok"])
@@ -5539,6 +5584,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(any("token_hash" in error for error in leaked["errors"]))
             self.assertTrue(any("source_path" in error for error in leaked["errors"]))
             self.assertTrue(any("absolute source filesystem path" in error for error in leaked["errors"]))
+            self.assertFalse(leaked_source_set_share["ok"])
+            self.assertTrue(any("query_source_set_share_links.jsonl" in error for error in leaked_source_set_share["errors"]))
+            self.assertTrue(any("password_hash" in error for error in leaked_source_set_share["errors"]))
+            self.assertTrue(any("password_salt" in error for error in leaked_source_set_share["errors"]))
 
     def test_http_workspace_export_requires_admin_bearer_and_returns_redacted_zip(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -6719,7 +6719,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "api_token.revoke",
                 target_type="api_token",
                 target_id="tok_a",
-                details={"note": "metadata only"},
+                details={
+                    "note": f"metadata {secret}",
+                    "source_set_link": "pss_secret_should_not_export",
+                    "token_hash": "hash_should_not_export",
+                },
             )
             fourth = store.record_audit_event(
                 workspace_id,
@@ -6762,7 +6766,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(json.loads(jsonl_export)["id"], third)
             self.assertEqual([row["action"] for row in csv_rows], ["document.ingest", "api_token.revoke"])
             self.assertEqual(json.loads(csv_rows[0]["details_json"]), {"kind": "txt", "name": "Memo"})
+            self.assertEqual(
+                json.loads(jsonl_export)["details"],
+                {"note": "[redacted]", "source_set_link": "[redacted]"},
+            )
+            self.assertEqual(
+                json.loads(csv_rows[1]["details_json"]),
+                {"note": "[redacted]", "source_set_link": "[redacted]"},
+            )
+            self.assertIsNone(json.loads(jsonl_export)["integrity_hash"])
             self.assertNotIn(secret, serialized)
+            self.assertNotIn("pss_secret_should_not_export", serialized)
+            self.assertNotIn("hash_should_not_export", serialized)
             self.assertNotIn("token_hash", serialized)
             with self.assertRaisesRegex(ValueError, "format"):
                 store.export_audit_events(workspace_id, "alice", format="xml")

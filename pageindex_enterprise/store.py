@@ -551,19 +551,26 @@ def _workspace_audit_export_rows(conn: sqlite3.Connection, workspace_id: str) ->
         (workspace_id,),
     )
     events = []
-    redacted_chain = False
     for row in rows:
         event = dict(row)
         details = json.loads(event.pop("details_json"))
         event["details"] = details
+        events.append(event)
+    return _redacted_audit_export_events(events)
+
+
+def _redacted_audit_export_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    redacted_events = []
+    redacted_chain = False
+    for event in events:
         redacted = _redact_audit_sink_event(event)
         # Redacted payloads cannot carry the source row hash; mark the rest of the exported chain as legacy.
-        if redacted_chain or redacted.get("details") != details:
+        if redacted_chain or redacted.get("details") != event.get("details"):
             redacted_chain = True
             redacted["previous_integrity_hash"] = None
             redacted["integrity_hash"] = None
-        events.append(redacted)
-    return events
+        redacted_events.append(redacted)
+    return redacted_events
 
 
 def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
@@ -3268,7 +3275,7 @@ class EnterpriseStore:
             target_type=target_type,
             target_id=target_id,
         )
-        ordered = list(reversed(events))
+        ordered = _redacted_audit_export_events(list(reversed(events)))
         export_format = format.strip().casefold()
         if export_format == "jsonl":
             return "\n".join(json.dumps(event, sort_keys=True) for event in ordered)

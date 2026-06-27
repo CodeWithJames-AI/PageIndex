@@ -834,6 +834,7 @@ DASHBOARD_HTML = """<!doctype html>
             <button class="secondary" type="button" data-access-doc-id="${escapeHtml(doc.id)}">Access</button>
             <button class="secondary" type="button" data-reindex-doc-id="${escapeHtml(doc.id)}">Reindex</button>
             <button class="secondary" type="button" data-reindex-upload-doc-id="${escapeHtml(doc.id)}">Reindex upload</button>
+            <button class="secondary" type="button" data-delete-doc-id="${escapeHtml(doc.id)}">Delete</button>
           </div>
         </article>
       `).join("");
@@ -851,6 +852,9 @@ DASHBOARD_HTML = """<!doctype html>
       });
       documentList.querySelectorAll("[data-reindex-upload-doc-id]").forEach((button) => {
         button.addEventListener("click", () => reindexDocumentUpload(button.dataset.reindexUploadDocId).catch((error) => setStatus(error.message, "error")));
+      });
+      documentList.querySelectorAll("[data-delete-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => deleteDocument(button.dataset.deleteDocId).catch((error) => setStatus(error.message, "error")));
       });
     }
 
@@ -2633,6 +2637,19 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       setStatus(`Reindexed ${payload.document.id}.`, "ok");
+      await refreshDocuments();
+    }
+
+    async function deleteDocument(docId) {
+      if (!window.confirm("Permanently delete this document?")) {
+        setStatus("Document delete cancelled.", "warn");
+        return;
+      }
+      setStatus("Deleting document...");
+      const payload = await api(`/documents/${encodeURIComponent(docId)}`, {
+        method: "DELETE"
+      });
+      setStatus(payload.deleted ? "Document deleted." : "Document not found.", payload.deleted ? "ok" : "warn");
       await refreshDocuments();
     }
 

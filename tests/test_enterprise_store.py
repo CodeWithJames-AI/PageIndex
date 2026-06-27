@@ -8683,6 +8683,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("data-pages-doc-id", body)
                     self.assertIn("data-reindex-doc-id", body)
                     self.assertIn("data-reindex-upload-doc-id", body)
+                    self.assertIn("data-delete-doc-id", body)
+                    self.assertIn("deleteDocument", body)
                     self.assertIn("/access", body)
                     self.assertIn("documentAccessPanel", body)
                     self.assertIn("loadDocumentAccess", body)

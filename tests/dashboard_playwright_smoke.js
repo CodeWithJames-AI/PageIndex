@@ -688,6 +688,50 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#conversationList", "Browser scoped chat");
     await waitForText(page, "#conversationList", sourceSet.id);
 
+    const setFolderConversationScopeResponse = page.waitForResponse(
+      (response) => {
+        if (!response.url().endsWith(`/conversations/${folderConversation.id}/scope`) || response.request().method() !== "POST") {
+          return false;
+        }
+        try {
+          const payload = JSON.parse(response.request().postData() || "{}");
+          return payload.source_set_id === sourceSet.id
+            && !Object.prototype.hasOwnProperty.call(payload, "folder_id")
+            && !Object.prototype.hasOwnProperty.call(payload, "clear");
+        } catch (_error) {
+          return false;
+        }
+      }
+    );
+    await page.click(`[data-set-conversation-scope-id="${folderConversation.id}"]`);
+    const updatedFolderConversationResponse = await setFolderConversationScopeResponse;
+    const updatedFolderConversation = await updatedFolderConversationResponse.json();
+    assert(updatedFolderConversation.conversation.source_set_id === sourceSet.id, "conversation scope update did not return source set id");
+    await waitForText(page, "#status", "Conversation scope updated.");
+    await waitForText(page, "#conversationList", sourceSet.id);
+
+    const clearFolderConversationScopeResponse = page.waitForResponse(
+      (response) => {
+        if (!response.url().endsWith(`/conversations/${folderConversation.id}/scope`) || response.request().method() !== "POST") {
+          return false;
+        }
+        try {
+          const payload = JSON.parse(response.request().postData() || "{}");
+          return payload.clear === true
+            && !Object.prototype.hasOwnProperty.call(payload, "source_set_id")
+            && !Object.prototype.hasOwnProperty.call(payload, "folder_id");
+        } catch (_error) {
+          return false;
+        }
+      }
+    );
+    await page.click(`[data-clear-conversation-scope-id="${folderConversation.id}"]`);
+    const clearedFolderConversationResponse = await clearFolderConversationScopeResponse;
+    const clearedFolderConversation = await clearedFolderConversationResponse.json();
+    assert(clearedFolderConversation.conversation.source_set_id === null, "conversation clear did not clear source set id");
+    assert(clearedFolderConversation.conversation.folder_id === null, "conversation clear did not clear folder id");
+    await waitForText(page, "#status", "Conversation scope cleared.");
+
     await page.fill("#queryInput", query);
     await page.fill("#hintInput", "");
     const queryResponse = page.waitForResponse(
@@ -771,6 +815,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       virtualNodeExercised: true,
       invitationExercised: true,
       conversationExportExercised: true,
+      conversationScopeUpdateExercised: true,
       tokenExercised: true,
       tokenPolicyExercised: true,
       auditExercised: true,

@@ -1622,6 +1622,8 @@ DASHBOARD_HTML = """<!doctype html>
           </button>
           <div class="doc-actions">
             <button class="secondary" type="button" data-rename-conversation-id="${escapeHtml(conversation.id)}" data-conversation-title="${escapeHtml(conversation.title)}">Rename</button>
+            <button class="secondary" type="button" data-set-conversation-scope-id="${escapeHtml(conversation.id)}">Set scope</button>
+            <button class="secondary" type="button" data-clear-conversation-scope-id="${escapeHtml(conversation.id)}">Clear scope</button>
             <button class="secondary" type="button" data-share-conversation-id="${escapeHtml(conversation.id)}">Share</button>
             <button class="secondary" type="button" data-shares-conversation-id="${escapeHtml(conversation.id)}">Shares</button>
             <button class="secondary" type="button" data-archive-conversation-id="${escapeHtml(conversation.id)}" data-archive-state="${conversation.archived_at ? "restore" : "archive"}">${conversation.archived_at ? "Restore" : "Archive"}</button>
@@ -1634,6 +1636,12 @@ DASHBOARD_HTML = """<!doctype html>
       });
       conversationList.querySelectorAll("[data-rename-conversation-id]").forEach((button) => {
         button.addEventListener("click", () => renameConversation(button.dataset.renameConversationId, button.dataset.conversationTitle).catch((error) => setStatus(error.message, "error")));
+      });
+      conversationList.querySelectorAll("[data-set-conversation-scope-id]").forEach((button) => {
+        button.addEventListener("click", () => updateConversationScope(button.dataset.setConversationScopeId).catch((error) => setStatus(error.message, "error")));
+      });
+      conversationList.querySelectorAll("[data-clear-conversation-scope-id]").forEach((button) => {
+        button.addEventListener("click", () => clearConversationScope(button.dataset.clearConversationScopeId).catch((error) => setStatus(error.message, "error")));
       });
       conversationList.querySelectorAll("[data-share-conversation-id]").forEach((button) => {
         button.addEventListener("click", () => createConversationShareLink(button.dataset.shareConversationId).catch((error) => setStatus(error.message, "error")));
@@ -2768,6 +2776,43 @@ DASHBOARD_HTML = """<!doctype html>
       });
       await refreshConversations();
       setStatus("Conversation renamed.", "ok");
+    }
+
+    async function updateConversationScope(conversationId) {
+      if (!conversationId) {
+        setStatus("Conversation not found.", "warn");
+        return;
+      }
+      const body = {};
+      if (activeQuerySourceSetId) {
+        body.source_set_id = activeQuerySourceSetId;
+      } else if (activeQueryFolderId) {
+        body.folder_id = activeQueryFolderId;
+      } else {
+        setStatus("Activate a saved source set or folder scope first.", "warn");
+        return;
+      }
+      setStatus("Updating conversation scope...");
+      await api(`/conversations/${encodeURIComponent(conversationId)}/scope`, {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      await refreshConversations();
+      setStatus("Conversation scope updated.", "ok");
+    }
+
+    async function clearConversationScope(conversationId) {
+      if (!conversationId) {
+        setStatus("Conversation not found.", "warn");
+        return;
+      }
+      setStatus("Clearing conversation scope...");
+      await api(`/conversations/${encodeURIComponent(conversationId)}/scope`, {
+        method: "POST",
+        body: JSON.stringify({ clear: true })
+      });
+      await refreshConversations();
+      setStatus("Conversation scope cleared.", "ok");
     }
 
     async function archiveConversation(conversationId, restore = false) {

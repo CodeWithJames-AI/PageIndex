@@ -287,6 +287,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            document_download_id = _document_download_path(parsed.path)
+            if document_download_id:
+                self._download_document(document_download_id)
+                return
             document_access_id = _document_access_path(parsed.path)
             if document_access_id:
                 self._get_document_access(document_access_id)
@@ -1040,6 +1044,33 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 self._json({"updated": False})
                 return
             self._json({"updated": True, "document": document, "stored_path": str(stored_path)})
+        finally:
+            store.close()
+
+    def _download_document(self, doc_id: str) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="read")
+            try:
+                download = store.get_managed_upload_document_file(
+                    doc_id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                )
+            except FileNotFoundError:
+                self._json({"error": "document file not found"}, HTTPStatus.NOT_FOUND)
+                return
+            if download is None:
+                self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)
+                return
+            path = download["path"]
+            document = download["document"]
+            filename = _safe_download_filename(str(document.get("name") or path.name), path.name)
+            self._bytes(
+                path.read_bytes(),
+                content_type="application/octet-stream",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
         finally:
             store.close()
 
@@ -2039,6 +2070,13 @@ def _document_reindex_upload_path(path: str) -> str | None:
     return None
 
 
+def _document_download_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "documents" and parts[2] == "download":
+        return unquote(parts[1])
+    return None
+
+
 def _query_run_path(path: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) == 2 and parts[0] == "query-runs":
@@ -2199,6 +2237,15 @@ def _safe_upload_filename(filename: str) -> str:
     name = Path(filename).name
     safe = "".join(char if char.isalnum() or char in ".-_" else "_" for char in name).strip(" ._")
     return safe or "upload.bin"
+
+
+def _safe_download_filename(filename: str, fallback_name: str) -> str:
+    safe = _safe_upload_filename(filename)
+    fallback = _safe_upload_filename(fallback_name)
+    fallback_suffix = Path(fallback).suffix
+    if fallback_suffix and not Path(safe).suffix:
+        safe = f"{safe}{fallback_suffix}"
+    return safe
 
 
 def _safe_path_segment(value: str) -> str:

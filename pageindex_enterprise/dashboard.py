@@ -839,6 +839,7 @@ DASHBOARD_HTML = """<!doctype html>
             <button class="secondary" type="button" data-pages-doc-id="${escapeHtml(doc.id)}">Preview</button>
             <button class="secondary" type="button" data-versions-doc-id="${escapeHtml(doc.id)}">Versions</button>
             <button class="secondary" type="button" data-access-doc-id="${escapeHtml(doc.id)}">Access</button>
+            <button class="secondary" type="button" data-download-doc-id="${escapeHtml(doc.id)}">Download</button>
             <button class="secondary" type="button" data-reindex-doc-id="${escapeHtml(doc.id)}">Reindex</button>
             <button class="secondary" type="button" data-reindex-upload-doc-id="${escapeHtml(doc.id)}">Reindex upload</button>
             <button class="secondary" type="button" data-delete-doc-id="${escapeHtml(doc.id)}">Delete</button>
@@ -853,6 +854,9 @@ DASHBOARD_HTML = """<!doctype html>
       });
       documentList.querySelectorAll("[data-access-doc-id]").forEach((button) => {
         button.addEventListener("click", () => loadDocumentAccess(button.dataset.accessDocId).catch((error) => setStatus(error.message, "error")));
+      });
+      documentList.querySelectorAll("[data-download-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => downloadDocument(button.dataset.downloadDocId).catch((error) => setStatus(error.message, "error")));
       });
       documentList.querySelectorAll("[data-reindex-doc-id]").forEach((button) => {
         button.addEventListener("click", () => reindexDocument(button.dataset.reindexDocId).catch((error) => setStatus(error.message, "error")));
@@ -2373,9 +2377,9 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Audit exported.", "ok");
     }
 
-    function filenameFromDisposition(value) {
+    function filenameFromDisposition(value, fallback = "pageindex-workspace-export.zip") {
       const match = /filename="([^"]+)"/.exec(value || "");
-      return match ? match[1] : "pageindex-workspace-export.zip";
+      return match ? match[1] : fallback;
     }
 
     async function exportWorkspaceBundle() {
@@ -2677,6 +2681,35 @@ DASHBOARD_HTML = """<!doctype html>
       }
       setStatus(`Reindexed ${payload.document.id}.`, "ok");
       await refreshDocuments();
+    }
+
+    async function downloadDocument(docId) {
+      setStatus("Preparing document download...");
+      const response = await fetch(`/documents/${encodeURIComponent(docId)}/download`, {
+        headers: authHeaders()
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        try {
+          const payload = JSON.parse(text);
+          throw new Error(payload.error || response.statusText);
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            throw new Error(response.statusText);
+          }
+          throw error;
+        }
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), "pageindex-document.bin");
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      setStatus(`Document download prepared (${blob.size} bytes).`, "ok");
     }
 
     async function deleteDocument(docId) {

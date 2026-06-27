@@ -8925,9 +8925,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("loadQueryRunTrace", body)
                     self.assertIn("reindexDocument", body)
                     self.assertIn("reindexDocumentUpload", body)
+                    self.assertIn("downloadDocument", body)
                     self.assertIn("loadDocumentPages", body)
                     self.assertIn("pagePreviewList", body)
                     self.assertIn("data-pages-doc-id", body)
+                    self.assertIn("data-download-doc-id", body)
                     self.assertIn("data-reindex-doc-id", body)
                     self.assertIn("data-reindex-upload-doc-id", body)
                     self.assertIn("data-delete-doc-id", body)
@@ -9360,6 +9362,92 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertTrue(result["verification"]["ok"], result["verification"]["errors"])
                 self.assertTrue(_is_relative_to(stored_path.resolve(), (root / "uploads" / workspace_id).resolve()))
                 self.assertNotIn("..", stored_path.name)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    def test_http_document_download_serves_only_managed_uploads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            server_source = tmp_path / "server-visible.txt"
+            server_source.write_text("Server path ingest should not download.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            other_workspace_id = store.create_workspace("Other")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(other_workspace_id, "mallory", "owner")
+            local_doc_id = store.ingest_file(server_source, workspace_id=workspace_id, actor_user_id="alice", name="Server path")
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            read_token = store.create_api_token(workspace_id, "alice", name="read", scopes=["read"])["token"]
+            audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            bob_token = store.create_api_token(workspace_id, "bob", name="bob")["token"]
+            other_token = store.create_api_token(other_workspace_id, "mallory", name="other")["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            try:
+                uploaded = _post_multipart(
+                    f"{base}/upload-file",
+                    {
+                        "file": ("../download.txt", b"Managed download evidence."),
+                        "name": "Download memo",
+                    },
+                    headers=owner_headers,
+                    status=201,
+                )
+                store = EnterpriseStore(root)
+                try:
+                    restricted = store.set_document_access_mode(
+                        uploaded["doc_id"],
+                        workspace_id=workspace_id,
+                        actor_user_id="alice",
+                        access_mode="restricted",
+                    )
+                finally:
+                    store.close()
+                body, content_type, disposition = _get_binary(
+                    f"{base}/documents/{uploaded['doc_id']}/download",
+                    headers={"Authorization": f"Bearer {read_token}"},
+                )
+                bob_hidden = _get_error(
+                    f"{base}/documents/{uploaded['doc_id']}/download",
+                    headers={"Authorization": f"Bearer {bob_token}"},
+                )
+                audit_denied = _get_error(
+                    f"{base}/documents/{uploaded['doc_id']}/download",
+                    headers={"Authorization": f"Bearer {audit_token}"},
+                )
+                foreign_hidden = _get_error(
+                    f"{base}/documents/{uploaded['doc_id']}/download",
+                    headers={"Authorization": f"Bearer {other_token}"},
+                )
+                local_rejected = _get_error(
+                    f"{base}/documents/{local_doc_id}/download",
+                    headers={"Authorization": f"Bearer {read_token}"},
+                )
+                missing = _get_error(
+                    f"{base}/documents/doc_missing/download",
+                    headers={"Authorization": f"Bearer {read_token}"},
+                )
+
+                self.assertEqual(restricted["access_mode"], "restricted")
+                self.assertEqual(body, b"Managed download evidence.")
+                self.assertEqual(content_type, "application/octet-stream")
+                self.assertIn("attachment", disposition)
+                self.assertIn("Download_memo.txt", disposition)
+                self.assertEqual(bob_hidden["status"], 404)
+                self.assertEqual(bob_hidden["error"], "document not found")
+                self.assertEqual(audit_denied["error"], "api token scope denied")
+                self.assertEqual(foreign_hidden["status"], 404)
+                self.assertEqual(local_rejected["status"], 400)
+                self.assertEqual(local_rejected["error"], "document download is available only for managed uploads")
+                self.assertEqual(missing["status"], 404)
             finally:
                 server.shutdown()
                 server.server_close()

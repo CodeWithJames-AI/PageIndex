@@ -627,6 +627,11 @@ def _path_is_relative_to(path: Path, parent: Path) -> bool:
     return True
 
 
+def _safe_storage_segment(value: str) -> str:
+    safe = "".join(char if char.isalnum() or char in ".-_" else "_" for char in value).strip(" ._")
+    return safe or "workspace"
+
+
 class EnterpriseStore:
     """SQLite/filesystem corpus store for the clean-room enterprise layer."""
 
@@ -3934,6 +3939,39 @@ class EnterpriseStore:
                 }
             )
         return {"doc_id": doc_id, "pages": pages, "total_pages": total_pages}
+
+    def get_managed_upload_document_file(
+        self,
+        doc_id: str,
+        *,
+        workspace_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        doc_id = doc_id.strip()
+        if not doc_id:
+            raise ValueError("Document id is required.")
+        document = self.get_document(doc_id)
+        if not document:
+            return None
+        if workspace_id and document["workspace_id"] != workspace_id:
+            return None
+        if not document["workspace_id"]:
+            raise ValueError("document download is available only for managed uploads")
+        if not actor_user_id:
+            raise PermissionError("workspace access denied")
+        self.require_workspace_access(document["workspace_id"], actor_user_id)
+        if not self._can_read_document(document, actor_user_id):
+            return None
+        uploads_root = (self.root / "uploads").resolve()
+        upload_dir = (uploads_root / _safe_storage_segment(document["workspace_id"])).resolve()
+        if not _path_is_relative_to(upload_dir, uploads_root):
+            raise ValueError("workspace upload path is invalid")
+        source_path = Path(str(document["source_path"])).expanduser().resolve()
+        if not _path_is_relative_to(source_path, upload_dir):
+            raise ValueError("document download is available only for managed uploads")
+        if not source_path.is_file():
+            raise FileNotFoundError(source_path)
+        return {"document": document, "path": source_path}
 
     def reindex_document_file(
         self,

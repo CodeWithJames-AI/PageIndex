@@ -558,6 +558,7 @@ def main() -> None:
     deployment_check.add_argument("--check-provider", action="store_true")
     deployment_check.add_argument("--require-provider-api-key", action="store_true")
     deployment_check.add_argument("--require-audit-sink", action="store_true")
+    deployment_check.add_argument("--require-audit-sink-format", choices=["jsonl", "siem-jsonl"])
 
     args = parser.parse_args()
     if args.command == "serve":
@@ -582,6 +583,7 @@ def main() -> None:
                     check_provider=args.check_provider,
                     require_provider_api_key=args.require_provider_api_key,
                     require_audit_sink=args.require_audit_sink,
+                    require_audit_sink_format=args.require_audit_sink_format,
                 ),
                 indent=2,
             )

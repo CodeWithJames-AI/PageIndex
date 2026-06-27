@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .llm import validate_openai_compatible_config
-from .store import EnterpriseStore, WORKSPACE_ADMIN_ROLES, _decode_api_token_scopes, _is_expired
+from .store import AUDIT_SINK_FORMATS, EnterpriseStore, WORKSPACE_ADMIN_ROLES, _decode_api_token_scopes, _is_expired
 
 
 EXPECTED_TABLES = {
@@ -53,8 +53,10 @@ def run_deployment_check(
     check_provider: bool = False,
     require_provider_api_key: bool = False,
     require_audit_sink: bool = False,
+    require_audit_sink_format: str | None = None,
 ) -> dict[str, Any]:
     root_path = Path(root).expanduser().resolve()
+    required_audit_sink_format = _normalize_required_audit_sink_format(require_audit_sink_format)
     root_writable = _root_writable_check(root_path)
     if not root_writable["ok"]:
         return _deployment_report(
@@ -66,6 +68,7 @@ def run_deployment_check(
                 "audit_integrity": _check(False, workspace_count=0, skipped=True),
                 "audit_sink_delivery": _unavailable_audit_sink_delivery_check(
                     require_audit_sink,
+                    required_format=required_audit_sink_format,
                     reason="store was not opened because root is not writable",
                 ),
                 "strict_http": _strict_http_check(require_api_token),
@@ -88,6 +91,7 @@ def run_deployment_check(
                 "audit_integrity": _check(False, workspace_count=0, skipped=True),
                 "audit_sink_delivery": _unavailable_audit_sink_delivery_check(
                     require_audit_sink,
+                    required_format=required_audit_sink_format,
                     reason="store was not opened",
                 ),
                 "strict_http": _strict_http_check(require_api_token),
@@ -104,7 +108,11 @@ def run_deployment_check(
             "schema": _schema_check(store),
             "workspace_owner": _workspace_owner_check(store),
             "audit_integrity": _audit_integrity_check(store),
-            "audit_sink_delivery": _audit_sink_delivery_check(store, require_audit_sink=require_audit_sink),
+            "audit_sink_delivery": _audit_sink_delivery_check(
+                store,
+                require_audit_sink=require_audit_sink,
+                required_format=required_audit_sink_format,
+            ),
             "strict_http": _strict_http_check(require_api_token),
             "active_api_token": _active_api_token_check(store),
             "provider_config": _provider_config_check(
@@ -134,6 +142,19 @@ def _deployment_report(root_path: Path, checks: dict[str, dict[str, Any]]) -> di
 
 def _check(ok: bool, **details: Any) -> dict[str, Any]:
     return {"ok": bool(ok), **details}
+
+
+def _normalize_required_audit_sink_format(format: str | None) -> str | None:
+    if format is None:
+        return None
+    if not isinstance(format, str):
+        raise ValueError("require_audit_sink_format must be a string")
+    normalized = format.strip().casefold()
+    if not normalized:
+        return None
+    if normalized not in AUDIT_SINK_FORMATS:
+        raise ValueError("require_audit_sink_format must be jsonl or siem-jsonl")
+    return normalized
 
 
 def _root_writable_check(root: Path) -> dict[str, Any]:
@@ -204,34 +225,50 @@ def _audit_integrity_check(store: EnterpriseStore) -> dict[str, Any]:
     )
 
 
-def _unavailable_audit_sink_delivery_check(require_audit_sink: bool, *, reason: str) -> dict[str, Any]:
+def _unavailable_audit_sink_delivery_check(
+    require_audit_sink: bool,
+    *,
+    required_format: str | None = None,
+    reason: str,
+) -> dict[str, Any]:
+    required = require_audit_sink or required_format is not None
     return _check(
-        not require_audit_sink,
-        required=require_audit_sink,
+        not required,
+        required=required,
+        required_format=required_format,
         workspace_count=0,
         configured_count=0,
         enabled_count=0,
         healthy_count=0,
         disabled_count=0,
         unconfigured_count=0,
-        skipped=not require_audit_sink,
+        matching_format_count=0,
+        skipped=not required,
         reason=reason,
     )
 
 
-def _audit_sink_delivery_check(store: EnterpriseStore, *, require_audit_sink: bool = False) -> dict[str, Any]:
+def _audit_sink_delivery_check(
+    store: EnterpriseStore,
+    *,
+    require_audit_sink: bool = False,
+    required_format: str | None = None,
+) -> dict[str, Any]:
+    required = require_audit_sink or required_format is not None
     workspace_ids = [row["id"] for row in store.conn.execute("SELECT id FROM workspaces ORDER BY id")]
     if not workspace_ids:
         return _check(
-            not require_audit_sink,
-            required=require_audit_sink,
+            not required,
+            required=required,
+            required_format=required_format,
             workspace_count=0,
             configured_count=0,
             enabled_count=0,
             healthy_count=0,
             disabled_count=0,
             unconfigured_count=0,
-            skipped=not require_audit_sink,
+            matching_format_count=0,
+            skipped=not required,
             reason="no workspaces",
         )
     admin_by_workspace = _admin_actor_by_workspace(store)
@@ -241,6 +278,7 @@ def _audit_sink_delivery_check(store: EnterpriseStore, *, require_audit_sink: bo
     enabled_count = 0
     healthy_count = 0
     disabled_count = 0
+    matching_format_count = 0
     format_counts = {"jsonl": 0, "siem-jsonl": 0}
     unconfigured: list[str] = []
     missing_operators: list[str] = []
@@ -257,15 +295,19 @@ def _audit_sink_delivery_check(store: EnterpriseStore, *, require_audit_sink: bo
         sink_format = str(config.get("format") or "jsonl")
         if sink_format in format_counts:
             format_counts[sink_format] += 1
+        format_ok = required_format is None or sink_format == required_format
+        if format_ok:
+            matching_format_count += 1
         if not config.get("enabled"):
             disabled_count += 1
-            if require_audit_sink:
+            if required:
                 failures.append(
                     {
                         "workspace_id": workspace_id,
                         "reason": "disabled",
                         "relative_path": config.get("relative_path"),
                         "format": sink_format,
+                        "expected_format": required_format,
                     }
                 )
             reports.append(
@@ -274,6 +316,7 @@ def _audit_sink_delivery_check(store: EnterpriseStore, *, require_audit_sink: bo
                     "configured": True,
                     "enabled": False,
                     "format": sink_format,
+                    "format_ok": format_ok,
                     "relative_path": config.get("relative_path"),
                     "reason": "disabled",
                 }
@@ -283,6 +326,16 @@ def _audit_sink_delivery_check(store: EnterpriseStore, *, require_audit_sink: bo
         report = store.check_workspace_audit_jsonl_sink(workspace_id, user_id)
         if report.get("ok"):
             healthy_count += 1
+            if not format_ok:
+                failures.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "reason": "format_mismatch",
+                        "relative_path": report.get("relative_path"),
+                        "format": report.get("format"),
+                        "expected_format": required_format,
+                    }
+                )
         else:
             failures.append(
                 {
@@ -300,6 +353,7 @@ def _audit_sink_delivery_check(store: EnterpriseStore, *, require_audit_sink: bo
                 "enabled": True,
                 "ok": bool(report.get("ok")),
                 "format": report.get("format"),
+                "format_ok": format_ok,
                 "relative_path": report.get("relative_path"),
                 "reason": report.get("reason"),
                 "checks": report.get("checks"),
@@ -310,22 +364,24 @@ def _audit_sink_delivery_check(store: EnterpriseStore, *, require_audit_sink: bo
             {"workspace_id": workspace_id, "reason": "missing owner/admin member"}
             for workspace_id in missing_operators
         )
-    if require_audit_sink:
+    if required:
         failures.extend(
             {"workspace_id": workspace_id, "reason": "not_configured"}
             for workspace_id in unconfigured
         )
     return _check(
         not failures,
-        required=require_audit_sink,
+        required=required,
+        required_format=required_format,
         workspace_count=len(workspace_ids),
         configured_count=configured_count,
         enabled_count=enabled_count,
         healthy_count=healthy_count,
         disabled_count=disabled_count,
         unconfigured_count=len(unconfigured),
+        matching_format_count=matching_format_count,
         format_counts=format_counts,
-        skipped=configured_count == 0 and not require_audit_sink,
+        skipped=configured_count == 0 and not required,
         sink_reports=reports[:10],
         unconfigured_workspace_ids=unconfigured[:10],
         failing_workspaces=failures[:10],

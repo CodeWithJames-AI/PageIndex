@@ -2067,6 +2067,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 check_provider=_bool_param(params, "check_provider", False),
                 require_provider_api_key=_bool_param(params, "require_provider_api_key", False),
                 require_audit_sink=_bool_param(params, "require_audit_sink", False),
+                require_audit_sink_format=_str_param(params, "require_audit_sink_format"),
             )
         )
 

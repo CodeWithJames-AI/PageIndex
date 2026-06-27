@@ -636,6 +636,11 @@ DASHBOARD_HTML = """<!doctype html>
                 <label><input id="readinessCheckProviderInput" type="checkbox">provider</label>
                 <label><input id="readinessRequireProviderKeyInput" type="checkbox">key</label>
                 <label><input id="readinessRequireAuditSinkInput" type="checkbox">audit sink</label>
+                <select id="readinessAuditSinkFormatInput" aria-label="Required audit sink format">
+                  <option value="">any sink</option>
+                  <option value="jsonl">jsonl</option>
+                  <option value="siem-jsonl">siem jsonl</option>
+                </select>
               </div>
               <button id="refreshReadinessButton" class="secondary" type="button">Check readiness</button>
               <div id="readinessSummary" class="muted">Readiness not loaded.</div>
@@ -837,6 +842,7 @@ DASHBOARD_HTML = """<!doctype html>
     const readinessCheckProviderInput = document.getElementById("readinessCheckProviderInput");
     const readinessRequireProviderKeyInput = document.getElementById("readinessRequireProviderKeyInput");
     const readinessRequireAuditSinkInput = document.getElementById("readinessRequireAuditSinkInput");
+    const readinessAuditSinkFormatInput = document.getElementById("readinessAuditSinkFormatInput");
     const readinessSummary = document.getElementById("readinessSummary");
     const readinessReportText = document.getElementById("readinessReportText");
     const providerBaseUrlInput = document.getElementById("providerBaseUrlInput");
@@ -2775,6 +2781,9 @@ DASHBOARD_HTML = """<!doctype html>
       }
       if (readinessRequireAuditSinkInput.checked) {
         params.set("require_audit_sink", "1");
+      }
+      if (readinessAuditSinkFormatInput.value) {
+        params.set("require_audit_sink_format", readinessAuditSinkFormatInput.value);
       }
       const query = params.toString();
       return query ? `?${query}` : "";

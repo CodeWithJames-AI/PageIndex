@@ -705,6 +705,7 @@ class EnterpriseStore:
             CREATE TABLE IF NOT EXISTS audit_retention_policies (
               workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
               retention_days INTEGER,
+              legal_hold INTEGER NOT NULL DEFAULT 0,
               updated_at TEXT NOT NULL,
               updated_by TEXT NOT NULL
             );
@@ -948,6 +949,9 @@ class EnterpriseStore:
             "audit_events": {
                 "previous_integrity_hash": "TEXT",
                 "integrity_hash": "TEXT",
+            },
+            "audit_retention_policies": {
+                "legal_hold": "INTEGER NOT NULL DEFAULT 0",
             },
             "workspace_provider_configs": {
                 "provider": "TEXT",
@@ -2934,7 +2938,7 @@ class EnterpriseStore:
         self._require_workspace(workspace_id)
         row = self._one(
             """
-            SELECT workspace_id, retention_days, updated_at, updated_by
+            SELECT workspace_id, retention_days, legal_hold, updated_at, updated_by
             FROM audit_retention_policies
             WHERE workspace_id = ?
             """,
@@ -2944,10 +2948,13 @@ class EnterpriseStore:
             return {
                 "workspace_id": workspace_id,
                 "retention_days": None,
+                "legal_hold": False,
                 "updated_at": None,
                 "updated_by": None,
             }
-        return dict(row)
+        policy = dict(row)
+        policy["legal_hold"] = bool(policy.get("legal_hold"))
+        return policy
 
     def get_audit_retention_policy(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
@@ -2958,24 +2965,39 @@ class EnterpriseStore:
         workspace_id: str,
         actor_user_id: str,
         *,
-        retention_days: int | None,
+        retention_days: int | None | object = _UNSET,
+        legal_hold: bool | object = _UNSET,
     ) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
-        retention_days = _normalize_policy_days(retention_days, "retention_days")
+        if retention_days is _UNSET and legal_hold is _UNSET:
+            raise ValueError("choose retention_days or legal_hold")
+        current = self._audit_retention_policy(workspace_id)
+        next_retention_days = (
+            current["retention_days"]
+            if retention_days is _UNSET
+            else _normalize_policy_days(retention_days, "retention_days")
+        )
+        if legal_hold is _UNSET:
+            next_legal_hold = bool(current["legal_hold"])
+        else:
+            if not isinstance(legal_hold, bool):
+                raise ValueError("legal_hold must be a boolean")
+            next_legal_hold = legal_hold
         updated_at = _now()
         with self._atomic():
             self.conn.execute(
                 """
                 INSERT INTO audit_retention_policies (
-                  workspace_id, retention_days, updated_at, updated_by
+                  workspace_id, retention_days, legal_hold, updated_at, updated_by
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id) DO UPDATE SET
                   retention_days = excluded.retention_days,
+                  legal_hold = excluded.legal_hold,
                   updated_at = excluded.updated_at,
                   updated_by = excluded.updated_by
                 """,
-                (workspace_id, retention_days, updated_at, actor_user_id.strip()),
+                (workspace_id, next_retention_days, int(next_legal_hold), updated_at, actor_user_id.strip()),
             )
             self._insert_audit_event(
                 workspace_id,
@@ -2983,7 +3005,7 @@ class EnterpriseStore:
                 "audit.retention_policy_update",
                 target_type="audit_retention_policy",
                 target_id=workspace_id,
-                details={"retention_days": retention_days},
+                details={"retention_days": next_retention_days, "legal_hold": next_legal_hold},
             )
         return self._audit_retention_policy(workspace_id)
 
@@ -3012,7 +3034,10 @@ class EnterpriseStore:
                 "matched": matched,
                 "purged": 0,
                 "dry_run": True,
+                "legal_hold": bool(policy["legal_hold"]),
             }
+        if policy["legal_hold"]:
+            raise ValueError("audit retention legal hold is enabled")
         with self._atomic():
             deleted = self.conn.execute(
                 """
@@ -3041,6 +3066,7 @@ class EnterpriseStore:
             "matched": purged,
             "purged": purged,
             "dry_run": False,
+            "legal_hold": False,
         }
         return result
 

@@ -3982,8 +3982,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             store._commit()
 
             policy = store.set_audit_retention_policy(workspace_id, "alice", retention_days=30)
+            hold_policy = store.set_audit_retention_policy(workspace_id, "alice", legal_hold=True)
             read_policy = store.get_audit_retention_policy(workspace_id, "ada")
             preview = store.purge_audit_events_by_retention(workspace_id, "alice", dry_run=True)
+            with self.assertRaisesRegex(ValueError, "legal hold"):
+                store.purge_audit_events_by_retention(workspace_id, "ada")
+            release_policy = store.set_audit_retention_policy(workspace_id, "alice", legal_hold=False)
             purged = store.purge_audit_events_by_retention(workspace_id, "ada")
             second_purge = store.purge_audit_events_by_retention(workspace_id, "alice")
             remaining = store.list_audit_events(workspace_id, "alice", limit=20)
@@ -3991,11 +3995,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             cleared = store.set_audit_retention_policy(workspace_id, "alice", retention_days=None)
 
             self.assertEqual(policy["retention_days"], 30)
+            self.assertEqual(hold_policy["retention_days"], 30)
+            self.assertEqual(hold_policy["legal_hold"], True)
             self.assertEqual(read_policy["retention_days"], 30)
+            self.assertEqual(read_policy["legal_hold"], True)
             self.assertEqual(read_policy["updated_by"], "alice")
             self.assertEqual(preview["matched"], 1)
             self.assertEqual(preview["purged"], 0)
+            self.assertEqual(preview["legal_hold"], True)
             self.assertTrue(preview["dry_run"])
+            self.assertEqual(release_policy["legal_hold"], False)
             self.assertEqual(purged["matched"], 1)
             self.assertEqual(purged["purged"], 1)
             self.assertFalse(purged["dry_run"])
@@ -4249,9 +4258,36 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            hold_policy = json.loads(
+                subprocess.run(
+                    [*base, "audit-retention", "ws_cli", "alice", "--legal-hold"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
             preview = json.loads(
                 subprocess.run(
                     [*base, "audit-purge", "ws_cli", "alice", "--dry-run"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            blocked_purge = subprocess.run(
+                [*base, "audit-purge", "ws_cli", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            release_policy = json.loads(
+                subprocess.run(
+                    [*base, "audit-retention", "ws_cli", "alice", "--clear-legal-hold"],
                     cwd=repo_root,
                     env=env,
                     capture_output=True,
@@ -4301,8 +4337,14 @@ class EnterpriseStoreTest(unittest.TestCase):
 
             self.assertEqual(policy["retention_days"], 30)
             self.assertEqual(read_policy["retention_days"], 30)
+            self.assertEqual(hold_policy["legal_hold"], True)
             self.assertEqual(preview["matched"], 1)
             self.assertEqual(preview["purged"], 0)
+            self.assertEqual(preview["legal_hold"], True)
+            self.assertNotEqual(blocked_purge.returncode, 0)
+            self.assertIn("legal hold", blocked_purge.stderr)
+            self.assertNotIn("Traceback", blocked_purge.stderr)
+            self.assertEqual(release_policy["legal_hold"], False)
             self.assertEqual(purged["purged"], 1)
             self.assertNotIn(old, remaining_ids)
             self.assertIsNone(cleared["retention_days"])
@@ -8187,10 +8229,17 @@ class EnterpriseStoreTest(unittest.TestCase):
                 member_blocked = _get_error(f"{base}/audit-retention", headers=member_headers)
                 policy = _post_json(f"{base}/audit-retention", {"retention_days": 30}, headers=full_headers)
                 read_policy = _get_json(f"{base}/audit-retention", headers=audit_headers)
+                hold_policy = _post_json(f"{base}/audit-retention", {"legal_hold": True}, headers=full_headers)
                 preview = _post_json(
                     f"{base}/audit-retention/purge",
                     {"dry_run": True},
                     headers=full_headers,
+                )
+                blocked_by_hold = _post_json(
+                    f"{base}/audit-retention/purge",
+                    {},
+                    headers=full_headers,
+                    status=400,
                 )
                 audit_purge_blocked = _post_json(
                     f"{base}/audit-retention/purge",
@@ -8198,6 +8247,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=audit_headers,
                     status=403,
                 )
+                released_policy = _post_json(f"{base}/audit-retention", {"legal_hold": False}, headers=full_headers)
                 purged = _post_json(f"{base}/audit-retention/purge", {}, headers=full_headers)
                 cleared = _post_json(f"{base}/audit-retention", {"clear": True}, headers=full_headers)
 
@@ -8207,9 +8257,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(member_blocked["error"], "workspace role denied")
                 self.assertEqual(policy["retention_days"], 30)
                 self.assertEqual(read_policy["retention_days"], 30)
+                self.assertEqual(hold_policy["legal_hold"], True)
                 self.assertEqual(preview["matched"], 1)
                 self.assertEqual(preview["purged"], 0)
+                self.assertEqual(preview["legal_hold"], True)
+                self.assertIn("legal hold", blocked_by_hold["error"])
                 self.assertEqual(audit_purge_blocked["error"], "api token scope denied")
+                self.assertEqual(released_policy["legal_hold"], False)
                 self.assertEqual(purged["purged"], 1)
                 self.assertIsNone(cleared["retention_days"])
             finally:
@@ -8520,6 +8574,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("/audit-retention/purge", body)
                     self.assertIn("auditRetentionDaysInput", body)
                     self.assertIn("auditRetentionSummary", body)
+                    self.assertIn("enableAuditLegalHoldButton", body)
+                    self.assertIn("clearAuditLegalHoldButton", body)
+                    self.assertIn("setAuditLegalHold", body)
                     self.assertIn("refreshAuditRetention", body)
                     self.assertIn("saveAuditRetention", body)
                     self.assertIn("clearAuditRetention", body)

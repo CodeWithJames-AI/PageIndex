@@ -550,6 +550,10 @@ DASHBOARD_HTML = """<!doctype html>
                 <button id="previewAuditPurgeButton" class="secondary" type="button">Preview</button>
                 <button id="purgeAuditButton" class="secondary" type="button">Purge</button>
               </div>
+              <div class="provider-actions">
+                <button id="enableAuditLegalHoldButton" class="secondary" type="button">Hold</button>
+                <button id="clearAuditLegalHoldButton" class="secondary" type="button">Release</button>
+              </div>
               <button id="clearAuditRetentionButton" class="secondary" type="button">Clear retention</button>
               <div id="auditRetentionSummary" class="muted">Retention not loaded.</div>
               <div id="auditIntegritySummary" class="muted">Integrity not checked.</div>
@@ -1332,15 +1336,16 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function renderAuditRetention(policy) {
+      const holdText = policy && policy.legal_hold ? "legal hold on" : "legal hold off";
       if (!policy || policy.retention_days == null) {
         auditRetentionDaysInput.value = "";
-        auditRetentionSummary.className = "muted";
-        auditRetentionSummary.textContent = "Retention not set.";
+        auditRetentionSummary.className = policy && policy.legal_hold ? "status warn" : "muted";
+        auditRetentionSummary.textContent = `Retention not set. | ${holdText}`;
         return;
       }
       auditRetentionDaysInput.value = String(policy.retention_days);
-      auditRetentionSummary.className = "muted";
-      auditRetentionSummary.textContent = `${policy.retention_days} days | updated ${policy.updated_at || "unknown"}`;
+      auditRetentionSummary.className = policy.legal_hold ? "status warn" : "muted";
+      auditRetentionSummary.textContent = `${policy.retention_days} days | ${holdText} | updated ${policy.updated_at || "unknown"}`;
     }
 
     function renderAuditPurgeResult(result) {
@@ -2418,6 +2423,16 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Retention cleared.", "ok");
     }
 
+    async function setAuditLegalHold(enabled) {
+      setStatus(enabled ? "Enabling legal hold..." : "Releasing legal hold...");
+      const policy = await api("/audit-retention", {
+        method: "POST",
+        body: JSON.stringify({ legal_hold: enabled })
+      });
+      renderAuditRetention(policy);
+      setStatus(enabled ? "Legal hold enabled." : "Legal hold released.", "ok");
+    }
+
     async function previewAuditPurge() {
       setStatus("Previewing purge...");
       const result = await api("/audit-retention/purge", {
@@ -2830,6 +2845,8 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("refreshAuditRetentionButton").addEventListener("click", () => refreshAuditRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveAuditRetentionButton").addEventListener("click", () => saveAuditRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearAuditRetentionButton").addEventListener("click", () => clearAuditRetention().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("enableAuditLegalHoldButton").addEventListener("click", () => setAuditLegalHold(true).catch((error) => setStatus(error.message, "error")));
+    document.getElementById("clearAuditLegalHoldButton").addEventListener("click", () => setAuditLegalHold(false).catch((error) => setStatus(error.message, "error")));
     document.getElementById("previewAuditPurgeButton").addEventListener("click", () => previewAuditPurge().catch((error) => setStatus(error.message, "error")));
     document.getElementById("purgeAuditButton").addEventListener("click", () => purgeAuditEvents().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshReadinessButton").addEventListener("click", () => refreshDeploymentReadiness().catch((error) => setStatus(error.message, "error")));

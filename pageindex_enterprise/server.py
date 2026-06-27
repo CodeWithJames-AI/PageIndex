@@ -20,6 +20,7 @@ from .store import (
     WORKSPACE_ADMIN_ROLES,
     WORKSPACE_WRITE_ROLES,
     EnterpriseStore,
+    _UNSET,
     expires_at_from_days,
 )
 
@@ -1260,19 +1261,30 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         if not isinstance(clear, bool):
             raise ValueError("clear must be a boolean")
         has_retention_days = "retention_days" in payload and payload.get("retention_days") is not None
+        has_legal_hold = "legal_hold" in payload
+        legal_hold = payload.get("legal_hold")
+        if has_legal_hold and not isinstance(legal_hold, bool):
+            raise ValueError("legal_hold must be a boolean")
         if clear and has_retention_days:
             raise ValueError("choose retention_days or clear")
-        if not clear and not has_retention_days:
-            raise ValueError("retention_days is required")
+        if not clear and not has_retention_days and not has_legal_hold:
+            raise ValueError("retention_days or legal_hold is required")
         retention_days = None
-        if not clear:
+        if has_retention_days:
             retention_days = payload["retention_days"]
             if isinstance(retention_days, bool) or not isinstance(retention_days, int):
                 raise ValueError("retention_days must be a positive integer")
         store = EnterpriseStore(self.server.root)
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope=("audit", "write"))
-            self._json(store.set_audit_retention_policy(workspace_id, user_id, retention_days=retention_days))
+            self._json(
+                store.set_audit_retention_policy(
+                    workspace_id,
+                    user_id,
+                    retention_days=None if clear else (retention_days if has_retention_days else _UNSET),
+                    legal_hold=legal_hold if has_legal_hold else _UNSET,
+                )
+            )
         finally:
             store.close()
 

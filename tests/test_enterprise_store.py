@@ -4977,10 +4977,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "SELECT last_used_at FROM api_tokens WHERE id = ?",
                 (malformed_token["id"],),
             ).fetchone()
+            usage = store.get_workspace_usage_summary(workspace_id, "alice")["api_tokens"]
 
             self.assertEqual(z_verified["id"], z_token["id"])
             self.assertIsNone(malformed_verified)
             self.assertIsNone(malformed_row["last_used_at"])
+            self.assertEqual(usage["active"], 1)
+            self.assertEqual(usage["expired"], 1)
+            self.assertEqual(usage["with_expiration"], 2)
 
     def test_api_token_policy_applies_default_expiry_and_rotation_due_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:

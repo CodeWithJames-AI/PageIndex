@@ -2099,6 +2099,14 @@ class EnterpriseStore:
             """,
             (workspace_id, workspace_id),
         ).fetchone()
+        api_token_expirations = [
+            row["expires_at"]
+            for row in self.conn.execute(
+                "SELECT expires_at FROM api_tokens WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+        ]
+        expired_api_tokens = sum(1 for expires_at in api_token_expirations if expires_at and _is_expired(expires_at))
         return {
             "workspace_id": workspace_id,
             "documents": {
@@ -2188,28 +2196,9 @@ class EnterpriseStore:
                 ),
             },
             "api_tokens": {
-                "active": count(
-                    """
-                    SELECT COUNT(*) AS count
-                    FROM api_tokens
-                    WHERE workspace_id = ?
-                      AND (expires_at IS NULL OR expires_at > ?)
-                    """,
-                    (workspace_id, share_now),
-                ),
-                "with_expiration": count(
-                    "SELECT COUNT(*) AS count FROM api_tokens WHERE workspace_id = ? AND expires_at IS NOT NULL"
-                ),
-                "expired": count(
-                    """
-                    SELECT COUNT(*) AS count
-                    FROM api_tokens
-                    WHERE workspace_id = ?
-                      AND expires_at IS NOT NULL
-                      AND expires_at <= ?
-                    """,
-                    (workspace_id, share_now),
-                ),
+                "active": len(api_token_expirations) - expired_api_tokens,
+                "with_expiration": sum(1 for expires_at in api_token_expirations if expires_at),
+                "expired": expired_api_tokens,
             },
             "conversations": {
                 "count": count("SELECT COUNT(*) AS count FROM conversations WHERE workspace_id = ?"),

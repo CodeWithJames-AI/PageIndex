@@ -5,6 +5,7 @@ import time
 import uuid
 from email.parser import BytesParser
 from email.policy import default
+from html import escape as html_escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -848,6 +849,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if shared is None:
                 self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
                 return
+            if _share_response_wants_html(self.headers.get("Accept", ""), _str_param(params, "format")):
+                self._html(_render_public_conversation_share(shared))
+                return
             self._json(shared)
         finally:
             store.close()
@@ -1404,6 +1408,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             )
             if shared is None:
                 self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
+                return
+            if _share_response_wants_html(self.headers.get("Accept", ""), _str_param(params, "format")):
+                self._html(_render_public_document_share(shared))
                 return
             self._json(shared)
         finally:
@@ -2493,6 +2500,203 @@ def _public_document_share_path(path: str) -> str | None:
     if len(parts) == 3 and parts[0] == "public" and parts[1] == "documents":
         return unquote(parts[2])
     return None
+
+
+PUBLIC_SHARE_STYLE = """
+    :root {
+      color-scheme: light;
+      --bg: #f8fafc;
+      --text: #172033;
+      --muted: #657189;
+      --line: #d8dee9;
+      --panel: #ffffff;
+      --accent: #1d6f9f;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 32px 18px 56px;
+    }
+    header {
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 20px;
+      padding-bottom: 16px;
+    }
+    h1 {
+      font-size: clamp(28px, 5vw, 46px);
+      line-height: 1.05;
+      margin: 0 0 10px;
+    }
+    h2 {
+      font-size: 17px;
+      margin: 0 0 10px;
+    }
+    .muted,
+    .meta {
+      color: var(--muted);
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      margin-top: 10px;
+    }
+    article,
+    .empty {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      margin: 14px 0;
+      padding: 16px;
+    }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 0;
+      font: inherit;
+    }
+    .role {
+      color: var(--accent);
+      font-weight: 700;
+      text-transform: capitalize;
+    }
+    .citations {
+      border-top: 1px solid var(--line);
+      margin-top: 12px;
+      padding-top: 10px;
+    }
+    .citations ul {
+      margin: 6px 0 0 20px;
+      padding: 0;
+    }
+"""
+
+
+def _share_response_wants_html(accept_header: str, requested_format: str | None) -> bool:
+    normalized_format = (requested_format or "").strip().casefold()
+    if normalized_format == "html":
+        return True
+    if normalized_format == "json":
+        return False
+    normalized_accept = accept_header.casefold()
+    return "text/html" in normalized_accept and "application/json" not in normalized_accept
+
+
+def _html_value(value: Any) -> str:
+    return html_escape("" if value is None else str(value), quote=True)
+
+
+def _public_share_shell(title: str, body: str) -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{_html_value(title)} - PageIndex</title>
+  <style>{PUBLIC_SHARE_STYLE}</style>
+</head>
+<body>
+{body}
+</body>
+</html>
+"""
+
+
+def _render_public_document_share(shared: dict[str, Any]) -> str:
+    document = shared.get("document") or {}
+    share_link = shared.get("share_link") or {}
+    pages = shared.get("pages") or []
+    title = str(document.get("name") or "Shared document")
+    description = str(document.get("description") or "").strip()
+    description_html = f'<p class="muted">{_html_value(description)}</p>' if description else ""
+    page_cards = "\n".join(
+        f"""
+      <article>
+        <h2>Page {_html_value(page.get("page"))}</h2>
+        <pre>{_html_value(page.get("content"))}</pre>
+        {'<p class="muted">Page content truncated.</p>' if page.get("truncated") else ''}
+      </article>
+        """
+        for page in pages
+    )
+    if not page_cards:
+        page_cards = '<p class="empty muted">No pages in this view.</p>'
+    body = f"""
+  <main>
+    <header>
+      <p class="muted">PageIndex shared document</p>
+      <h1>{_html_value(title)}</h1>
+      {description_html}
+      <div class="meta">
+        <span>{_html_value(document.get("kind") or "document")}</span>
+        <span>{len(pages)} of {_html_value(shared.get("total_pages") or 0)} pages shown</span>
+        <span>Expires {_html_value(share_link.get("expires_at") or "never")}</span>
+      </div>
+    </header>
+    <section>
+      {page_cards}
+    </section>
+  </main>
+"""
+    return _public_share_shell(title, body)
+
+
+def _render_public_conversation_share(shared: dict[str, Any]) -> str:
+    conversation = shared.get("conversation") or {}
+    share_link = shared.get("share_link") or {}
+    messages = shared.get("messages") or []
+    citations_by_run = shared.get("citations") or {}
+    title = str(conversation.get("title") or "Shared conversation")
+    message_cards = []
+    for message in messages:
+        run_id = message.get("run_id")
+        citations = citations_by_run.get(run_id, []) if run_id else []
+        citation_html = ""
+        if citations:
+            items = "\n".join(
+                (
+                    f"<li>{_html_value(citation.get('doc_name') or citation.get('doc_id'))}"
+                    f" - {_html_value(citation.get('label'))}</li>"
+                )
+                for citation in citations
+            )
+            citation_html = f'<div class="citations"><strong>Citations</strong><ul>{items}</ul></div>'
+        message_cards.append(
+            f"""
+      <article>
+        <div class="role">{_html_value(message.get("role") or "message")}</div>
+        <pre>{_html_value(message.get("content"))}</pre>
+        {citation_html}
+      </article>
+            """
+        )
+    messages_html = "\n".join(message_cards) if message_cards else '<p class="empty muted">No messages in this view.</p>'
+    body = f"""
+  <main>
+    <header>
+      <p class="muted">PageIndex shared conversation</p>
+      <h1>{_html_value(title)}</h1>
+      <div class="meta">
+        <span>{len(messages)} messages shown</span>
+        <span>Updated {_html_value(conversation.get("updated_at") or "unknown")}</span>
+        <span>Expires {_html_value(share_link.get("expires_at") or "never")}</span>
+      </div>
+    </header>
+    <section>
+      {messages_html}
+    </section>
+  </main>
+"""
+    return _public_share_shell(title, body)
 
 
 def _query_run_path(path: str) -> str | None:

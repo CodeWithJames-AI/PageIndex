@@ -8434,6 +8434,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                 listed = _get_json(url, headers=owner_write_headers)["share_links"]
                 public = _get_json(f"{base}/public/conversations/{created['token']}")
                 limited = _get_json(f"{base}/public/conversations/{created['token']}?limit=1")
+                public_html, public_html_type = _get_text(
+                    f"{base}/public/conversations/{created['token']}",
+                    headers={"Accept": "text/html"},
+                )
                 revoked = _delete_json(
                     f"{base}/conversation-share-links/{created['id']}",
                     headers=owner_write_headers,
@@ -8461,6 +8465,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(len(limited["messages"]), 1)
             self.assertIn(run_id, public["citations"])
             self.assertEqual(public["citations"][run_id][0]["doc_name"], "Conversation share memo")
+            self.assertIn("text/html", public_html_type)
+            self.assertIn("HTTP shared chat", public_html)
+            self.assertIn("conversation share", public_html)
+            self.assertIn("Conversation share memo", public_html)
+            self.assertNotIn(created["token"], public_html)
+            self.assertNotIn("token_hash", public_html)
             self.assertNotIn("source_path", serialized_public)
             self.assertNotIn("token_hash", serialized_public)
             self.assertEqual(revoked, {"revoked": True})
@@ -8613,6 +8623,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )["share_link"]
                 listed = _get_json(url, headers=owner_write_headers)["share_links"]
                 public = _get_json(f"{base}/public/documents/{created['token']}?limit=1&max_chars=200")
+                public_html, public_html_type = _get_text(
+                    f"{base}/public/documents/{created['token']}?limit=1&max_chars=200",
+                    headers={"Accept": "text/html"},
+                )
                 missing_doc = _post_json(
                     f"{base}/documents/doc_missing/share-links",
                     {},
@@ -8650,6 +8664,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertTrue(public["pages"][0]["content"].startswith("HTTP shared page evidence."))
             self.assertLessEqual(len(public["pages"][0]["content"]), 200)
             self.assertTrue(public["pages"][0]["truncated"])
+            self.assertIn("text/html", public_html_type)
+            self.assertIn("HTTP share", public_html)
+            self.assertIn("HTTP shared page evidence.", public_html)
+            self.assertIn("Page 1", public_html)
+            self.assertNotIn(created["token"], public_html)
+            self.assertNotIn("token_hash", public_html)
             self.assertNotIn("source_path", serialized_public)
             self.assertNotIn("token_hash", serialized_public)
             self.assertEqual(foreign_revoke, {"revoked": False})

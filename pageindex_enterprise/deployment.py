@@ -240,6 +240,7 @@ def _unavailable_audit_sink_delivery_check(
         configured_count=0,
         enabled_count=0,
         healthy_count=0,
+        delivered_count=0,
         disabled_count=0,
         unconfigured_count=0,
         matching_format_count=0,
@@ -265,6 +266,7 @@ def _audit_sink_delivery_check(
             configured_count=0,
             enabled_count=0,
             healthy_count=0,
+            delivered_count=0,
             disabled_count=0,
             unconfigured_count=0,
             matching_format_count=0,
@@ -277,6 +279,7 @@ def _audit_sink_delivery_check(
     configured_count = 0
     enabled_count = 0
     healthy_count = 0
+    delivered_count = 0
     disabled_count = 0
     matching_format_count = 0
     format_counts = {"jsonl": 0, "siem-jsonl": 0}
@@ -323,9 +326,28 @@ def _audit_sink_delivery_check(
             )
             continue
         enabled_count += 1
-        report = store.check_workspace_audit_jsonl_sink(workspace_id, user_id)
+        report = store.get_workspace_audit_jsonl_sink_status(workspace_id, user_id)
+        delivered = (
+            bool(report.get("sink_exists"))
+            and int(report.get("line_count") or 0) > 0
+            and report.get("last_line_valid") is True
+        )
         if report.get("ok"):
             healthy_count += 1
+            if delivered:
+                delivered_count += 1
+            else:
+                failures.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "reason": "no_delivered_events",
+                        "relative_path": report.get("relative_path"),
+                        "format": report.get("format"),
+                        "sink_exists": report.get("sink_exists"),
+                        "line_count": report.get("line_count"),
+                        "last_line_valid": report.get("last_line_valid"),
+                    }
+                )
             if not format_ok:
                 failures.append(
                     {
@@ -357,6 +379,11 @@ def _audit_sink_delivery_check(
                 "relative_path": report.get("relative_path"),
                 "reason": report.get("reason"),
                 "checks": report.get("checks"),
+                "sink_exists": report.get("sink_exists"),
+                "line_count": report.get("line_count"),
+                "last_line_valid": report.get("last_line_valid"),
+                "last_event": report.get("last_event"),
+                "delivered": delivered,
             }
         )
     if missing_operators:
@@ -377,6 +404,7 @@ def _audit_sink_delivery_check(
         configured_count=configured_count,
         enabled_count=enabled_count,
         healthy_count=healthy_count,
+        delivered_count=delivered_count,
         disabled_count=disabled_count,
         unconfigured_count=len(unconfigured),
         matching_format_count=matching_format_count,

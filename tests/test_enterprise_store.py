@@ -3343,6 +3343,92 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(preview["table_counts"]["documents"], 1)
             self.assertEqual(after_events, before_events)
 
+    def test_http_workspace_import_restores_bundle_with_admin_audit_write_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_root = tmp_path / "source-workspace"
+            source = tmp_path / "http-import-restore-source.txt"
+            source.write_text("HTTP import restore evidence.", encoding="utf-8")
+            source_store = EnterpriseStore(source_root)
+            restore_workspace_id = source_store.create_workspace("Restored", workspace_id="ws_restore_http")
+            source_store.add_workspace_member(restore_workspace_id, "alice", "owner")
+            source_store.ingest_file(source, workspace_id=restore_workspace_id, actor_user_id="alice", name="HTTP restore memo")
+            export_path = tmp_path / "workspace-restore-export.zip"
+            source_store.export_workspace_bundle(restore_workspace_id, "alice", export_path)
+            source_store.close()
+
+            root = tmp_path / "operator-workspace"
+            store = EnterpriseStore(root)
+            operator_workspace_id = store.create_workspace("Operators", workspace_id="ops")
+            store.add_workspace_member(operator_workspace_id, "operator", "owner")
+            store.add_workspace_member(operator_workspace_id, "bob", "member", actor_user_id="operator")
+            owner_token = store.create_api_token(operator_workspace_id, "operator", name="owner")["token"]
+            audit_token = store.create_api_token(operator_workspace_id, "operator", name="audit", scopes=["audit"])["token"]
+            write_token = store.create_api_token(operator_workspace_id, "operator", name="write", scopes=["write"])["token"]
+            member_token_record = store.create_api_token(operator_workspace_id, "bob", name="member")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store._commit()
+            member_token = member_token_record["token"]
+            store.close()
+
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            url = f"{base}/workspace-import"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            try:
+                missing = _post_json(url, {"path": str(export_path)}, status=403)
+                audit_denied = _post_json(
+                    url,
+                    {"path": str(export_path)},
+                    headers={"Authorization": f"Bearer {audit_token}"},
+                    status=403,
+                )
+                write_denied = _post_json(
+                    url,
+                    {"path": str(export_path)},
+                    headers={"Authorization": f"Bearer {write_token}"},
+                    status=403,
+                )
+                member_denied = _post_json(
+                    url,
+                    {"path": str(export_path)},
+                    headers={"Authorization": f"Bearer {member_token}"},
+                    status=403,
+                )
+                missing_path = _post_json(url, {}, headers=owner_headers, status=400)
+                restored = _post_json(url, {"path": str(export_path)}, headers=owner_headers, status=201)
+                duplicate = _post_json(url, {"path": str(export_path)}, headers=owner_headers, status=400)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            store = EnterpriseStore(root)
+            try:
+                restored_documents = store.list_documents(workspace_id=restore_workspace_id, actor_user_id="alice")
+                restored_integrity = store.verify_audit_integrity(restore_workspace_id, "alice")
+                operator_events = store.list_audit_events(operator_workspace_id, "operator", action="workspace.import")
+            finally:
+                store.close()
+
+            self.assertEqual(missing["error"], "api token required")
+            self.assertEqual(audit_denied["error"], "api token scope denied")
+            self.assertEqual(write_denied["error"], "api token scope denied")
+            self.assertEqual(member_denied["error"], "workspace role denied")
+            self.assertEqual(missing_path["error"], "path is required")
+            self.assertTrue(restored["ok"], restored.get("errors"))
+            self.assertEqual(restored["workspace_id"], restore_workspace_id)
+            self.assertEqual(restored["inserted"]["documents"], 1)
+            self.assertEqual(restored_documents[0]["name"], "HTTP restore memo")
+            self.assertTrue(restored_integrity["ok"], restored_integrity["failures"])
+            self.assertEqual(operator_events[0]["target_id"], restore_workspace_id)
+            self.assertIn("Workspace already exists", duplicate["error"])
+
     def test_http_workspace_usage_requires_admin_audit_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -8413,11 +8499,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("workspaceExportLink", body)
                     self.assertIn("exportWorkspaceBundle", body)
                     self.assertIn("/workspace-import/preview", body)
+                    self.assertIn("/workspace-import", body)
                     self.assertIn("workspaceImportPathInput", body)
                     self.assertIn("previewWorkspaceImportButton", body)
+                    self.assertIn("restoreWorkspaceImportButton", body)
                     self.assertIn("workspaceImportSummary", body)
                     self.assertIn("workspaceImportReportText", body)
                     self.assertIn("previewWorkspaceImport", body)
+                    self.assertIn("restoreWorkspaceImport", body)
                     self.assertIn("/audit-retention", body)
                     self.assertIn("/audit-retention/purge", body)
                     self.assertIn("auditRetentionDaysInput", body)

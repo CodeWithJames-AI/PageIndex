@@ -431,6 +431,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/import-structure":
                 self._import_structure(payload)
                 return
+            if parsed.path == "/workspace-import":
+                self._workspace_import_restore(payload)
+                return
             if parsed.path == "/workspace-import/preview":
                 self._workspace_import_preview(payload)
                 return
@@ -1089,6 +1092,35 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             )
             store.require_workspace_role(workspace_id, user_id, WORKSPACE_ADMIN_ROLES)
             self._json(store.validate_workspace_import_bundle(path))
+        finally:
+            store.close()
+
+    def _workspace_import_restore(self, payload: dict[str, Any]) -> None:
+        path = payload.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("path is required")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope=("audit", "write"),
+                require_api_token=True,
+            )
+            store.require_workspace_role(workspace_id, user_id, WORKSPACE_ADMIN_ROLES)
+            report = store.import_workspace_bundle(path)
+            store.record_audit_event(
+                workspace_id,
+                user_id,
+                "workspace.import",
+                target_type="workspace",
+                target_id=report["workspace_id"],
+                details={
+                    "artifact": report["artifact"],
+                    "workspace_id": report["workspace_id"],
+                    "inserted": report["inserted"],
+                },
+            )
+            self._json(report, HTTPStatus.CREATED)
         finally:
             store.close()
 

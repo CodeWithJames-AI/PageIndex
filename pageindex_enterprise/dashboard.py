@@ -565,8 +565,11 @@ DASHBOARD_HTML = """<!doctype html>
               <a id="workspaceExportLink" class="download-link" hidden href="#" download="pageindex-workspace-export.zip">Download latest export</a>
               <div id="workspaceExportSummary" class="muted">No workspace export prepared.</div>
               <input id="workspaceImportPathInput" value="" placeholder="workspace export zip path" aria-label="Workspace import preview path">
-              <button id="previewWorkspaceImportButton" class="secondary" type="button">Preview import</button>
-              <div id="workspaceImportSummary" class="muted">No import preview loaded.</div>
+              <div class="provider-actions">
+                <button id="previewWorkspaceImportButton" class="secondary" type="button">Preview</button>
+                <button id="restoreWorkspaceImportButton" class="secondary" type="button">Restore</button>
+              </div>
+              <div id="workspaceImportSummary" class="muted">No import report loaded.</div>
               <pre id="workspaceImportReportText">{}</pre>
             </div>
           </section>
@@ -1360,15 +1363,23 @@ DASHBOARD_HTML = """<!doctype html>
       auditIntegrityReportText.textContent = JSON.stringify(report || {}, null, 2);
     }
 
-    function renderWorkspaceImportPreview(report) {
+    function renderWorkspaceImportReport(report, label) {
       const errors = Array.isArray(report.errors) ? report.errors.length : 0;
       const warnings = Array.isArray(report.warnings) ? report.warnings.length : 0;
       const tables = report.table_counts || {};
       const tableTotal = Object.keys(tables).length;
       const docs = tables.documents == null ? 0 : tables.documents;
       workspaceImportSummary.className = report.ok ? "status ok" : "status error";
-      workspaceImportSummary.textContent = `${report.ok ? "Preview ok" : "Preview failed"}: ${tableTotal} tables, ${docs} documents, ${errors} errors, ${warnings} warnings`;
+      workspaceImportSummary.textContent = `${label} ${report.ok ? "ok" : "failed"}: ${tableTotal} tables, ${docs} documents, ${errors} errors, ${warnings} warnings`;
       workspaceImportReportText.textContent = JSON.stringify(report, null, 2);
+    }
+
+    function renderWorkspaceImportPreview(report) {
+      renderWorkspaceImportReport(report, "Preview");
+    }
+
+    function renderWorkspaceImportRestore(report) {
+      renderWorkspaceImportReport(report, "Restore");
     }
 
     function renderDeploymentReadiness(report) {
@@ -2350,6 +2361,25 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus(report.ok ? "Import preview passed." : "Import preview failed.", report.ok ? "ok" : "warn");
     }
 
+    async function restoreWorkspaceImport() {
+      const path = workspaceImportPathInput.value.trim();
+      if (!path) {
+        setStatus("Enter a workspace export zip path.", "warn");
+        return;
+      }
+      if (!window.confirm("Restore this workspace export bundle?")) {
+        setStatus("Restore cancelled.", "warn");
+        return;
+      }
+      setStatus("Restoring workspace...");
+      const report = await api("/workspace-import", {
+        method: "POST",
+        body: JSON.stringify({ path })
+      });
+      renderWorkspaceImportRestore(report);
+      setStatus(report.ok ? "Workspace restored." : "Workspace restore failed.", report.ok ? "ok" : "warn");
+    }
+
     function parsedRetentionDays() {
       const value = auditRetentionDaysInput.value.trim();
       if (!value) {
@@ -2796,6 +2826,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("verifyAuditIntegrityButton").addEventListener("click", () => verifyAuditIntegrity().catch((error) => setStatus(error.message, "error")));
     document.getElementById("exportWorkspaceButton").addEventListener("click", () => exportWorkspaceBundle().catch((error) => setStatus(error.message, "error")));
     document.getElementById("previewWorkspaceImportButton").addEventListener("click", () => previewWorkspaceImport().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("restoreWorkspaceImportButton").addEventListener("click", () => restoreWorkspaceImport().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshAuditRetentionButton").addEventListener("click", () => refreshAuditRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveAuditRetentionButton").addEventListener("click", () => saveAuditRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearAuditRetentionButton").addEventListener("click", () => clearAuditRetention().catch((error) => setStatus(error.message, "error")));

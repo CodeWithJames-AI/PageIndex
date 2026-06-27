@@ -7339,6 +7339,14 @@ class EnterpriseStore:
                 (document["workspace_id"], doc_id),
             ).fetchall()
             affected_source_set_ids = [row["source_set_id"] for row in rows]
+        share_link_count = 0
+        if document["workspace_id"]:
+            share_link_count = int(
+                self._one(
+                    "SELECT COUNT(*) AS count FROM document_share_links WHERE workspace_id = ? AND doc_id = ?",
+                    (document["workspace_id"], doc_id),
+                )["count"]
+            )
         now = _now()
         with self._atomic():
             if affected_source_set_ids:
@@ -7367,6 +7375,7 @@ class EnterpriseStore:
                         "name": document["name"],
                         "kind": document["kind"],
                         "source_set_count": len(affected_source_set_ids),
+                        "share_link_count": share_link_count,
                     },
                 )
         return deleted

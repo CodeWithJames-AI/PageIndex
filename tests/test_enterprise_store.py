@@ -4412,6 +4412,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "Delete source set",
                 [doc_id],
             )
+            share_link = store.create_document_share_link(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+            )
             store.rebuild_virtual_index()
             result = store.query_corpus("deletion target", workspace_id=workspace_id, actor_user_id="alice")
 
@@ -4441,6 +4446,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             events = store.list_audit_events(workspace_id, "alice")
             serialized = json.dumps(events, sort_keys=True)
             source_set_after_delete = store.get_query_source_set(workspace_id, "alice", source_set["id"])
+            remaining_share_link_count = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM document_share_links WHERE doc_id = ?",
+                (doc_id,),
+            ).fetchone()["count"]
 
             self.assertTrue(deleted)
             self.assertIsNone(store.get_document(doc_id))
@@ -4473,9 +4482,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIsNotNone(source_set_after_delete)
             self.assertEqual(source_set_after_delete["doc_ids"], [])
             self.assertNotEqual(source_set_after_delete["updated_at"], source_set["updated_at"])
+            self.assertEqual(remaining_share_link_count, 0)
+            self.assertIsNone(store.resolve_document_share_link(share_link["token"]))
             self.assertEqual(events[0]["action"], "document.delete")
             self.assertEqual(events[0]["target_id"], doc_id)
-            self.assertEqual(events[0]["details"], {"kind": "txt", "name": "Delete memo", "source_set_count": 1})
+            self.assertEqual(
+                events[0]["details"],
+                {"kind": "txt", "name": "Delete memo", "source_set_count": 1, "share_link_count": 1},
+            )
             self.assertNotIn(str(source), serialized)
             self.assertNotIn("Deletion target evidence.", serialized)
             self.assertFalse(store.delete_document("doc_missing", workspace_id=workspace_id, actor_user_id="alice"))

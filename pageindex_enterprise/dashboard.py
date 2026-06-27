@@ -1504,7 +1504,7 @@ DASHBOARD_HTML = """<!doctype html>
         <article class="conversation ${conversation.id === activeConversationId ? "active" : ""}">
           <button class="secondary" type="button" data-conversation-id="${escapeHtml(conversation.id)}">
             <strong>${escapeHtml(conversation.title)}</strong>
-            <div class="muted">${escapeHtml(conversation.message_count || 0)} messages${conversation.archived_at ? " | archived" : ""}</div>
+            <div class="muted">${escapeHtml(conversation.message_count || 0)} messages${conversation.archived_at ? " | archived" : ""}${conversation.source_set_id ? ` | source set ${escapeHtml(conversation.source_set_id)}` : ""}</div>
           </button>
           <div class="doc-actions">
             <button class="secondary" type="button" data-rename-conversation-id="${escapeHtml(conversation.id)}" data-conversation-title="${escapeHtml(conversation.title)}">Rename</button>
@@ -2512,10 +2512,14 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function createConversation() {
       const title = conversationTitleInput.value.trim();
+      const body = { title: title || undefined };
+      if (activeQuerySourceSetId) {
+        body.source_set_id = activeQuerySourceSetId;
+      }
       setStatus("Creating chat...");
       const conversation = await api("/conversations", {
         method: "POST",
-        body: JSON.stringify({ title: title || undefined })
+        body: JSON.stringify(body)
       });
       activeConversationId = conversation.id;
       conversationTitleInput.value = "";

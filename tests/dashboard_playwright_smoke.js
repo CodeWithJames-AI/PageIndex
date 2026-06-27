@@ -581,6 +581,28 @@ async function waitForAnyText(page, selector, expectedValues) {
     await page.click(`[data-use-source-set-id="${sourceSet.id}"]`);
     await waitForText(page, "#queryScopeLabel", "Set: Browser source set");
 
+    await page.fill("#conversationTitleInput", "Browser scoped chat");
+    const createScopedConversationResponse = page.waitForResponse(
+      (response) => {
+        if (!response.url().endsWith("/conversations") || response.request().method() !== "POST") {
+          return false;
+        }
+        try {
+          const payload = JSON.parse(response.request().postData() || "{}");
+          return payload.source_set_id === sourceSet.id;
+        } catch (_error) {
+          return false;
+        }
+      }
+    );
+    await page.click("#createConversationButton");
+    const scopedConversationResponse = await createScopedConversationResponse;
+    const scopedConversation = await scopedConversationResponse.json();
+    assert(scopedConversation.source_set_id === sourceSet.id, "scoped conversation did not return source set id");
+    await waitForText(page, "#status", "Conversation created.");
+    await waitForText(page, "#conversationList", "Browser scoped chat");
+    await waitForText(page, "#conversationList", sourceSet.id);
+
     await page.fill("#queryInput", query);
     await page.fill("#hintInput", "");
     const queryResponse = page.waitForResponse(
@@ -672,6 +694,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       providerExercised: true,
       queryHistoryExercised: true,
       sourceSetExercised: true,
+      conversationSourceSetExercised: true,
       screenshotPath: screenshotPath || null
     }));
   } finally {

@@ -10613,6 +10613,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("activeQuerySourceSetId", body)
                     self.assertIn("doc_ids", body)
                     self.assertIn("source_set_id", body)
+                    self.assertIn("body.source_set_id = activeQuerySourceSetId", body)
+                    self.assertIn("body: JSON.stringify(body)", body)
                     self.assertIn("decodeQueryPayload", body)
                     self.assertIn("applyQueryPrefillFromLocation", body)
                     self.assertIn("payload.prompt", body)
@@ -10947,6 +10949,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["providerExercised"], True)
             self.assertEqual(smoke["queryHistoryExercised"], True)
             self.assertEqual(smoke["sourceSetExercised"], True)
+            self.assertEqual(smoke["conversationSourceSetExercised"], True)
             self.assertTrue(screenshot_path.exists())
             self.assertGreater(screenshot_path.stat().st_size, 0)
 

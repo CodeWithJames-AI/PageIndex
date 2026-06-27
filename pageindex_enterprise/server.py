@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from email.parser import BytesParser
@@ -31,11 +32,48 @@ MAX_MULTIPART_BODY_BYTES = 10 * 1024 * 1024
 MAX_MULTIPART_FILES = 20
 
 
+class RateLimitError(Exception):
+    def __init__(self, retry_after_seconds: int):
+        super().__init__("api token rate limit exceeded")
+        self.retry_after_seconds = retry_after_seconds
+
+
 class EnterpriseHTTPServer(ThreadingHTTPServer):
-    def __init__(self, server_address: tuple[str, int], root: str | Path, *, require_api_token: bool = False):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        root: str | Path,
+        *,
+        require_api_token: bool = False,
+        api_token_rate_limit: int | None = None,
+        api_token_rate_window_seconds: float = 60.0,
+    ):
         super().__init__(server_address, EnterpriseHandler)
+        if api_token_rate_limit is not None and api_token_rate_limit <= 0:
+            raise ValueError("api_token_rate_limit must be positive")
+        if api_token_rate_window_seconds <= 0:
+            raise ValueError("api_token_rate_window_seconds must be positive")
         self.root = root
         self.require_api_token = require_api_token
+        self.api_token_rate_limit = api_token_rate_limit
+        self.api_token_rate_window_seconds = float(api_token_rate_window_seconds)
+        self._api_token_rate_windows: dict[str, tuple[float, int]] = {}
+        self._api_token_rate_lock = threading.Lock()
+
+    def check_api_token_rate_limit(self, token_id: str) -> None:
+        if self.api_token_rate_limit is None:
+            return
+        now = time.monotonic()
+        with self._api_token_rate_lock:
+            started_at, count = self._api_token_rate_windows.get(token_id, (now, 0))
+            elapsed = now - started_at
+            if elapsed >= self.api_token_rate_window_seconds:
+                started_at, count = now, 0
+                elapsed = 0
+            if count >= self.api_token_rate_limit:
+                remaining = self.api_token_rate_window_seconds - elapsed
+                raise RateLimitError(max(1, int(remaining + 0.999)))
+            self._api_token_rate_windows[token_id] = (started_at, count + 1)
 
 
 class EnterpriseHandler(BaseHTTPRequestHandler):
@@ -445,6 +483,11 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     store.close()
                 return
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+        except RateLimitError as exc:
+            self._json(
+                {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds},
+                HTTPStatus.TOO_MANY_REQUESTS,
+            )
         except PermissionError as exc:
             self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
         except ValueError as exc:
@@ -573,6 +616,11 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 self._set_document_access(document_access_id, payload)
                 return
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+        except RateLimitError as exc:
+            self._json(
+                {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds},
+                HTTPStatus.TOO_MANY_REQUESTS,
+            )
         except PermissionError as exc:
             self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
         except LLMProviderError as exc:
@@ -596,6 +644,11 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 self._reindex_document(doc_id, self._read_json())
                 return
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+        except RateLimitError as exc:
+            self._json(
+                {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds},
+                HTTPStatus.TOO_MANY_REQUESTS,
+            )
         except PermissionError as exc:
             self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
         except (ValueError, FileNotFoundError) as exc:
@@ -2177,6 +2230,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 verified = store.verify_api_token(token.strip())
                 if not verified:
                     raise PermissionError("invalid api token")
+                self.server.check_api_token_rate_limit(verified["id"])
                 if any(scope not in verified["scopes"] for scope in _required_scopes(required_scope)):
                     raise PermissionError("api token scope denied")
                 return verified["workspace_id"], verified["user_id"]
@@ -2204,6 +2258,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         verified = store.verify_api_token(token.strip())
         if not verified:
             raise PermissionError("invalid api token")
+        self.server.check_api_token_rate_limit(verified["id"])
         if any(scope not in verified["scopes"] for scope in _required_scopes(required_scope)):
             raise PermissionError("api token scope denied")
         return verified
@@ -2249,8 +2304,22 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
-def serve(root: str | Path, host: str = "127.0.0.1", port: int = 8765, *, require_api_token: bool = False) -> None:
-    server = EnterpriseHTTPServer((host, port), root, require_api_token=require_api_token)
+def serve(
+    root: str | Path,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    require_api_token: bool = False,
+    api_token_rate_limit: int | None = None,
+    api_token_rate_window_seconds: float = 60.0,
+) -> None:
+    server = EnterpriseHTTPServer(
+        (host, port),
+        root,
+        require_api_token=require_api_token,
+        api_token_rate_limit=api_token_rate_limit,
+        api_token_rate_window_seconds=api_token_rate_window_seconds,
+    )
     try:
         server.serve_forever()
     finally:

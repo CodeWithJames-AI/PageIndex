@@ -477,6 +477,8 @@ def main() -> None:
     serve_cmd.add_argument("--host", default="127.0.0.1")
     serve_cmd.add_argument("--port", type=int, default=8765)
     serve_cmd.add_argument("--require-api-token", action="store_true")
+    serve_cmd.add_argument("--api-token-rate-limit", type=_positive_int)
+    serve_cmd.add_argument("--api-token-rate-window-seconds", type=_positive_float, default=60.0)
 
     eval_cmd = sub.add_parser("eval")
     eval_cmd.add_argument("--fixtures-root")
@@ -488,7 +490,14 @@ def main() -> None:
 
     args = parser.parse_args()
     if args.command == "serve":
-        serve(args.root, host=args.host, port=args.port, require_api_token=args.require_api_token)
+        serve(
+            args.root,
+            host=args.host,
+            port=args.port,
+            require_api_token=args.require_api_token,
+            api_token_rate_limit=args.api_token_rate_limit,
+            api_token_rate_window_seconds=args.api_token_rate_window_seconds,
+        )
         return
     if args.command == "eval":
         print(json.dumps(run_enterprise_eval(args.root, fixtures_root=args.fixtures_root), indent=2))

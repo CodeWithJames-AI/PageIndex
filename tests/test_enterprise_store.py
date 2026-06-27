@@ -10028,6 +10028,71 @@ class EnterpriseStoreTest(unittest.TestCase):
                 local.server_close()
                 local_thread.join(timeout=5)
 
+    def test_http_api_token_rate_limit_is_per_token_and_skips_header_auth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            primary_token = store.create_api_token(workspace_id, "alice", name="primary", scopes=["read"])["token"]
+            other_token = store.create_api_token(workspace_id, "alice", name="other", scopes=["read"])["token"]
+            store.close()
+
+            strict = EnterpriseHTTPServer(
+                ("127.0.0.1", 0),
+                root,
+                require_api_token=True,
+                api_token_rate_limit=2,
+                api_token_rate_window_seconds=60,
+            )
+            strict_thread = threading.Thread(target=strict.serve_forever, daemon=True)
+            strict_thread.start()
+            strict_base = f"http://127.0.0.1:{strict.server_port}"
+            primary_headers = {"Authorization": f"Bearer {primary_token}"}
+            other_headers = {"Authorization": f"Bearer {other_token}"}
+            try:
+                first = _get_json(f"{strict_base}/documents", headers=primary_headers)
+                second = _get_json(f"{strict_base}/documents", headers=primary_headers)
+                limited = _get_error(f"{strict_base}/documents", headers=primary_headers)
+                other = _get_json(f"{strict_base}/documents", headers=other_headers)
+                missing = _get_error(f"{strict_base}/documents")
+
+                self.assertEqual(first["documents"], [])
+                self.assertEqual(second["documents"], [])
+                self.assertEqual(limited["status"], 429)
+                self.assertEqual(limited["error"], "api token rate limit exceeded")
+                self.assertGreater(limited["retry_after_seconds"], 0)
+                self.assertEqual(other["documents"], [])
+                self.assertEqual(missing["error"], "api token required")
+            finally:
+                strict.shutdown()
+                strict.server_close()
+                strict_thread.join(timeout=5)
+
+            local = EnterpriseHTTPServer(
+                ("127.0.0.1", 0),
+                root,
+                api_token_rate_limit=1,
+                api_token_rate_window_seconds=60,
+            )
+            local_thread = threading.Thread(target=local.serve_forever, daemon=True)
+            local_thread.start()
+            local_base = f"http://127.0.0.1:{local.server_port}"
+            local_headers = {
+                "X-PageIndex-Workspace": workspace_id,
+                "X-PageIndex-User": "alice",
+            }
+            try:
+                local_first = _get_json(f"{local_base}/documents", headers=local_headers)
+                local_second = _get_json(f"{local_base}/documents", headers=local_headers)
+
+                self.assertEqual(local_first["documents"], [])
+                self.assertEqual(local_second["documents"], [])
+            finally:
+                local.shutdown()
+                local.server_close()
+                local_thread.join(timeout=5)
+
     def test_http_non_strict_mode_ignores_malformed_non_bearer_authorization(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"

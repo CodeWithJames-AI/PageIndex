@@ -607,6 +607,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/query-retention/purge":
                 self._purge_query_retention(payload)
                 return
+            if parsed.path == "/provider-config/probe":
+                self._probe_provider_config()
+                return
             if parsed.path == "/provider-config":
                 self._set_provider_config(payload)
                 return
@@ -2009,6 +2012,16 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
             self._json(store.check_workspace_provider_config(workspace_id, user_id))
+        finally:
+            store.close()
+
+    def _probe_provider_config(self) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store, required_scope=("audit", "write"), require_api_token=True
+            )
+            self._json(store.probe_workspace_provider_config(workspace_id, user_id))
         finally:
             store.close()
 

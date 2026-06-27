@@ -120,6 +120,71 @@ def synthesize_with_openai_compatible(
     }
 
 
+def probe_openai_compatible_provider(
+    *,
+    model: str,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    timeout: float | None = None,
+    prefer_env_model: bool = True,
+    prefer_env_api_key: bool = True,
+) -> dict[str, Any]:
+    provider_url = _chat_completions_url(base_url or os.environ.get("PAGEINDEX_LLM_BASE_URL", ""))
+    api_key = api_key if api_key is not None else (
+        os.environ.get("PAGEINDEX_LLM_API_KEY") if prefer_env_api_key else None
+    )
+    env_model = os.environ.get("PAGEINDEX_LLM_MODEL", "").strip() if prefer_env_model else ""
+    model = env_model or (model or "pageindex-live").strip()
+    timeout = _llm_timeout(timeout)
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a PageIndex provider readiness probe. Reply with ok.",
+            },
+            {
+                "role": "user",
+                "content": "Reply with ok only.",
+            },
+        ],
+        "temperature": 0,
+        "max_tokens": 3,
+    }
+    request = Request(
+        provider_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=_provider_headers(api_key),
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            _raise_if_provider_response_too_large(response)
+            raw_body = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
+            if len(raw_body) > MAX_PROVIDER_RESPONSE_BYTES:
+                raise LLMProviderError("llm provider response too large")
+            body = json.loads(raw_body.decode("utf-8"))
+    except HTTPError as exc:
+        raise LLMProviderError(f"llm provider probe failed with status {exc.code}") from exc
+    except URLError as exc:
+        raise LLMProviderError("llm provider probe failed") from exc
+    except OSError as exc:
+        raise LLMProviderError("llm provider probe failed") from exc
+    except json.JSONDecodeError as exc:
+        raise LLMProviderError("llm provider probe returned invalid JSON") from exc
+    answer = _provider_answer(body)
+    return {
+        "attempted": True,
+        "ok": True,
+        "provider": "openai-compatible",
+        "model": model,
+        "provider_url": provider_url,
+        "api_key_configured": bool((api_key or "").strip()),
+        "timeout_seconds": timeout,
+        "answer_chars": len(answer),
+    }
+
+
 def stream_with_openai_compatible(
     query: str,
     hits: list[dict[str, Any]],

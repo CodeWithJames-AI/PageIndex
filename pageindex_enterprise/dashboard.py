@@ -646,6 +646,7 @@ DASHBOARD_HTML = """<!doctype html>
               <div class="provider-actions">
                 <button id="refreshProviderButton" class="secondary" type="button">Refresh</button>
                 <button id="checkProviderButton" class="secondary" type="button">Check</button>
+                <button id="probeProviderButton" class="secondary" type="button">Probe</button>
                 <button id="saveProviderButton" type="button">Save</button>
                 <button id="clearProviderButton" class="secondary" type="button">Clear</button>
               </div>
@@ -2133,6 +2134,14 @@ DASHBOARD_HTML = """<!doctype html>
       renderProviderConfig(report);
       providerConfigSummary.className = report.ok ? "status ok" : "status warn";
       providerConfigSummary.textContent = `Provider check ${report.reason || "unknown"}.`;
+    }
+
+    function renderProviderProbe(report) {
+      renderProviderConfig(report);
+      providerConfigSummary.className = report.ok ? "status ok" : "status warn";
+      const probe = report.probe || {};
+      const suffix = probe.attempted ? "provider answered" : "probe not attempted";
+      providerConfigSummary.textContent = `Provider probe ${report.reason || "unknown"} (${suffix}).`;
     }
 
     function renderMessages(messages) {
@@ -3694,6 +3703,16 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus(report.ok ? "Provider check passed." : "Provider check needs attention.", report.ok ? "ok" : "warn");
     }
 
+    async function probeProviderConfig() {
+      setStatus("Probing provider...");
+      const report = await api("/provider-config/probe", {
+        method: "POST",
+        body: JSON.stringify({})
+      });
+      renderProviderProbe(report);
+      setStatus(report.ok ? "Provider probe passed." : "Provider probe needs attention.", report.ok ? "ok" : "warn");
+    }
+
     async function saveProviderConfig() {
       const baseUrl = providerBaseUrlInput.value.trim();
       const model = providerModelInput.value.trim();
@@ -4225,6 +4244,7 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus(error.message, "error");
     }));
     document.getElementById("checkProviderButton").addEventListener("click", () => checkProviderConfig().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("probeProviderButton").addEventListener("click", () => probeProviderConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveProviderButton").addEventListener("click", () => saveProviderConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearProviderButton").addEventListener("click", () => clearProviderConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("chatButton").addEventListener("click", () => sendChatMessage().catch((error) => setStatus(error.message, "error")));

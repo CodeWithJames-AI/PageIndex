@@ -241,6 +241,7 @@ def main() -> None:
     provider_config.add_argument("--timeout-seconds", type=_positive_float)
     provider_config.add_argument("--clear", action="store_true")
     provider_config.add_argument("--check", action="store_true")
+    provider_config.add_argument("--probe", action="store_true")
 
     audit_sink = sub.add_parser("audit-sink")
     audit_sink.add_argument("workspace_id")
@@ -859,7 +860,7 @@ def main() -> None:
             )
             if args.clear and has_updates:
                 raise SystemExit("choose --clear or provider config fields")
-            if args.check and (args.clear or has_updates):
+            if sum(1 for selected in (args.clear, args.check, args.probe, has_updates) if selected) > 1:
                 raise SystemExit("choose only one provider config action")
             if args.clear:
                 config = _workspace_member_cli(
@@ -868,6 +869,10 @@ def main() -> None:
             elif args.check:
                 config = _workspace_member_cli(
                     lambda: store.check_workspace_provider_config(args.workspace_id, args.user_id)
+                )
+            elif args.probe:
+                config = _workspace_member_cli(
+                    lambda: store.probe_workspace_provider_config(args.workspace_id, args.user_id)
                 )
             elif has_updates:
                 if args.base_url is None or args.model is None:

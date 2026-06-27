@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .llm import validate_openai_compatible_config
+from .llm import LLMProviderError, probe_openai_compatible_provider, validate_openai_compatible_config
 
 
 WORKSPACE_WRITE_ROLES = {"owner", "admin", "member"}
@@ -2850,6 +2850,59 @@ class EnterpriseStore:
         report["resolved_timeout_seconds"] = validated["timeout_seconds"]
         return report
 
+    def probe_workspace_provider_config(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        actor_user_id = actor_user_id.strip()
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        report = self.check_workspace_provider_config(workspace_id, actor_user_id)
+        report["probe"] = {"attempted": False, "ok": False}
+        if not report["ok"]:
+            self._record_provider_probe_event(
+                workspace_id,
+                actor_user_id,
+                ok=False,
+                reason=report["reason"],
+                attempted=False,
+                model=report.get("model"),
+            )
+            return report
+        try:
+            probe = probe_openai_compatible_provider(
+                base_url=report["base_url"],
+                api_key=os.environ.get(report["api_key_env_var"]),
+                model=report["model"],
+                timeout=report["timeout_seconds"],
+                prefer_env_model=False,
+                prefer_env_api_key=False,
+            )
+        except LLMProviderError as exc:
+            report["ok"] = False
+            report["reason"] = "probe_failed"
+            report["probe"] = {
+                "attempted": True,
+                "ok": False,
+                "error": str(exc),
+            }
+            self._record_provider_probe_event(
+                workspace_id,
+                actor_user_id,
+                ok=False,
+                reason=report["reason"],
+                attempted=True,
+                model=report.get("model"),
+            )
+            return report
+        report["probe"] = probe
+        report["reason"] = "ok"
+        self._record_provider_probe_event(
+            workspace_id,
+            actor_user_id,
+            ok=True,
+            reason="ok",
+            attempted=True,
+            model=report.get("model"),
+        )
+        return report
+
     def set_workspace_provider_config(
         self,
         workspace_id: str,
@@ -2951,6 +3004,31 @@ class EnterpriseStore:
             "prefer_env_model": False,
             "prefer_env_api_key": False,
         }
+
+    def _record_provider_probe_event(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        *,
+        ok: bool,
+        reason: str,
+        attempted: bool,
+        model: str | None,
+    ) -> None:
+        with self._atomic():
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id,
+                "provider_config.probe",
+                target_type="provider_config",
+                target_id=workspace_id,
+                details={
+                    "ok": ok,
+                    "reason": reason,
+                    "attempted": attempted,
+                    "model": model,
+                },
+            )
 
     def get_workspace_audit_jsonl_sink_config(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)

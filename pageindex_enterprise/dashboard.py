@@ -2141,7 +2141,8 @@ DASHBOARD_HTML = """<!doctype html>
       providerConfigSummary.className = report.ok ? "status ok" : "status warn";
       const probe = report.probe || {};
       const suffix = probe.attempted ? "provider answered" : "probe not attempted";
-      providerConfigSummary.textContent = `Provider probe ${report.reason || "unknown"} (${suffix}).`;
+      const duration = Number.isFinite(probe.duration_ms) ? ` in ${probe.duration_ms} ms` : "";
+      providerConfigSummary.textContent = `Provider probe ${report.reason || "unknown"} (${suffix}${duration}).`;
     }
 
     function renderMessages(messages) {

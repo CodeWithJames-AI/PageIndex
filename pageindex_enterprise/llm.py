@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Any, Iterator
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
@@ -157,6 +158,7 @@ def probe_openai_compatible_provider(
         headers=_provider_headers(api_key),
         method="POST",
     )
+    started = time.perf_counter()
     try:
         with urlopen(request, timeout=timeout) as response:
             _raise_if_provider_response_too_large(response)
@@ -172,6 +174,7 @@ def probe_openai_compatible_provider(
         raise LLMProviderError("llm provider probe failed") from exc
     except json.JSONDecodeError as exc:
         raise LLMProviderError("llm provider probe returned invalid JSON") from exc
+    duration_ms = round((time.perf_counter() - started) * 1000, 3)
     answer = _provider_answer(body)
     return {
         "attempted": True,
@@ -181,6 +184,7 @@ def probe_openai_compatible_provider(
         "provider_url": provider_url,
         "api_key_configured": bool((api_key or "").strip()),
         "timeout_seconds": timeout,
+        "duration_ms": duration_ms,
         "answer_chars": len(answer),
     }
 

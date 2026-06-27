@@ -5256,6 +5256,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(probed["ok"], False)
             self.assertEqual(probed["reason"], "probe_failed")
             self.assertEqual(probed["probe"]["attempted"], True)
+            self.assertGreaterEqual(probed["probe"]["duration_ms"], 0)
             self.assertNotEqual(member_denied.returncode, 0)
             self.assertIn("workspace role denied", member_denied.stderr)
             self.assertNotIn("Traceback", member_denied.stderr)
@@ -5263,9 +5264,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("choose --clear or provider config fields", mixed_clear.stderr)
             self.assertNotIn("Traceback", mixed_clear.stderr)
             self.assertEqual(cleared["configured"], False)
+            probe_events = [event for event in events if event["action"] == "provider_config.probe"]
             self.assertIn("provider_config.set", [event["action"] for event in events])
             self.assertIn("provider_config.probe", [event["action"] for event in events])
             self.assertIn("provider_config.clear", [event["action"] for event in events])
+            self.assertGreaterEqual(probe_events[0]["details"]["duration_ms"], 0)
             self.assertNotIn("cli-secret-key", serialized)
 
     def test_audit_sink_cli_get_set_disable_clear(self):
@@ -10835,6 +10838,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(probed["reason"], "ok")
             self.assertEqual(probed["probe"]["ok"], True)
             self.assertEqual(probed["probe"]["provider_url"], f"http://127.0.0.1:{provider.server_port}/v1/chat/completions")
+            self.assertGreaterEqual(probed["probe"]["duration_ms"], 0)
             self.assertEqual(probe_request["authorization"], "Bearer workspace-secret-key")
             self.assertEqual(probe_request["payload"]["model"], "workspace-model")
             self.assertEqual(probe_request["payload"]["max_tokens"], 3)
@@ -10851,9 +10855,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(provider_payload["model"], "workspace-model")
             self.assertNotEqual(provider_payload["model"], "global-env-model")
             self.assertEqual(cleared["configured"], False)
+            probe_events = [event for event in events if event["action"] == "provider_config.probe"]
             self.assertIn("provider_config.set", [event["action"] for event in events])
             self.assertIn("provider_config.probe", [event["action"] for event in events])
             self.assertIn("provider_config.clear", [event["action"] for event in events])
+            self.assertTrue(any(event["details"].get("attempted") for event in probe_events))
+            self.assertTrue(any("duration_ms" in event["details"] for event in probe_events))
             self.assertNotIn("workspace-secret-key", serialized_events)
             self.assertNotIn("global-secret-key", serialized_events)
 

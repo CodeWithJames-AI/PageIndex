@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 import uuid
 import zipfile
 from contextlib import contextmanager
@@ -2863,8 +2864,10 @@ class EnterpriseStore:
                 reason=report["reason"],
                 attempted=False,
                 model=report.get("model"),
+                duration_ms=None,
             )
             return report
+        started = time.perf_counter()
         try:
             probe = probe_openai_compatible_provider(
                 base_url=report["base_url"],
@@ -2881,6 +2884,7 @@ class EnterpriseStore:
                 "attempted": True,
                 "ok": False,
                 "error": str(exc),
+                "duration_ms": round((time.perf_counter() - started) * 1000, 3),
             }
             self._record_provider_probe_event(
                 workspace_id,
@@ -2889,6 +2893,7 @@ class EnterpriseStore:
                 reason=report["reason"],
                 attempted=True,
                 model=report.get("model"),
+                duration_ms=report["probe"]["duration_ms"],
             )
             return report
         report["probe"] = probe
@@ -2900,6 +2905,7 @@ class EnterpriseStore:
             reason="ok",
             attempted=True,
             model=report.get("model"),
+            duration_ms=probe["duration_ms"],
         )
         return report
 
@@ -3014,7 +3020,16 @@ class EnterpriseStore:
         reason: str,
         attempted: bool,
         model: str | None,
+        duration_ms: float | None,
     ) -> None:
+        details = {
+            "ok": ok,
+            "reason": reason,
+            "attempted": attempted,
+            "model": model,
+        }
+        if duration_ms is not None:
+            details["duration_ms"] = duration_ms
         with self._atomic():
             self._insert_audit_event(
                 workspace_id,
@@ -3022,12 +3037,7 @@ class EnterpriseStore:
                 "provider_config.probe",
                 target_type="provider_config",
                 target_id=workspace_id,
-                details={
-                    "ok": ok,
-                    "reason": reason,
-                    "attempted": attempted,
-                    "model": model,
-                },
+                details=details,
             )
 
     def get_workspace_audit_jsonl_sink_config(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:

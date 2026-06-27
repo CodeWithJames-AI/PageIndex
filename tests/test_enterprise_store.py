@@ -13679,6 +13679,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["queryHistoryExercised"], True)
             self.assertEqual(smoke["sourceSetExercised"], True)
             self.assertEqual(smoke["sourceSetUpdateExercised"], True)
+            self.assertEqual(smoke["sourceSetShareExercised"], True)
             self.assertEqual(smoke["conversationSourceSetExercised"], True)
             self.assertTrue(screenshot_path.exists())
             self.assertGreater(screenshot_path.stat().st_size, 0)

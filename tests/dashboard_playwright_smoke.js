@@ -708,6 +708,61 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#sourceSetList", "shared");
     await waitForText(page, "#queryScopeLabel", "Set: Browser source set updated");
 
+    await page.check("#sourceSetShareRedactInput");
+    await page.fill("#sourceSetShareMaxViewsInput", "2");
+    await page.fill("#sourceSetSharePasswordInput", "browser-source-set-pass");
+    page.once("dialog", async (dialog) => {
+      assert(dialog.type() === "prompt", "source set share expiration prompt was not shown");
+      await dialog.accept("");
+    });
+    const createSourceSetShareResponse = page.waitForResponse(
+      (response) => {
+        if (!response.url().endsWith(`/query-source-sets/${sourceSet.id}/share-links`) || response.request().method() !== "POST") {
+          return false;
+        }
+        try {
+          const payload = JSON.parse(response.request().postData() || "{}");
+          return payload.redact_content === true
+            && payload.max_views === 2
+            && payload.password === "browser-source-set-pass";
+        } catch (_error) {
+          return false;
+        }
+      }
+    );
+    await page.click(`[data-share-source-set-id="${sourceSet.id}"]`);
+    const sourceSetShareResponse = await createSourceSetShareResponse;
+    const sourceSetSharePayload = await sourceSetShareResponse.json();
+    const sourceSetShare = sourceSetSharePayload.share_link || {};
+    assert(typeof sourceSetShare.token === "string" && sourceSetShare.token.startsWith("pss_"), "source set share token was not returned");
+    await waitForText(page, "#status", "Source set share created.");
+    await waitForText(page, "#sourceSetShareList", sourceSetShare.id);
+    await waitForText(page, "#sourceSetShareList", "redacted");
+    await waitForText(page, "#sourceSetShareList", "protected");
+    await waitForText(page, "#sourceSetShareList", "views 0/2");
+    const sourceSetShareUrl = await page.inputValue("#shareUrlOutput");
+    assert(sourceSetShareUrl.endsWith(`/public/source-sets/${encodeURIComponent(sourceSetShare.token)}`), "latest share URL did not point to the source set public route");
+
+    const reloadSourceSetSharesResponse = page.waitForResponse(
+      (response) => response.url().endsWith(`/query-source-sets/${sourceSet.id}/share-links`) && response.request().method() === "GET"
+    );
+    await page.click(`[data-shares-source-set-id="${sourceSet.id}"]`);
+    await reloadSourceSetSharesResponse;
+    await waitForText(page, "#status", "Source set shares loaded.");
+    await waitForText(page, "#sourceSetShareList", sourceSetShare.id);
+
+    page.once("dialog", async (dialog) => {
+      assert(dialog.type() === "confirm", "source set share revoke confirmation was not shown");
+      await dialog.accept();
+    });
+    const revokeSourceSetShareResponse = page.waitForResponse(
+      (response) => response.url().endsWith(`/query-source-set-share-links/${sourceSetShare.id}`) && response.request().method() === "DELETE"
+    );
+    await page.locator(`#sourceSetShareList [data-revoke-share-link-id="${sourceSetShare.id}"]`).click();
+    await revokeSourceSetShareResponse;
+    await waitForText(page, "#status", "Source set shares loaded.");
+    await waitForText(page, "#sourceSetShareList", "inactive");
+
     await page.click(`[data-edit-source-set-id="${sourceSet.id}"]`);
     assert(await page.isChecked("#sourceSetSharedInput"), "edit did not hydrate shared source set checkbox");
     await page.click("#cancelSourceSetEditButton");
@@ -878,6 +933,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       queryHistoryExercised: true,
       sourceSetExercised: true,
       sourceSetUpdateExercised: true,
+      sourceSetShareExercised: true,
       conversationSourceSetExercised: true,
       screenshotPath: screenshotPath || null
     }));

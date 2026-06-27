@@ -597,6 +597,7 @@ DASHBOARD_HTML = """<!doctype html>
               </div>
               <div class="provider-actions">
                 <button id="refreshAuditSinkButton" class="secondary" type="button">Sink</button>
+                <button id="checkAuditSinkButton" class="secondary" type="button">Check sink</button>
                 <button id="saveAuditSinkButton" type="button">Save sink</button>
                 <button id="clearAuditSinkButton" class="secondary" type="button">Clear sink</button>
               </div>
@@ -2705,6 +2706,15 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function checkAuditSinkConfig() {
+      setStatus("Checking audit sink...");
+      const report = await api("/audit-sink/check");
+      renderAuditSinkConfig(report);
+      auditSinkSummary.className = report.ok ? "status ok" : "status warn";
+      auditSinkSummary.textContent = `Sink check ${report.reason || "unknown"}.`;
+      setStatus(report.ok ? "Audit sink check passed." : "Audit sink check needs attention.", report.ok ? "ok" : "warn");
+    }
+
     async function verifyAuditIntegrity(options = {}) {
       if (!options.quiet) {
         setStatus("Verifying audit ledger...");
@@ -4187,6 +4197,7 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("saveAuditRetentionButton").addEventListener("click", () => saveAuditRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearAuditRetentionButton").addEventListener("click", () => clearAuditRetention().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshAuditSinkButton").addEventListener("click", () => refreshAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("checkAuditSinkButton").addEventListener("click", () => checkAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveAuditSinkButton").addEventListener("click", () => saveAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearAuditSinkButton").addEventListener("click", () => clearAuditSinkConfig().catch((error) => setStatus(error.message, "error")));
     document.getElementById("enableAuditLegalHoldButton").addEventListener("click", () => setAuditLegalHold(true).catch((error) => setStatus(error.message, "error")));

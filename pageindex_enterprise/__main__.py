@@ -247,6 +247,7 @@ def main() -> None:
     audit_sink.add_argument("--relative-path")
     audit_sink.add_argument("--disable", action="store_true")
     audit_sink.add_argument("--clear", action="store_true")
+    audit_sink.add_argument("--check", action="store_true")
 
     workspace_export = sub.add_parser("workspace-export")
     workspace_export.add_argument("workspace_id")
@@ -881,11 +882,16 @@ def main() -> None:
             print(json.dumps(config, indent=2))
         elif args.command == "audit-sink":
             has_update = args.relative_path is not None or args.disable
-            if args.clear and has_update:
-                raise SystemExit("choose --clear or audit sink fields")
+            selected_actions = [args.clear, args.check, has_update]
+            if sum(1 for selected in selected_actions if selected) > 1:
+                raise SystemExit("choose only one audit sink action")
             if args.clear:
                 config = _workspace_member_cli(
                     lambda: store.clear_workspace_audit_jsonl_sink_config(args.workspace_id, args.user_id)
+                )
+            elif args.check:
+                config = _workspace_member_cli(
+                    lambda: store.check_workspace_audit_jsonl_sink(args.workspace_id, args.user_id)
                 )
             elif has_update:
                 relative_path = args.relative_path

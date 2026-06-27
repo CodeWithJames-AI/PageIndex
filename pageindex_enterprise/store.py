@@ -2907,6 +2907,48 @@ class EnterpriseStore:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
         return self._workspace_audit_jsonl_sink_config(workspace_id)
 
+    def check_workspace_audit_jsonl_sink(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        config = self._workspace_audit_jsonl_sink_config(workspace_id)
+        checks = {
+            "configured": bool(config["configured"]),
+            "enabled": bool(config["enabled"]),
+            "path_resolves": False,
+            "target_not_directory": False,
+            "parent_preparable": False,
+        }
+        report = {
+            **config,
+            "ok": False,
+            "checks": checks,
+            "reason": "not_configured",
+        }
+        if not config["configured"]:
+            return report
+        if not config["enabled"]:
+            report["reason"] = "disabled"
+            return report
+        sink_path = _workspace_audit_sink_path(self.root, config["relative_path"])
+        if not sink_path:
+            report["reason"] = "invalid_path"
+            return report
+        checks["path_resolves"] = True
+        checks["target_not_directory"] = not sink_path.exists() or sink_path.is_file()
+        ancestor = sink_path.parent
+        while not ancestor.exists() and ancestor != ancestor.parent:
+            ancestor = ancestor.parent
+        checks["parent_preparable"] = ancestor.exists() and ancestor.is_dir() and os.access(ancestor, os.W_OK)
+        report["ok"] = all(checks.values())
+        if report["ok"]:
+            report["reason"] = "ok"
+        elif not checks["target_not_directory"]:
+            report["reason"] = "target_is_directory"
+        elif not checks["parent_preparable"]:
+            report["reason"] = "parent_not_writable"
+        else:
+            report["reason"] = "unavailable"
+        return report
+
     def set_workspace_audit_jsonl_sink_config(
         self,
         workspace_id: str,

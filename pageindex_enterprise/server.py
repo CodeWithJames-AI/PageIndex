@@ -296,6 +296,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            if parsed.path == "/audit-sink/check":
+                self._check_audit_sink()
+                return
             if parsed.path == "/audit-sink":
                 self._get_audit_sink_config()
                 return
@@ -2003,6 +2006,14 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
             self._json(store.get_workspace_audit_jsonl_sink_config(workspace_id, user_id))
+        finally:
+            store.close()
+
+    def _check_audit_sink(self) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+            self._json(store.check_workspace_audit_jsonl_sink(workspace_id, user_id))
         finally:
             store.close()
 

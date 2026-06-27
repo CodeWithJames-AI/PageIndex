@@ -901,12 +901,21 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.rebuild_virtual_index()
             group = store.create_workspace_group(workspace_id, "alice", "Analysts")
             store.add_workspace_group_member(workspace_id, "alice", group["id"], "bob")
-            store.create_workspace_invitation(workspace_id, "alice", "carol@example.com", role="viewer")
+            future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+            past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+            store.create_workspace_invitation(workspace_id, "alice", "carol@example.com", role="viewer", expires_at=future)
+            expired_invitation = store.create_workspace_invitation(
+                workspace_id,
+                "alice",
+                "dana@example.com",
+                role="viewer",
+                expires_at=past,
+            )
             store.create_api_token(
                 workspace_id,
                 "alice",
                 name="usage",
-                expires_at=(datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+                expires_at=future,
             )
             conversation = store.create_conversation(workspace_id, "alice", title="Usage chat")
             store.chat_message(conversation["id"], "alice", "usage analytics", limit=4)
@@ -924,7 +933,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(summary["team"]["members_by_role"], {"member": 1, "owner": 1})
             self.assertEqual(summary["team"]["groups"], 1)
             self.assertEqual(summary["team"]["group_members"], 1)
-            self.assertEqual(summary["team"]["invitations_by_status"], {"pending": 1})
+            self.assertEqual(summary["team"]["invitations_by_status"], {"expired": 1, "pending": 1})
+            self.assertEqual(store._workspace_invitation(expired_invitation["id"])["status"], "expired")
             self.assertEqual(summary["api_tokens"]["active"], 1)
             self.assertEqual(summary["api_tokens"]["with_expiration"], 1)
             self.assertEqual(summary["conversations"]["count"], 1)

@@ -2073,6 +2073,8 @@ class EnterpriseStore:
 
     def get_workspace_usage_summary(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        if self._expire_workspace_invitations(workspace_id):
+            self._commit()
 
         def count(sql: str, args: tuple[Any, ...] = (workspace_id,)) -> int:
             row = self.conn.execute(sql, args).fetchone()

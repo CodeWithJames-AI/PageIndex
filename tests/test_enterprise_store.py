@@ -766,6 +766,53 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIsNotNone(summary["audit"]["latest_event_at"])
             self.assertEqual(store.list_documents(workspace_id=workspace_id, actor_user_id="alice")[0]["id"], doc_id)
 
+    def test_workspace_quota_policy_enforces_documents_pages_and_members(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "quota-one.txt"
+            source.write_text("Quota evidence.", encoding="utf-8")
+            overflow = tmp_path / "quota-two.txt"
+            overflow.write_text("More quota evidence.", encoding="utf-8")
+            store = EnterpriseStore(tmp_path / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+
+            initial = store.set_workspace_quota_policy(
+                workspace_id,
+                "alice",
+                max_documents=1,
+                max_pages=1,
+                max_members=2,
+            )
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Quota memo")
+            policy = store.get_workspace_quota_policy(workspace_id, "alice")
+
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.get_workspace_quota_policy(workspace_id, "bob")
+            with self.assertRaisesRegex(ValueError, "workspace quota exceeded: documents"):
+                store.ingest_file(overflow, workspace_id=workspace_id, actor_user_id="alice", name="Overflow memo")
+            with self.assertRaisesRegex(ValueError, "workspace quota exceeded: members"):
+                store.add_workspace_member(workspace_id, "carol", "viewer", actor_user_id="alice")
+            with self.assertRaisesRegex(ValueError, "workspace quota exceeded: pages"):
+                store.put_pages(doc_id, ["page one", "page two"])
+            with self.assertRaisesRegex(ValueError, "max_members is below current usage"):
+                store.set_workspace_quota_policy(workspace_id, "alice", max_members=1)
+
+            cleared = store.set_workspace_quota_policy(workspace_id, "alice", max_pages=None, max_members=3)
+            events = store.list_audit_events(workspace_id, "alice", action="workspace.quota_policy_update")
+            pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+
+            self.assertEqual(initial["usage"], {"documents": 0, "pages": 0, "members": 2})
+            self.assertTrue(initial["within_quota"])
+            self.assertEqual(policy["usage"], {"documents": 1, "pages": 1, "members": 2})
+            self.assertTrue(policy["within_quota"])
+            self.assertEqual(policy["violations"], [])
+            self.assertIsNone(cleared["max_pages"])
+            self.assertEqual(cleared["max_members"], 3)
+            self.assertEqual(pages["pages"][0]["content"], "Quota evidence.")
+            self.assertIn("workspace.quota_policy_update", [event["action"] for event in events])
+
     def test_workspace_usage_cli_outputs_counts_without_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -3503,6 +3550,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             conversation = store.create_conversation(workspace_id, "alice", title="Export chat")
             store.chat_message(conversation["id"], "alice", "backup question")
             archived_conversation = store.archive_conversation(conversation["id"], "alice")
+            store.set_workspace_quota_policy(workspace_id, "alice", max_documents=10, max_pages=20, max_members=5)
             store.set_workspace_provider_config(
                 workspace_id,
                 "alice",
@@ -3548,6 +3596,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 pages = read_jsonl(archive, "document_pages.jsonl")
                 conversations = read_jsonl(archive, "conversations.jsonl")
                 messages = read_jsonl(archive, "conversation_messages.jsonl")
+                quota_policy = read_jsonl(archive, "workspace_quota_policy.jsonl")
                 provider = read_jsonl(archive, "provider_config.jsonl")
                 audit_events = read_jsonl(archive, "audit_events.jsonl")
                 serialized_bundle = "\n".join(archive.read(name).decode("utf-8") for name in names)
@@ -3565,6 +3614,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(conversations[0]["title"], "Export chat")
             self.assertEqual(conversations[0]["archived_at"], archived_conversation["archived_at"])
             self.assertTrue(any(message["content"] == "backup question" for message in messages))
+            self.assertEqual(quota_policy[0]["max_documents"], 10)
+            self.assertEqual(quota_policy[0]["max_pages"], 20)
+            self.assertEqual(quota_policy[0]["max_members"], 5)
             self.assertEqual(provider[0]["api_key_env_var"], "PAGEINDEX_EXPORT_PROVIDER_KEY")
             self.assertIn("api_token.create", [event["action"] for event in audit_events])
             self.assertTrue(any(event.get("integrity_hash") for event in audit_events))
@@ -3607,6 +3659,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 legal_hold=True,
                 legal_hold_reason="audit preservation order",
             )
+            store.set_workspace_quota_policy(workspace_id, "alice", max_documents=10, max_pages=10, max_members=5)
             store.set_workspace_provider_config(
                 workspace_id,
                 "alice",
@@ -3669,6 +3722,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 restored_runs = restored_store.list_query_runs(workspace_id, "alice")
                 restored_query_retention = restored_store.get_query_retention_policy(workspace_id, "alice")
                 restored_audit_retention = restored_store.get_audit_retention_policy(workspace_id, "alice")
+                restored_quota_policy = restored_store.get_workspace_quota_policy(workspace_id, "alice")
                 restored_provider = restored_store.get_workspace_provider_config(workspace_id, "alice")
                 restored_audit_events = restored_store.list_audit_events(workspace_id, "alice")
                 restored_integrity = restored_store.verify_audit_integrity(workspace_id, "alice")
@@ -3700,6 +3754,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(restored_audit_retention["retention_days"], 90)
             self.assertEqual(restored_audit_retention["legal_hold"], True)
             self.assertEqual(restored_audit_retention["legal_hold_reason"], "audit preservation order")
+            self.assertEqual(restored_quota_policy["max_documents"], 10)
+            self.assertEqual(restored_quota_policy["max_pages"], 10)
+            self.assertEqual(restored_quota_policy["max_members"], 5)
+            self.assertEqual(restored_quota_policy["usage"], {"documents": 1, "pages": 1, "members": 1})
             self.assertEqual(restored_provider["model"], "restore-model")
             self.assertEqual(restored_provider["api_key_env_var"], "PAGEINDEX_RESTORE_PROVIDER_KEY")
             self.assertTrue(any(event.get("integrity_hash") for event in restored_audit_events))
@@ -4088,6 +4146,113 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(usage["api_tokens"]["active"], 3)
             self.assertNotIn("pit_", serialized)
             self.assertNotIn("token_hash", serialized)
+
+    def test_http_workspace_quota_policy_requires_admin_audit_write_and_blocks_ingest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "http-quota-one.txt"
+            source.write_text("HTTP quota evidence.", encoding="utf-8")
+            overflow = tmp_path / "http-quota-two.txt"
+            overflow.write_text("HTTP overflow evidence.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            full_token = store.create_api_token(workspace_id, "alice", name="full")["token"]
+            write_only_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            audit_only_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store.conn.commit()
+            member_token = member_token_record["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            url = f"{base}/workspace-quota-policy"
+            full_headers = {"Authorization": f"Bearer {full_token}"}
+            write_headers = {"Authorization": f"Bearer {write_only_token}"}
+            audit_headers = {"Authorization": f"Bearer {audit_only_token}"}
+            member_headers = {"Authorization": f"Bearer {member_token}"}
+            try:
+                missing = _get_error(url)
+                write_get = _get_error(url, headers=write_headers)
+                member_get = _get_error(url, headers=member_headers)
+                initial = _get_json(url, headers=full_headers)
+                audit_post = _post_json(
+                    url,
+                    {"max_documents": 1},
+                    headers=audit_headers,
+                    status=403,
+                )
+                write_post = _post_json(
+                    url,
+                    {"max_documents": 1},
+                    headers=write_headers,
+                    status=403,
+                )
+                member_post = _post_json(
+                    url,
+                    {"max_documents": 1},
+                    headers=member_headers,
+                    status=403,
+                )
+                bad_limit = _post_json(url, {"max_documents": 0}, headers=full_headers, status=400)
+                empty_update = _post_json(url, {}, headers=full_headers, status=400)
+                saved = _post_json(
+                    url,
+                    {"max_documents": 1, "max_pages": 1, "max_members": 2},
+                    headers=full_headers,
+                )
+                first_ingest = _post_json(
+                    f"{base}/ingest-file",
+                    {"path": str(source), "name": "HTTP quota memo"},
+                    headers=full_headers,
+                    status=201,
+                )
+                over_document = _post_json(
+                    f"{base}/ingest-file",
+                    {"path": str(overflow), "name": "HTTP overflow memo"},
+                    headers=full_headers,
+                    status=400,
+                )
+                over_member = _post_json(
+                    f"{base}/workspace-members",
+                    {"user_id": "carol", "role": "viewer"},
+                    headers=full_headers,
+                    status=400,
+                )
+                read_back = _get_json(url, headers=full_headers)
+                cleared = _post_json(url, {"max_documents": None}, headers=full_headers)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(missing["error"], "api token required")
+            self.assertEqual(write_get["error"], "api token scope denied")
+            self.assertEqual(member_get["error"], "workspace role denied")
+            self.assertIsNone(initial["max_documents"])
+            self.assertEqual(initial["usage"], {"documents": 0, "pages": 0, "members": 2})
+            self.assertEqual(audit_post["error"], "api token scope denied")
+            self.assertEqual(write_post["error"], "api token scope denied")
+            self.assertEqual(member_post["error"], "workspace role denied")
+            self.assertEqual(bad_limit["error"], "max_documents must be a positive integer")
+            self.assertEqual(empty_update["error"], "workspace quota policy update is required")
+            self.assertEqual(saved["max_documents"], 1)
+            self.assertEqual(saved["max_pages"], 1)
+            self.assertEqual(saved["max_members"], 2)
+            self.assertIn("doc_id", first_ingest)
+            self.assertEqual(over_document["error"], "workspace quota exceeded: documents")
+            self.assertEqual(over_member["error"], "workspace quota exceeded: members")
+            self.assertEqual(read_back["usage"], {"documents": 1, "pages": 1, "members": 2})
+            self.assertTrue(read_back["within_quota"])
+            self.assertIsNone(cleared["max_documents"])
 
     def test_token_lifecycle_cli_lists_and_revokes_without_leaking_hashes(self):
         with tempfile.TemporaryDirectory() as tmp:

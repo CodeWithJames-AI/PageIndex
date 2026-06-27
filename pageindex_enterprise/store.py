@@ -87,6 +87,7 @@ WORKSPACE_EXPORT_TABLES = (
     "api_token_policy",
     "query_retention_policy",
     "audit_retention_policy",
+    "workspace_quota_policy",
     "provider_config",
     "audit_events",
 )
@@ -113,6 +114,7 @@ WORKSPACE_IMPORT_INSERT_ORDER = (
     "api_token_policy",
     "query_retention_policy",
     "audit_retention_policy",
+    "workspace_quota_policy",
     "provider_config",
     "audit_events",
 )
@@ -121,6 +123,7 @@ WORKSPACE_IMPORT_DB_TABLES = {
     "api_token_policy": "api_token_policies",
     "query_retention_policy": "query_retention_policies",
     "audit_retention_policy": "audit_retention_policies",
+    "workspace_quota_policy": "workspace_quota_policies",
     "provider_config": "workspace_provider_configs",
 }
 WORKSPACE_EXPORT_OMITTED_TABLES = ("api_tokens",)
@@ -188,6 +191,14 @@ def _normalize_policy_days(days: int | None, name: str) -> int | None:
     if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return days
+
+
+def _normalize_quota_limit(limit: int | None, name: str) -> int | None:
+    if limit is None:
+        return None
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError(f"{name} must be a positive integer or null")
+    return limit
 
 
 def _normalize_legal_hold_reason(reason: str | None) -> str | None:
@@ -595,6 +606,8 @@ def _workspace_import_rows_for_insert(table: str, rows: list[dict[str, Any]]) ->
         return [row for row in rows if row.get("updated_at")]
     if table == "audit_retention_policy":
         return [row for row in rows if row.get("updated_at")]
+    if table == "workspace_quota_policy":
+        return [row for row in rows if row.get("updated_at") and row.get("updated_by")]
     if table == "provider_config":
         return [
             row
@@ -748,6 +761,15 @@ class EnterpriseStore:
               default_expires_in_days INTEGER,
               rotation_due_in_days INTEGER,
               updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_quota_policies (
+              workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+              max_documents INTEGER,
+              max_pages INTEGER,
+              max_members INTEGER,
+              updated_at TEXT NOT NULL,
+              updated_by TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS workspace_provider_configs (
@@ -1047,6 +1069,13 @@ class EnterpriseStore:
                 "legal_hold": "INTEGER NOT NULL DEFAULT 0",
                 "legal_hold_reason": "TEXT",
             },
+            "workspace_quota_policies": {
+                "max_documents": "INTEGER",
+                "max_pages": "INTEGER",
+                "max_members": "INTEGER",
+                "updated_at": "TEXT",
+                "updated_by": "TEXT",
+            },
             "workspace_provider_configs": {
                 "provider": "TEXT",
                 "base_url": "TEXT",
@@ -1182,6 +1211,8 @@ class EnterpriseStore:
         previous_role = self.workspace_role(workspace_id, user_id)
         if previous_role == "owner" and role != "owner" and self._workspace_owner_count(workspace_id) <= 1:
             raise ValueError("workspace must keep at least one owner")
+        if previous_role is None:
+            self._enforce_workspace_quota(workspace_id, members_delta=1)
         with self._atomic():
             self.conn.execute(
                 """
@@ -1291,6 +1322,8 @@ class EnterpriseStore:
         role = invitation["role"]
         if existing_role and WORKSPACE_ROLE_RANK[existing_role] > WORKSPACE_ROLE_RANK[role]:
             role = existing_role
+        if existing_role is None:
+            self._enforce_workspace_quota(workspace_id, members_delta=1)
         accepted_at = _now()
         with self._atomic():
             self.conn.execute(
@@ -1614,6 +1647,168 @@ class EnterpriseStore:
                 "latest_event_at": latest_audit["created_at"] if latest_audit else None,
             },
         }
+
+    def _workspace_quota_usage(self, workspace_id: str) -> dict[str, int]:
+        documents = int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS count FROM documents WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()["count"]
+        )
+        pages = int(
+            self.conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM document_pages p
+                JOIN documents d ON d.id = p.doc_id
+                WHERE d.workspace_id = ?
+                """,
+                (workspace_id,),
+            ).fetchone()["count"]
+        )
+        members = int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS count FROM workspace_members WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()["count"]
+        )
+        return {"documents": documents, "pages": pages, "members": members}
+
+    def _workspace_quota_policy(self, workspace_id: str) -> dict[str, Any]:
+        self._require_workspace(workspace_id)
+        row = self._one(
+            """
+            SELECT workspace_id, max_documents, max_pages, max_members, updated_at, updated_by
+            FROM workspace_quota_policies
+            WHERE workspace_id = ?
+            """,
+            (workspace_id,),
+        )
+        if row:
+            return dict(row)
+        return {
+            "workspace_id": workspace_id,
+            "max_documents": None,
+            "max_pages": None,
+            "max_members": None,
+            "updated_at": None,
+            "updated_by": None,
+        }
+
+    def _quota_violations(self, policy: dict[str, Any], usage: dict[str, int]) -> list[str]:
+        violations = []
+        limits = {
+            "documents": policy.get("max_documents"),
+            "pages": policy.get("max_pages"),
+            "members": policy.get("max_members"),
+        }
+        for name, limit in limits.items():
+            if limit is not None and usage[name] > int(limit):
+                violations.append(name)
+        return violations
+
+    def get_workspace_quota_policy(self, workspace_id: str, actor_user_id: str) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        policy = self._workspace_quota_policy(workspace_id)
+        usage = self._workspace_quota_usage(workspace_id)
+        violations = self._quota_violations(policy, usage)
+        return {
+            **policy,
+            "usage": usage,
+            "violations": violations,
+            "within_quota": not violations,
+        }
+
+    def set_workspace_quota_policy(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        *,
+        max_documents: int | None | object = _UNSET,
+        max_pages: int | None | object = _UNSET,
+        max_members: int | None | object = _UNSET,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        if max_documents is _UNSET and max_pages is _UNSET and max_members is _UNSET:
+            raise ValueError("workspace quota policy update is required")
+        current = self._workspace_quota_policy(workspace_id)
+        next_limits = {
+            "max_documents": current["max_documents"]
+            if max_documents is _UNSET
+            else _normalize_quota_limit(max_documents, "max_documents"),
+            "max_pages": current["max_pages"]
+            if max_pages is _UNSET
+            else _normalize_quota_limit(max_pages, "max_pages"),
+            "max_members": current["max_members"]
+            if max_members is _UNSET
+            else _normalize_quota_limit(max_members, "max_members"),
+        }
+        usage = self._workspace_quota_usage(workspace_id)
+        for limit_name, usage_name in (
+            ("max_documents", "documents"),
+            ("max_pages", "pages"),
+            ("max_members", "members"),
+        ):
+            limit = next_limits[limit_name]
+            if limit is not None and usage[usage_name] > limit:
+                raise ValueError(f"{limit_name} is below current usage")
+        updated_at = _now()
+        with self._atomic():
+            self.conn.execute(
+                """
+                INSERT INTO workspace_quota_policies (
+                  workspace_id, max_documents, max_pages, max_members, updated_at, updated_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET
+                  max_documents = excluded.max_documents,
+                  max_pages = excluded.max_pages,
+                  max_members = excluded.max_members,
+                  updated_at = excluded.updated_at,
+                  updated_by = excluded.updated_by
+                """,
+                (
+                    workspace_id,
+                    next_limits["max_documents"],
+                    next_limits["max_pages"],
+                    next_limits["max_members"],
+                    updated_at,
+                    actor_user_id.strip(),
+                ),
+            )
+            self._insert_audit_event(
+                workspace_id,
+                actor_user_id.strip(),
+                "workspace.quota_policy_update",
+                target_type="workspace_quota_policy",
+                target_id=workspace_id,
+                details=next_limits,
+            )
+        return self.get_workspace_quota_policy(workspace_id, actor_user_id)
+
+    def _enforce_workspace_quota(
+        self,
+        workspace_id: str | None,
+        *,
+        documents_delta: int = 0,
+        pages_delta: int = 0,
+        members_delta: int = 0,
+    ) -> None:
+        if not workspace_id:
+            return
+        deltas = {
+            "documents": max(0, documents_delta),
+            "pages": max(0, pages_delta),
+            "members": max(0, members_delta),
+        }
+        if not any(deltas.values()):
+            return
+        policy = self._workspace_quota_policy(workspace_id)
+        usage = self._workspace_quota_usage(workspace_id)
+        projected = {name: usage[name] + delta for name, delta in deltas.items()}
+        violations = self._quota_violations(policy, projected)
+        if violations:
+            raise ValueError(f"workspace quota exceeded: {', '.join(violations)}")
 
     def rename_workspace_group(
         self,
@@ -2907,6 +3102,7 @@ class EnterpriseStore:
             "api_token_policy.jsonl": [self._api_token_policy(workspace_id)],
             "query_retention_policy.jsonl": [self._query_retention_policy(workspace_id)],
             "audit_retention_policy.jsonl": [self._audit_retention_policy(workspace_id)],
+            "workspace_quota_policy.jsonl": [self._workspace_quota_policy(workspace_id)],
             "provider_config.jsonl": [self._workspace_provider_config_metadata(workspace_id)],
             "audit_events.jsonl": _workspace_audit_export_rows(self.conn, workspace_id),
         }
@@ -3814,6 +4010,8 @@ class EnterpriseStore:
         existing = self.get_document(doc_id)
         if existing and existing["workspace_id"] and existing["workspace_id"] != workspace_id:
             raise ValueError("Document belongs to another workspace.")
+        if workspace_id and (not existing or not existing.get("workspace_id")):
+            self._enforce_workspace_quota(workspace_id, documents_delta=1)
         now = _now()
         self.conn.execute(
             """
@@ -4468,8 +4666,18 @@ class EnterpriseStore:
         return self.get_document(updated_id)
 
     def put_pages(self, doc_id: str, pages: list[str]) -> None:
-        if not self.get_document(doc_id):
+        document = self.get_document(doc_id)
+        if not document:
             raise ValueError(f"Document not found: {doc_id}")
+        current_pages = int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS count FROM document_pages WHERE doc_id = ?",
+                (doc_id,),
+            ).fetchone()["count"]
+        )
+        pages_delta = len(pages) - current_pages
+        if pages_delta > 0:
+            self._enforce_workspace_quota(document.get("workspace_id"), pages_delta=pages_delta)
         self.conn.execute("DELETE FROM document_pages WHERE doc_id = ?", (doc_id,))
         self.conn.executemany(
             "INSERT INTO document_pages (doc_id, page, content) VALUES (?, ?, ?)",

@@ -265,6 +265,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api-token-policy":
                 self._get_api_token_policy()
                 return
+            if parsed.path == "/workspace-quota-policy":
+                self._get_workspace_quota_policy()
+                return
             if parsed.path == "/api-tokens":
                 self._list_api_tokens()
                 return
@@ -540,6 +543,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api-token-policy":
                 self._set_api_token_policy(payload)
+                return
+            if parsed.path == "/workspace-quota-policy":
+                self._set_workspace_quota_policy(payload)
                 return
             if parsed.path == "/chat/completions":
                 self._chat_completion(payload)
@@ -886,6 +892,30 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 store, required_scope=("audit", "write"), require_api_token=True
             )
             self._json(store.set_api_token_policy(workspace_id, user_id, **updates))
+        finally:
+            store.close()
+
+    def _get_workspace_quota_policy(self) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(store, required_scope="audit", require_api_token=True)
+            self._json(store.get_workspace_quota_policy(workspace_id, user_id))
+        finally:
+            store.close()
+
+    def _set_workspace_quota_policy(self, payload: dict[str, Any]) -> None:
+        updates: dict[str, int | None] = {}
+        for name in ("max_documents", "max_pages", "max_members"):
+            if name in payload:
+                updates[name] = _optional_positive_int(payload.get(name), name)
+        if not updates:
+            raise ValueError("workspace quota policy update is required")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store, required_scope=("audit", "write"), require_api_token=True
+            )
+            self._json(store.set_workspace_quota_policy(workspace_id, user_id, **updates))
         finally:
             store.close()
 

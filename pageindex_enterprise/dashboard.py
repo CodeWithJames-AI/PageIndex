@@ -483,6 +483,20 @@ DASHBOARD_HTML = """<!doctype html>
             </div>
           </section>
           <section>
+            <h2 class="section-title">Quotas</h2>
+            <div class="stack">
+              <input id="quotaDocumentsInput" value="" placeholder="max documents" aria-label="Maximum documents">
+              <input id="quotaPagesInput" value="" placeholder="max pages" aria-label="Maximum pages">
+              <input id="quotaMembersInput" value="" placeholder="max members" aria-label="Maximum members">
+              <div class="provider-actions">
+                <button id="refreshQuotaPolicyButton" class="secondary" type="button">Policy</button>
+                <button id="saveQuotaPolicyButton" type="button">Save</button>
+                <button id="clearQuotaPolicyButton" class="secondary" type="button">Clear</button>
+              </div>
+              <div id="quotaPolicySummary" class="muted">Quota not loaded.</div>
+            </div>
+          </section>
+          <section>
             <h2 class="section-title">Invitations</h2>
             <div class="stack">
               <input id="invitationEmailInput" value="" placeholder="email" aria-label="Invitation email">
@@ -769,6 +783,10 @@ DASHBOARD_HTML = """<!doctype html>
     const groupList = document.getElementById("groupList");
     const usageSummary = document.getElementById("usageSummary");
     const usageReportText = document.getElementById("usageReportText");
+    const quotaDocumentsInput = document.getElementById("quotaDocumentsInput");
+    const quotaPagesInput = document.getElementById("quotaPagesInput");
+    const quotaMembersInput = document.getElementById("quotaMembersInput");
+    const quotaPolicySummary = document.getElementById("quotaPolicySummary");
     const invitationList = document.getElementById("invitationList");
     const tokenList = document.getElementById("tokenList");
     const auditList = document.getElementById("auditList");
@@ -1454,6 +1472,34 @@ DASHBOARD_HTML = """<!doctype html>
       usageReportText.textContent = JSON.stringify(usage, null, 2);
     }
 
+    function quotaLimitText(limit) {
+      return limit == null ? "unlimited" : String(limit);
+    }
+
+    function renderWorkspaceQuotaPolicy(policy) {
+      if (!policy) {
+        quotaDocumentsInput.value = "";
+        quotaPagesInput.value = "";
+        quotaMembersInput.value = "";
+        quotaPolicySummary.className = "muted";
+        quotaPolicySummary.textContent = "Quota not loaded.";
+        return;
+      }
+      const maxDocuments = policy.max_documents == null ? null : policy.max_documents;
+      const maxPages = policy.max_pages == null ? null : policy.max_pages;
+      const maxMembers = policy.max_members == null ? null : policy.max_members;
+      const usage = policy.usage || {};
+      const violations = Array.isArray(policy.violations) ? policy.violations : [];
+      quotaDocumentsInput.value = maxDocuments == null ? "" : String(maxDocuments);
+      quotaPagesInput.value = maxPages == null ? "" : String(maxPages);
+      quotaMembersInput.value = maxMembers == null ? "" : String(maxMembers);
+      const usageText = `${usage.documents || 0}/${quotaLimitText(maxDocuments)} docs | ${usage.pages || 0}/${quotaLimitText(maxPages)} pages | ${usage.members || 0}/${quotaLimitText(maxMembers)} members`;
+      const violationText = violations.length ? ` | over ${violations.join(", ")}` : "";
+      const updatedText = policy.updated_at ? ` | updated ${policy.updated_at}` : "";
+      quotaPolicySummary.className = policy.within_quota === false ? "status warn" : "muted";
+      quotaPolicySummary.textContent = `${usageText}${violationText}${updatedText}`;
+    }
+
     function renderInvitations(invitations) {
       if (!invitations.length) {
         invitationList.className = "member-list muted";
@@ -1948,6 +1994,17 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function refreshWorkspaceQuotaPolicy(options = {}) {
+      if (!options.quiet) {
+        setStatus("Refreshing quota policy...");
+      }
+      const policy = await api("/workspace-quota-policy");
+      renderWorkspaceQuotaPolicy(policy);
+      if (!options.quiet) {
+        setStatus("Quota policy refreshed.", "ok");
+      }
+    }
+
     async function refreshInvitations(options = {}) {
       if (!options.quiet) {
         setStatus("Refreshing invites...");
@@ -2093,6 +2150,12 @@ DASHBOARD_HTML = """<!doctype html>
         usageSummary.className = "muted";
         usageSummary.textContent = "Usage unavailable.";
         usageReportText.textContent = "{}";
+      }
+      try {
+        await refreshWorkspaceQuotaPolicy({ quiet: true });
+      } catch (error) {
+        renderWorkspaceQuotaPolicy(null);
+        quotaPolicySummary.textContent = "Quota unavailable.";
       }
       try {
         await refreshInvitations({ quiet: true });
@@ -2640,6 +2703,49 @@ DASHBOARD_HTML = """<!doctype html>
       });
       renderApiTokenPolicy(policy);
       setStatus("Token policy cleared.", "ok");
+    }
+
+    function quotaLimitValue(input, label) {
+      const value = input.value.trim();
+      if (!value) {
+        return { valid: true, limit: null };
+      }
+      const limit = Number(value);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        setStatus(`${label} must be a positive integer.`, "warn");
+        return { valid: false, limit: null };
+      }
+      return { valid: true, limit };
+    }
+
+    async function saveWorkspaceQuotaPolicy() {
+      const documents = quotaLimitValue(quotaDocumentsInput, "Max documents");
+      const pages = quotaLimitValue(quotaPagesInput, "Max pages");
+      const members = quotaLimitValue(quotaMembersInput, "Max members");
+      if (!documents.valid || !pages.valid || !members.valid) {
+        return;
+      }
+      setStatus("Saving quota policy...");
+      const policy = await api("/workspace-quota-policy", {
+        method: "POST",
+        body: JSON.stringify({
+          max_documents: documents.limit,
+          max_pages: pages.limit,
+          max_members: members.limit
+        })
+      });
+      renderWorkspaceQuotaPolicy(policy);
+      setStatus("Quota policy saved.", "ok");
+    }
+
+    async function clearWorkspaceQuotaPolicy() {
+      setStatus("Clearing quota policy...");
+      const policy = await api("/workspace-quota-policy", {
+        method: "POST",
+        body: JSON.stringify({ max_documents: null, max_pages: null, max_members: null })
+      });
+      renderWorkspaceQuotaPolicy(policy);
+      setStatus("Quota policy cleared.", "ok");
     }
 
     async function rotateApiToken(tokenId) {
@@ -3331,6 +3437,9 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("createGroupButton").addEventListener("click", () => createGroup().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshGroupsButton").addEventListener("click", () => refreshGroups().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshUsageButton").addEventListener("click", () => refreshUsage().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("refreshQuotaPolicyButton").addEventListener("click", () => refreshWorkspaceQuotaPolicy().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("saveQuotaPolicyButton").addEventListener("click", () => saveWorkspaceQuotaPolicy().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("clearQuotaPolicyButton").addEventListener("click", () => clearWorkspaceQuotaPolicy().catch((error) => setStatus(error.message, "error")));
     document.getElementById("createInvitationButton").addEventListener("click", () => createInvitation().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshInvitationsButton").addEventListener("click", () => refreshInvitations().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshTokensButton").addEventListener("click", () => refreshApiTokens().catch((error) => setStatus(error.message, "error")));

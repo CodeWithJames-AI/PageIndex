@@ -4542,6 +4542,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "Delete source set",
                 [doc_id],
             )
+            group = store.create_workspace_group(workspace_id, "alice", "Delete reviewers")
+            store.grant_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice", user_id="viewer")
+            store.grant_document_group_access(
+                doc_id,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                group_id=group["id"],
+            )
             share_link = store.create_document_share_link(
                 doc_id,
                 workspace_id=workspace_id,
@@ -4580,6 +4588,18 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "SELECT COUNT(*) AS count FROM document_share_links WHERE doc_id = ?",
                 (doc_id,),
             ).fetchone()["count"]
+            remaining_document_access_grants = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM document_access_grants WHERE doc_id = ?",
+                (doc_id,),
+            ).fetchone()["count"]
+            remaining_document_group_access_grants = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM document_group_access_grants WHERE doc_id = ?",
+                (doc_id,),
+            ).fetchone()["count"]
+            remaining_document_versions = store.conn.execute(
+                "SELECT COUNT(*) AS count FROM document_versions WHERE doc_id = ?",
+                (doc_id,),
+            ).fetchone()["count"]
 
             self.assertTrue(deleted)
             self.assertIsNone(store.get_document(doc_id))
@@ -4613,12 +4633,23 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(source_set_after_delete["doc_ids"], [])
             self.assertNotEqual(source_set_after_delete["updated_at"], source_set["updated_at"])
             self.assertEqual(remaining_share_link_count, 0)
+            self.assertEqual(remaining_document_access_grants, 0)
+            self.assertEqual(remaining_document_group_access_grants, 0)
+            self.assertEqual(remaining_document_versions, 0)
             self.assertIsNone(store.resolve_document_share_link(share_link["token"]))
             self.assertEqual(events[0]["action"], "document.delete")
             self.assertEqual(events[0]["target_id"], doc_id)
             self.assertEqual(
                 events[0]["details"],
-                {"kind": "txt", "name": "Delete memo", "source_set_count": 1, "share_link_count": 1},
+                {
+                    "kind": "txt",
+                    "name": "Delete memo",
+                    "source_set_count": 1,
+                    "share_link_count": 1,
+                    "document_access_grant_count": 1,
+                    "document_group_access_grant_count": 1,
+                    "document_version_count": 1,
+                },
             )
             self.assertNotIn(str(source), serialized)
             self.assertNotIn("Deletion target evidence.", serialized)

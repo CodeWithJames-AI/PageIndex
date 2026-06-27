@@ -7496,10 +7496,31 @@ class EnterpriseStore:
             ).fetchall()
             affected_source_set_ids = [row["source_set_id"] for row in rows]
         share_link_count = 0
+        document_access_grant_count = 0
+        document_group_access_grant_count = 0
+        document_version_count = 0
         if document["workspace_id"]:
             share_link_count = int(
                 self._one(
                     "SELECT COUNT(*) AS count FROM document_share_links WHERE workspace_id = ? AND doc_id = ?",
+                    (document["workspace_id"], doc_id),
+                )["count"]
+            )
+            document_access_grant_count = int(
+                self._one(
+                    "SELECT COUNT(*) AS count FROM document_access_grants WHERE workspace_id = ? AND doc_id = ?",
+                    (document["workspace_id"], doc_id),
+                )["count"]
+            )
+            document_group_access_grant_count = int(
+                self._one(
+                    "SELECT COUNT(*) AS count FROM document_group_access_grants WHERE workspace_id = ? AND doc_id = ?",
+                    (document["workspace_id"], doc_id),
+                )["count"]
+            )
+            document_version_count = int(
+                self._one(
+                    "SELECT COUNT(*) AS count FROM document_versions WHERE workspace_id = ? AND doc_id = ?",
                     (document["workspace_id"], doc_id),
                 )["count"]
             )
@@ -7532,6 +7553,9 @@ class EnterpriseStore:
                         "kind": document["kind"],
                         "source_set_count": len(affected_source_set_ids),
                         "share_link_count": share_link_count,
+                        "document_access_grant_count": document_access_grant_count,
+                        "document_group_access_grant_count": document_group_access_grant_count,
+                        "document_version_count": document_version_count,
                     },
                 )
         return deleted

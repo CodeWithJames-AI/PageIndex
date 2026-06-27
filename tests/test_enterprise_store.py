@@ -7200,6 +7200,20 @@ class EnterpriseStoreTest(unittest.TestCase):
                     check=True,
                 ).stdout
             )
+            denied_list = subprocess.run(
+                [*base, "list-tokens", "ws_cli", "mallory"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            denied_revoke = subprocess.run(
+                [*base, "revoke-token", "ws_cli", "mallory", second["id"]],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
             store = EnterpriseStore(root)
             try:
                 first_verified = store.verify_api_token(first["token"])
@@ -7214,6 +7228,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual([token["id"] for token in after], [second["id"]])
             self.assertIsNone(first_verified)
             self.assertEqual(second_verified["workspace_id"], "ws_cli")
+            self.assertNotEqual(denied_list.returncode, 0)
+            self.assertNotEqual(denied_revoke.returncode, 0)
+            self.assertIn("workspace access denied", denied_list.stderr)
+            self.assertIn("workspace access denied", denied_revoke.stderr)
+            self.assertNotIn("Traceback", denied_list.stderr)
+            self.assertNotIn("Traceback", denied_revoke.stderr)
+            self.assertNotIn(second["token"], denied_revoke.stdout + denied_revoke.stderr)
+            self.assertNotIn("token_hash", denied_list.stdout + denied_list.stderr)
+            self.assertNotIn("token_hash", denied_revoke.stdout + denied_revoke.stderr)
 
     def test_token_rotation_cli_replaces_token_without_leaking_old_secret(self):
         with tempfile.TemporaryDirectory() as tmp:

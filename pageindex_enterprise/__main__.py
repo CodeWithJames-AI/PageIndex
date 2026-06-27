@@ -829,9 +829,10 @@ def main() -> None:
                 )
             )
         elif args.command == "list-tokens":
-            print(json.dumps(store.list_api_tokens(args.workspace_id, args.user_id), indent=2))
+            print(json.dumps(_api_token_cli(lambda: store.list_api_tokens(args.workspace_id, args.user_id)), indent=2))
         elif args.command == "revoke-token":
-            print(json.dumps({"revoked": store.revoke_api_token(args.workspace_id, args.user_id, args.token_id)}))
+            revoked = _api_token_cli(lambda: store.revoke_api_token(args.workspace_id, args.user_id, args.token_id))
+            print(json.dumps({"revoked": revoked}))
         elif args.command == "rotate-token":
             rotated = _api_token_cli(lambda: store.rotate_api_token(args.workspace_id, args.user_id, args.token_id))
             if rotated is None:

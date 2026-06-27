@@ -563,10 +563,23 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#status", "Provider cleared.");
     await waitForText(page, "#providerConfigSummary", "Provider not configured.");
 
+    await page.locator("[data-add-query-doc-id]").first().click();
+    await waitForText(page, "#queryScopeLabel", `Doc: ${expectedDocument}`);
+
     await page.fill("#queryInput", query);
     await page.fill("#hintInput", "");
     const queryResponse = page.waitForResponse(
-      (response) => response.url().endsWith("/query") && response.request().method() === "POST"
+      (response) => {
+        if (!response.url().endsWith("/query") || response.request().method() !== "POST") {
+          return false;
+        }
+        try {
+          const payload = JSON.parse(response.request().postData() || "{}");
+          return Array.isArray(payload.doc_ids) && payload.doc_ids.length === 1;
+        } catch (_error) {
+          return false;
+        }
+      }
     );
     await page.click("#queryButton");
     await queryResponse;

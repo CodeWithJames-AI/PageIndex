@@ -807,8 +807,7 @@ DASHBOARD_HTML = """<!doctype html>
     const queryRetentionSummary = document.getElementById("queryRetentionSummary");
     let activeConversationId = "";
     let activeFolderId = "";
-    let activeQueryDocId = "";
-    let activeQueryDocName = "";
+    let activeQueryDocs = [];
     let workspaceExportUrl = "";
     let currentFolders = [];
 
@@ -847,19 +846,72 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function renderQueryScope() {
-      queryScopeLabel.textContent = activeQueryDocId ? `Doc: ${activeQueryDocName || activeQueryDocId}` : "Workspace";
+      if (!activeQueryDocs.length) {
+        queryScopeLabel.textContent = "Workspace";
+        return;
+      }
+      const labels = activeQueryDocs.map((doc) => doc.name || doc.id);
+      if (labels.length === 1) {
+        queryScopeLabel.textContent = `Doc: ${labels[0]}`;
+        return;
+      }
+      const preview = labels.slice(0, 2).join(", ");
+      queryScopeLabel.textContent = `${labels.length} docs: ${preview}${labels.length > 2 ? ", ..." : ""}`;
+    }
+
+    function normalizeQueryDocument(docId, docName) {
+      const id = String(docId || "").trim();
+      if (!id) {
+        return null;
+      }
+      return {
+        id,
+        name: String(docName || docId || "").trim() || id
+      };
     }
 
     function setQueryDocumentScope(docId, docName) {
-      activeQueryDocId = docId || "";
-      activeQueryDocName = docName || docId || "";
+      const queryDoc = normalizeQueryDocument(docId, docName);
+      activeQueryDocs = queryDoc ? [queryDoc] : [];
       renderQueryScope();
       queryInput.focus();
-      setStatus(activeQueryDocId ? `Query scoped to ${activeQueryDocName}.` : "Query scope cleared.", activeQueryDocId ? "ok" : "warn");
+      setStatus(queryDoc ? `Query scoped to ${queryDoc.name}.` : "Query scope cleared.", queryDoc ? "ok" : "warn");
+    }
+
+    function addQueryDocumentScope(docId, docName) {
+      const queryDoc = normalizeQueryDocument(docId, docName);
+      if (!queryDoc) {
+        setStatus("Document not found.", "warn");
+        return;
+      }
+      const existingIndex = activeQueryDocs.findIndex((doc) => doc.id === queryDoc.id);
+      if (existingIndex >= 0) {
+        activeQueryDocs = activeQueryDocs.map((doc, index) => index === existingIndex ? { ...doc, name: queryDoc.name || doc.name } : doc);
+      } else {
+        activeQueryDocs = [...activeQueryDocs, queryDoc];
+      }
+      renderQueryScope();
+      queryInput.focus();
+      setStatus(
+        existingIndex >= 0 ? `${queryDoc.name} is already in query scope.` : `Added ${queryDoc.name} to query scope (${activeQueryDocs.length} docs).`,
+        "ok"
+      );
     }
 
     function clearQueryScope() {
       setQueryDocumentScope("", "");
+    }
+
+    function pruneQueryDocumentScope(documents) {
+      if (!activeQueryDocs.length) {
+        return;
+      }
+      const availableDocIds = new Set(documents.map((doc) => String(doc.id || "")));
+      const prunedDocs = activeQueryDocs.filter((doc) => availableDocIds.has(doc.id));
+      if (prunedDocs.length !== activeQueryDocs.length) {
+        activeQueryDocs = prunedDocs;
+        renderQueryScope();
+      }
     }
 
     function decodeQueryPayload(value) {
@@ -882,15 +934,23 @@ DASHBOARD_HTML = """<!doctype html>
       const query = payload.prompt || payload.query || params.get("query") || "";
       const docId = payload.doc_id || payload.docId || params.get("doc_id") || "";
       const docName = payload.doc_name || payload.docName || params.get("doc_name") || docId;
+      const payloadDocIds = Array.isArray(payload.doc_ids) ? payload.doc_ids : (Array.isArray(payload.docIds) ? payload.docIds : []);
+      const payloadDocNames = Array.isArray(payload.doc_names) ? payload.doc_names : (Array.isArray(payload.docNames) ? payload.docNames : []);
+      const repeatedDocIds = params.getAll("doc_id").map((value) => value.trim()).filter(Boolean);
+      const listDocIds = params.getAll("doc_ids").flatMap((value) => value.split(",")).map((value) => value.trim()).filter(Boolean);
+      const docIds = payloadDocIds.length ? payloadDocIds : [...listDocIds, ...(repeatedDocIds.length > 1 ? repeatedDocIds : [])];
       if (query) {
         queryInput.value = query;
       }
-      if (docId) {
+      if (docIds.length) {
+        activeQueryDocs = docIds.map((id, index) => normalizeQueryDocument(id, payloadDocNames[index] || id)).filter(Boolean);
+        renderQueryScope();
+      } else if (docId) {
         setQueryDocumentScope(docId, docName);
       } else {
         renderQueryScope();
       }
-      if (query || docId) {
+      if (query || docId || docIds.length) {
         setStatus("Query prefilled.", "ok");
       }
     }
@@ -921,6 +981,7 @@ DASHBOARD_HTML = """<!doctype html>
           ${doc.folder_id ? `<div class="muted">folder ${escapeHtml(doc.folder_id)}</div>` : ""}
           <div class="doc-actions">
             <button class="secondary" type="button" data-query-doc-id="${escapeHtml(doc.id)}" data-query-doc-name="${escapeHtml(doc.name)}">Ask</button>
+            <button class="secondary" type="button" data-add-query-doc-id="${escapeHtml(doc.id)}" data-add-query-doc-name="${escapeHtml(doc.name)}">Scope+</button>
             <button class="secondary" type="button" data-questions-doc-id="${escapeHtml(doc.id)}" data-questions-doc-name="${escapeHtml(doc.name)}">Questions</button>
             <button class="secondary" type="button" data-pages-doc-id="${escapeHtml(doc.id)}">Preview</button>
             <button class="secondary" type="button" data-versions-doc-id="${escapeHtml(doc.id)}">Versions</button>
@@ -938,6 +999,9 @@ DASHBOARD_HTML = """<!doctype html>
       `).join("");
       documentList.querySelectorAll("[data-query-doc-id]").forEach((button) => {
         button.addEventListener("click", () => setQueryDocumentScope(button.dataset.queryDocId, button.dataset.queryDocName));
+      });
+      documentList.querySelectorAll("[data-add-query-doc-id]").forEach((button) => {
+        button.addEventListener("click", () => addQueryDocumentScope(button.dataset.addQueryDocId, button.dataset.addQueryDocName));
       });
       documentList.querySelectorAll("[data-questions-doc-id]").forEach((button) => {
         button.addEventListener("click", () => loadDocumentQuestions(button.dataset.questionsDocId, button.dataset.questionsDocName).catch((error) => setStatus(error.message, "error")));
@@ -1685,9 +1749,7 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Refreshing...");
       const payload = await api("/documents");
       const documents = payload.documents || [];
-      if (activeQueryDocId && !documents.some((doc) => doc.id === activeQueryDocId)) {
-        clearQueryScope();
-      }
+      pruneQueryDocumentScope(documents);
       renderDocuments(documents);
       setStatus("Documents refreshed.", "ok");
     }
@@ -3208,8 +3270,9 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Querying...");
       const hint = hintInput.value.trim();
       const body = { query: queryInput.value.trim(), expert_hints: hint ? [hint] : [] };
-      if (activeQueryDocId) {
-        body.doc_ids = [activeQueryDocId];
+      const scopedDocIds = activeQueryDocs.map((doc) => doc.id);
+      if (scopedDocIds.length) {
+        body.doc_ids = scopedDocIds;
       }
       const payload = await api("/query", {
         method: "POST",

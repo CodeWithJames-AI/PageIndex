@@ -3713,6 +3713,8 @@ class EnterpriseStore:
             )
             if not current:
                 return None
+            if _is_expired(current["expires_at"]):
+                raise ValueError("api token expired")
             scopes = _decode_api_token_scopes(current["scopes_json"])
             if scopes is None:
                 raise ValueError("Stored api token scopes are invalid.")

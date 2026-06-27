@@ -4867,7 +4867,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.add_workspace_member(workspace_id, "bob", "owner")
             expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+            expired_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
             old = store.create_api_token(workspace_id, "alice", name="ci", expires_at=expires_at, scopes=["read", "audit"])
+            expired = store.create_api_token(
+                workspace_id,
+                "alice",
+                name="expired",
+                expires_at=expired_at,
+                scopes=["read"],
+            )
             bob = store.create_api_token(workspace_id, "bob", name="bob")
 
             rotated = store.rotate_api_token(workspace_id, "alice", old["id"])
@@ -4886,10 +4894,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(rotated["expires_at"], expires_at)
             self.assertEqual(rotated["scopes"], ["read", "audit"])
             self.assertEqual(verified["scopes"], ["read", "audit"])
-            self.assertEqual([token["id"] for token in listed], [rotated["id"]])
-            self.assertEqual(listed[0]["scopes"], ["read", "audit"])
-            self.assertNotIn("token", listed[0])
-            self.assertNotIn("token_hash", listed[0])
+            listed_by_id = {token["id"]: token for token in listed}
+            self.assertEqual(set(listed_by_id), {rotated["id"], expired["id"]})
+            self.assertEqual(listed_by_id[rotated["id"]]["scopes"], ["read", "audit"])
+            self.assertTrue(listed_by_id[rotated["id"]]["active"])
+            self.assertFalse(listed_by_id[expired["id"]]["active"])
+            self.assertTrue(all("token" not in token for token in listed))
+            self.assertTrue(all("token_hash" not in token for token in listed))
             self.assertEqual(old_rows["count"], 0)
             self.assertEqual(events[0]["action"], "api_token.rotate")
             self.assertEqual(events[0]["target_id"], rotated["id"])
@@ -4898,6 +4909,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("token", events[0]["details"])
             self.assertNotIn("token_hash", events[0]["details"])
             self.assertIsNone(store.rotate_api_token(workspace_id, "alice", bob["id"]))
+            with self.assertRaisesRegex(ValueError, "api token expired"):
+                store.rotate_api_token(workspace_id, "alice", expired["id"])
             with self.assertRaisesRegex(PermissionError, "cross-user"):
                 store.rotate_api_token(workspace_id, "alice", bob["id"], token_owner_user_id="bob")
             store.add_workspace_member(workspace_id, "alice", "viewer", actor_user_id="bob")
@@ -9964,6 +9977,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     {},
                     headers=write_headers,
                 )
+                expired_rotation = _post_json(
+                    f"{base}/api-tokens/{expired['id']}/rotate",
+                    {},
+                    headers=full_headers,
+                    status=400,
+                )
                 missing_rotation = _post_json(
                     f"{base}/api-tokens/tok_missing/rotate",
                     {},
@@ -10028,6 +10047,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(rotate_escalation["error"], "api token scope denied")
             self.assertEqual(rotated_write["token"]["rotated_from"], created_write["token"]["id"])
             self.assertEqual(rotated_write["token"]["scopes"], ["write"])
+            self.assertEqual(expired_rotation["error"], "api token expired")
             self.assertEqual(missing_rotation["error"], "token not found")
             self.assertEqual(foreign_revoke, {"revoked": False})
             self.assertEqual(revoked_read, {"revoked": True})

@@ -15317,21 +15317,40 @@ class EnterpriseStoreTest(unittest.TestCase):
 
     def test_release_smoke_builds_packaged_console_and_eval(self):
         repo_root = Path(__file__).resolve().parents[1]
-        result = subprocess.run(
-            [sys.executable, str(repo_root / "scripts" / "release_smoke.py"), "--repo-root", str(repo_root)],
-            cwd="/tmp",
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        report = json.loads(result.stdout)
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "release-manifest.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(repo_root / "scripts" / "release_smoke.py"),
+                    "--repo-root",
+                    str(repo_root),
+                    "--manifest-output",
+                    str(manifest_path),
+                ],
+                cwd="/tmp",
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            report = json.loads(result.stdout)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
         self.assertEqual(report["ok"], True)
         self.assertEqual(report["wheel"], "pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl")
         self.assertEqual(report["checks"]["wheel_built"], True)
         self.assertEqual(report["checks"]["console_script"], True)
+        self.assertEqual(report["checks"]["manifest_generated"], True)
         self.assertEqual(report["checks"]["eval_command"], True)
         self.assertEqual(report["checks"]["eval_checks"]["failed"], 0)
+        self.assertEqual(Path(report["manifest"]["path"]).resolve(), manifest_path.resolve())
+        self.assertEqual(report["manifest"]["artifact_count"], 1)
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["package"], {"name": "pageindex-enterprise-cleanroom", "version": "0.1.0"})
+        self.assertEqual(manifest["artifacts"][0]["filename"], report["wheel"])
+        self.assertEqual(manifest["artifacts"][0]["sha256"], report["manifest"]["wheel_sha256"])
+        self.assertEqual(len(manifest["artifacts"][0]["sha256"]), 64)
+        self.assertGreater(manifest["artifacts"][0]["size_bytes"], 0)
 
     def test_deployment_check_reports_readiness_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:

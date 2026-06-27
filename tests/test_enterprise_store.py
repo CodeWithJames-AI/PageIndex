@@ -13413,6 +13413,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(smoke["workspaceExportExercised"], True)
             self.assertEqual(smoke["workspaceImportPreviewExercised"], True)
             self.assertEqual(smoke["retentionExercised"], True)
+            self.assertEqual(smoke["auditSinkExercised"], True)
             self.assertEqual(smoke["readinessExercised"], True)
             self.assertEqual(smoke["providerExercised"], True)
             self.assertEqual(smoke["queryHistoryExercised"], True)

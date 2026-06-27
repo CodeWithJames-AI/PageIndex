@@ -577,6 +577,33 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#status", "Retention cleared.");
     await waitForText(page, "#auditRetentionSummary", "Retention not set.");
 
+    await waitForText(page, "#auditSinkSummary", "Sink not configured.");
+    await page.fill("#auditSinkPathInput", "audit/browser.jsonl");
+    assert(await page.isChecked("#auditSinkEnabledInput"), "audit sink enabled checkbox should default on");
+    const saveAuditSinkResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/audit-sink") && response.request().method() === "POST"
+    );
+    await page.click("#saveAuditSinkButton");
+    await saveAuditSinkResponse;
+    await waitForText(page, "#status", "Audit sink saved.");
+    await waitForText(page, "#auditSinkSummary", "enabled | audit/browser.jsonl");
+
+    const refreshAuditSinkResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/audit-sink") && response.request().method() === "GET"
+    );
+    await page.click("#refreshAuditSinkButton");
+    await refreshAuditSinkResponse;
+    await waitForText(page, "#status", "Audit sink refreshed.");
+    await waitForText(page, "#auditSinkSummary", "enabled | audit/browser.jsonl");
+
+    const clearAuditSinkResponse = page.waitForResponse(
+      (response) => response.url().endsWith("/audit-sink") && response.request().method() === "POST"
+    );
+    await page.click("#clearAuditSinkButton");
+    await clearAuditSinkResponse;
+    await waitForText(page, "#status", "Audit sink cleared.");
+    await waitForText(page, "#auditSinkSummary", "Sink not configured.");
+
     const readinessResponse = page.waitForResponse(
       (response) => response.url().endsWith("/deployment-check") && response.request().method() === "GET"
     );
@@ -845,6 +872,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       workspaceExportExercised: true,
       workspaceImportPreviewExercised: true,
       retentionExercised: true,
+      auditSinkExercised: true,
       readinessExercised: true,
       providerExercised: true,
       queryHistoryExercised: true,

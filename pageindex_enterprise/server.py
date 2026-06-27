@@ -23,6 +23,7 @@ from .store import (
     WORKSPACE_WRITE_ROLES,
     EnterpriseStore,
     _UNSET,
+    _redacted_audit_export_events,
     expires_at_from_days,
 )
 
@@ -199,21 +200,18 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 store = EnterpriseStore(self.server.root)
                 try:
                     workspace_id, user_id = self._workspace_context(store, required_scope="audit")
-                    self._json(
-                        {
-                            "events": store.list_audit_events(
-                                workspace_id,
-                                user_id,
-                                limit=limit,
-                                since=_str_param(params, "since"),
-                                until=_str_param(params, "until"),
-                                action=_str_param(params, "action"),
-                                event_user_id=_str_param(params, "event_user_id"),
-                                target_type=_str_param(params, "target_type"),
-                                target_id=_str_param(params, "target_id"),
-                            )
-                        }
+                    events = store.list_audit_events(
+                        workspace_id,
+                        user_id,
+                        limit=limit,
+                        since=_str_param(params, "since"),
+                        until=_str_param(params, "until"),
+                        action=_str_param(params, "action"),
+                        event_user_id=_str_param(params, "event_user_id"),
+                        target_type=_str_param(params, "target_type"),
+                        target_id=_str_param(params, "target_id"),
                     )
+                    self._json({"events": _redacted_audit_export_events(events)})
                 finally:
                     store.close()
                 return

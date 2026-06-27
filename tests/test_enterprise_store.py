@@ -12999,6 +12999,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
+            store.record_audit_event(
+                workspace_id,
+                "alice",
+                "custom.secret_probe",
+                target_type="probe",
+                target_id="probe_a",
+                details={
+                    "note": "pit_secret_should_not_list",
+                    "source_set_link": "pss_secret_should_not_list",
+                    "token_hash": "hash_should_not_list",
+                },
+            )
             store.close()
             server = EnterpriseHTTPServer(("127.0.0.1", 0), root)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -13034,6 +13046,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers={"X-PageIndex-Workspace": workspace_id, "X-PageIndex-User": "mallory"},
                 )
                 events = _get_json(f"{base}/audit-events?limit=20", headers=headers)["events"]
+                secret_events = _get_json(
+                    f"{base}/audit-events?limit=20&action=custom.secret_probe",
+                    headers=headers,
+                )["events"]
                 upload_events = _get_json(
                     f"{base}/audit-events?limit=20&action=document.upload&event_user_id=alice&target_type=document",
                     headers=headers,
@@ -13055,10 +13071,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     f"{base}/audit-integrity",
                     headers={"X-PageIndex-Workspace": workspace_id, "X-PageIndex-User": "mallory"},
                 )
-                serialized = json.dumps(events, sort_keys=True)
+                serialized = json.dumps({"events": events, "secret_events": secret_events}, sort_keys=True)
                 exported_event = json.loads(exported)
                 csv_rows = list(csv.DictReader(io.StringIO(exported_csv)))
                 actions = {event["action"] for event in events}
+                secret_event = secret_events[0]
                 upload_target_id = upload_events[0]["target_id"]
                 target_events = _get_json(
                     f"{base}/audit-events?limit=20&target_id={upload_target_id}",
@@ -13072,6 +13089,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertIn("document.upload", actions)
                 self.assertIn("document.import_structure", actions)
                 self.assertIn("query.run", actions)
+                self.assertEqual(secret_event["details"], {"note": "[redacted]", "source_set_link": "[redacted]"})
+                self.assertIsNone(secret_event["integrity_hash"])
                 self.assertEqual({event["action"] for event in upload_events}, {"document.upload"})
                 self.assertEqual({event["target_id"] for event in target_events}, {upload_target_id})
                 self.assertTrue(integrity["ok"])
@@ -13084,6 +13103,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertNotIn("audit evidence", serialized)
                 self.assertNotIn(str(source), serialized)
                 self.assertNotIn(str(structure_path), serialized)
+                self.assertNotIn("pit_secret_should_not_list", serialized)
+                self.assertNotIn("pss_secret_should_not_list", serialized)
+                self.assertNotIn("hash_should_not_list", serialized)
+                self.assertNotIn("token_hash", serialized)
                 self.assertNotIn(upload_bytes.decode("utf-8"), serialized)
                 self.assertNotIn(upload_bytes.decode("utf-8"), exported)
                 self.assertNotIn(upload_bytes.decode("utf-8"), exported_csv)

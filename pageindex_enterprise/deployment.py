@@ -63,6 +63,7 @@ def run_deployment_check(
                 "schema": _check(False, error="store was not opened because root is not writable"),
                 "workspace_owner": _check(False, workspace_count=0, owner_count=0, skipped=True),
                 "audit_integrity": _check(False, workspace_count=0, skipped=True),
+                "audit_sink_delivery": _check(True, workspace_count=0, configured_count=0, skipped=True),
                 "strict_http": _strict_http_check(require_api_token),
                 "active_api_token": _check(False, active_token_count=0, skipped=True),
                 "provider_config": _provider_config_check(
@@ -81,6 +82,7 @@ def run_deployment_check(
                 "schema": _check(False, error=str(exc)),
                 "workspace_owner": _check(False, workspace_count=0, owner_count=0, skipped=True),
                 "audit_integrity": _check(False, workspace_count=0, skipped=True),
+                "audit_sink_delivery": _check(True, workspace_count=0, configured_count=0, skipped=True),
                 "strict_http": _strict_http_check(require_api_token),
                 "active_api_token": _check(False, active_token_count=0, skipped=True),
                 "provider_config": _provider_config_check(
@@ -95,6 +97,7 @@ def run_deployment_check(
             "schema": _schema_check(store),
             "workspace_owner": _workspace_owner_check(store),
             "audit_integrity": _audit_integrity_check(store),
+            "audit_sink_delivery": _audit_sink_delivery_check(store),
             "strict_http": _strict_http_check(require_api_token),
             "active_api_token": _active_api_token_check(store),
             "provider_config": _provider_config_check(
@@ -165,20 +168,7 @@ def _audit_integrity_check(store: EnterpriseStore) -> dict[str, Any]:
     workspaces = [row["id"] for row in store.conn.execute("SELECT id FROM workspaces ORDER BY id")]
     if not workspaces:
         return _check(True, workspace_count=0, checked=0, legacy=0, skipped=True)
-    admin_roles = tuple(WORKSPACE_ADMIN_ROLES)
-    placeholders = ", ".join("?" for _ in admin_roles)
-    admin_rows = store.conn.execute(
-        f"""
-        SELECT workspace_id, user_id
-        FROM workspace_members
-        WHERE role IN ({placeholders})
-        ORDER BY workspace_id, CASE role WHEN 'owner' THEN 0 ELSE 1 END, user_id
-        """,
-        admin_roles,
-    ).fetchall()
-    admin_by_workspace: dict[str, str] = {}
-    for row in admin_rows:
-        admin_by_workspace.setdefault(row["workspace_id"], row["user_id"])
+    admin_by_workspace = _admin_actor_by_workspace(store)
     failures: list[dict[str, Any]] = []
     checked = 0
     legacy = 0
@@ -205,6 +195,111 @@ def _audit_integrity_check(store: EnterpriseStore) -> dict[str, Any]:
         legacy=legacy,
         failing_workspaces=failures,
     )
+
+
+def _audit_sink_delivery_check(store: EnterpriseStore) -> dict[str, Any]:
+    workspace_ids = [row["id"] for row in store.conn.execute("SELECT id FROM workspaces ORDER BY id")]
+    if not workspace_ids:
+        return _check(True, workspace_count=0, configured_count=0, healthy_count=0, skipped=True)
+    admin_by_workspace = _admin_actor_by_workspace(store)
+    reports: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    configured_count = 0
+    enabled_count = 0
+    healthy_count = 0
+    disabled_count = 0
+    format_counts = {"jsonl": 0, "siem-jsonl": 0}
+    unconfigured: list[str] = []
+    missing_operators: list[str] = []
+    for workspace_id in workspace_ids:
+        user_id = admin_by_workspace.get(workspace_id)
+        if not user_id:
+            missing_operators.append(workspace_id)
+            continue
+        config = store.get_workspace_audit_jsonl_sink_config(workspace_id, user_id)
+        if not config.get("configured"):
+            unconfigured.append(workspace_id)
+            continue
+        configured_count += 1
+        sink_format = str(config.get("format") or "jsonl")
+        if sink_format in format_counts:
+            format_counts[sink_format] += 1
+        if not config.get("enabled"):
+            disabled_count += 1
+            reports.append(
+                {
+                    "workspace_id": workspace_id,
+                    "configured": True,
+                    "enabled": False,
+                    "format": sink_format,
+                    "relative_path": config.get("relative_path"),
+                    "reason": "disabled",
+                }
+            )
+            continue
+        enabled_count += 1
+        report = store.check_workspace_audit_jsonl_sink(workspace_id, user_id)
+        if report.get("ok"):
+            healthy_count += 1
+        else:
+            failures.append(
+                {
+                    "workspace_id": workspace_id,
+                    "reason": report.get("reason"),
+                    "relative_path": report.get("relative_path"),
+                    "format": report.get("format"),
+                    "checks": report.get("checks"),
+                }
+            )
+        reports.append(
+            {
+                "workspace_id": workspace_id,
+                "configured": True,
+                "enabled": True,
+                "ok": bool(report.get("ok")),
+                "format": report.get("format"),
+                "relative_path": report.get("relative_path"),
+                "reason": report.get("reason"),
+                "checks": report.get("checks"),
+            }
+        )
+    if missing_operators:
+        failures.extend(
+            {"workspace_id": workspace_id, "reason": "missing owner/admin member"}
+            for workspace_id in missing_operators
+        )
+    return _check(
+        not failures,
+        workspace_count=len(workspace_ids),
+        configured_count=configured_count,
+        enabled_count=enabled_count,
+        healthy_count=healthy_count,
+        disabled_count=disabled_count,
+        unconfigured_count=len(unconfigured),
+        format_counts=format_counts,
+        skipped=configured_count == 0,
+        sink_reports=reports[:10],
+        unconfigured_workspace_ids=unconfigured[:10],
+        failing_workspaces=failures[:10],
+    )
+
+
+def _admin_actor_by_workspace(store: EnterpriseStore) -> dict[str, str]:
+    admin_roles = tuple(WORKSPACE_ADMIN_ROLES)
+    placeholders = ", ".join("?" for _ in admin_roles)
+    rows = store.conn.execute(
+        f"""
+        SELECT workspace_id, user_id
+        FROM workspace_members
+        WHERE role IN ({placeholders})
+        ORDER BY workspace_id, CASE role WHEN 'owner' THEN 0 ELSE 1 END, user_id
+        """,
+        admin_roles,
+    ).fetchall()
+    admin_by_workspace: dict[str, str] = {}
+    for row in rows:
+        admin_by_workspace.setdefault(row["workspace_id"], row["user_id"])
+    return admin_by_workspace
 
 
 def _strict_http_check(require_api_token: bool) -> dict[str, Any]:

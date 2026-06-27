@@ -639,6 +639,7 @@ async function waitForAnyText(page, selector, expectedValues) {
     const readinessReport = JSON.parse((await page.textContent("#readinessReportText")) || "{}");
     assert(readinessReport.ok === true, "deployment readiness report was not ready");
     assert(readinessReport.checks?.strict_http?.ok === true, "deployment readiness did not prove strict HTTP");
+    assert(readinessReport.checks?.audit_sink_delivery?.ok === true, "deployment readiness did not include audit sink delivery");
     assert(!JSON.stringify(readinessReport).includes("pit_"), "deployment readiness leaked token secret");
 
     await waitForText(page, "#providerConfigSummary", "Provider not configured.");

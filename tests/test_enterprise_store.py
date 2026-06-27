@@ -15673,6 +15673,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             workspace_id = store.create_workspace("Production")
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.create_api_token(workspace_id, "alice", name="deploy", scopes=["read", "write", "audit"])
+            store.set_workspace_audit_jsonl_sink_config(
+                workspace_id,
+                "alice",
+                relative_path="audit/deploy.jsonl",
+                format="siem-jsonl",
+            )
             store.close()
 
             old_env = {
@@ -15718,6 +15724,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("query_source_set_share_links", EXPECTED_TABLES)
             self.assertEqual(ready_report["checks"]["workspace_owner"]["owner_count"], 1)
             self.assertEqual(ready_report["checks"]["audit_integrity"]["ok"], True)
+            self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["ok"], True)
+            self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["configured_count"], 1)
+            self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["healthy_count"], 1)
+            self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["format_counts"]["siem-jsonl"], 1)
+            self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["sink_reports"][0]["relative_path"], "audit/deploy.jsonl")
             self.assertEqual(ready_report["checks"]["active_api_token"]["active_token_count"], 1)
             self.assertEqual(ready_report["checks"]["provider_config"]["ok"], True)
             self.assertEqual(ready_report["checks"]["provider_config"]["api_key_configured"], True)
@@ -15734,6 +15745,52 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(secret_url_report["checks"]["provider_config"]["ok"], False)
             self.assertNotIn("sk-secret-deploy-key", serialized_secret_url)
             self.assertNotIn("user:", serialized_secret_url)
+
+    def test_deployment_check_reports_unhealthy_audit_sink_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "deployment-root"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Production")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.create_api_token(workspace_id, "alice", name="deploy", scopes=["read", "write", "audit"])
+            store.set_workspace_audit_jsonl_sink_config(
+                workspace_id,
+                "alice",
+                relative_path="audit/healthy.jsonl",
+                format="siem-jsonl",
+            )
+            store.close()
+
+            ready_report = run_deployment_check(root, require_api_token=True)
+
+            bad_dir = root / "audit" / "bad.jsonl"
+            bad_dir.mkdir(parents=True)
+            store = EnterpriseStore(root)
+            try:
+                store.set_workspace_audit_jsonl_sink_config(
+                    workspace_id,
+                    "alice",
+                    relative_path="audit/bad.jsonl",
+                    format="jsonl",
+                )
+            finally:
+                store.close()
+            bad_report = run_deployment_check(root, require_api_token=True)
+
+            self.assertEqual(ready_report["ok"], True, ready_report)
+            self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["ok"], True)
+            self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["configured_count"], 1)
+            self.assertEqual(ready_report["checks"]["audit_sink_delivery"]["healthy_count"], 1)
+            self.assertEqual(bad_report["ok"], False)
+            self.assertEqual(bad_report["checks"]["audit_sink_delivery"]["ok"], False)
+            self.assertEqual(bad_report["checks"]["audit_sink_delivery"]["configured_count"], 1)
+            self.assertEqual(bad_report["checks"]["audit_sink_delivery"]["healthy_count"], 0)
+            self.assertEqual(bad_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]["workspace_id"], workspace_id)
+            self.assertEqual(bad_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]["reason"], "target_is_directory")
+            self.assertEqual(
+                bad_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]["checks"]["target_not_directory"],
+                False,
+            )
 
     def test_http_deployment_check_requires_admin_audit_token_and_reports_readiness(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -15784,6 +15841,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(strict_report["ok"], True, strict_report)
             self.assertEqual(strict_report["checks"]["strict_http"]["ok"], True)
             self.assertEqual(strict_report["checks"]["audit_integrity"]["ok"], True)
+            self.assertEqual(strict_report["checks"]["audit_sink_delivery"]["ok"], True)
+            self.assertEqual(strict_report["checks"]["audit_sink_delivery"]["skipped"], True)
             self.assertEqual(local_report["ok"], False)
             self.assertEqual(local_report["checks"]["strict_http"]["ok"], False)
             self.assertNotIn("pit_", serialized)

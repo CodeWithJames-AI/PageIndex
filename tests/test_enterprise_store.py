@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from pageindex_enterprise import EnterpriseStore
-from pageindex_enterprise.deployment import run_deployment_check
+from pageindex_enterprise.deployment import EXPECTED_TABLES, run_deployment_check
 from pageindex_enterprise.eval import run_enterprise_eval
 from pageindex_enterprise.llm import (
     LLMProviderError,
@@ -14424,6 +14424,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(ready_report["summary"]["failed"], 0)
             self.assertEqual(ready_report["checks"]["root_writable"]["ok"], True)
             self.assertEqual(ready_report["checks"]["schema"]["ok"], True)
+            self.assertEqual(ready_report["checks"]["schema"]["expected_table_count"], len(EXPECTED_TABLES))
+            self.assertIn("query_source_set_share_links", EXPECTED_TABLES)
             self.assertEqual(ready_report["checks"]["workspace_owner"]["owner_count"], 1)
             self.assertEqual(ready_report["checks"]["audit_integrity"]["ok"], True)
             self.assertEqual(ready_report["checks"]["active_api_token"]["active_token_count"], 1)

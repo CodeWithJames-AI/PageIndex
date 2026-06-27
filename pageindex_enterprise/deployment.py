@@ -12,15 +12,37 @@ from .store import EnterpriseStore, WORKSPACE_ADMIN_ROLES, _decode_api_token_sco
 EXPECTED_TABLES = {
     "workspaces",
     "workspace_members",
+    "workspace_invitations",
+    "workspace_groups",
+    "workspace_group_members",
     "api_tokens",
+    "api_token_policies",
+    "workspace_quota_policies",
     "workspace_provider_configs",
     "workspace_audit_jsonl_sinks",
+    "audit_retention_policies",
+    "query_retention_policies",
+    "audit_events",
+    "folders",
+    "folder_access_grants",
+    "folder_group_access_grants",
     "documents",
+    "document_access_grants",
+    "document_group_access_grants",
+    "document_share_links",
     "document_pages",
+    "document_versions",
+    "query_source_sets",
+    "query_source_set_documents",
+    "query_source_set_share_links",
     "query_runs",
+    "conversations",
+    "conversation_share_links",
+    "conversation_messages",
     "evidence",
     "citations",
-    "audit_events",
+    "virtual_nodes",
+    "virtual_node_docs",
 }
 
 
@@ -119,7 +141,12 @@ def _schema_check(store: EnterpriseStore) -> dict[str, Any]:
     rows = store.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
     tables = {row["name"] for row in rows}
     missing = sorted(EXPECTED_TABLES - tables)
-    return _check(not missing, table_count=len(tables), missing_tables=missing)
+    return _check(
+        not missing,
+        table_count=len(tables),
+        expected_table_count=len(EXPECTED_TABLES),
+        missing_tables=missing,
+    )
 
 
 def _workspace_owner_check(store: EnterpriseStore) -> dict[str, Any]:

@@ -449,6 +449,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <label class="checkbox-row"><input id="conversationShareRedactInput" type="checkbox"> Redact share content</label>
                 <input id="conversationShareMaxViewsInput" value="" placeholder="max views" aria-label="Conversation share max views">
               </div>
+              <input id="conversationSharePasswordInput" type="password" value="" placeholder="share password" aria-label="Conversation share password">
               <div id="conversationShareList" class="member-list muted">No conversation shares loaded.</div>
             </div>
           </section>
@@ -663,6 +664,7 @@ DASHBOARD_HTML = """<!doctype html>
               <label class="checkbox-row"><input id="documentShareRedactInput" type="checkbox"> Redact share content</label>
               <input id="documentShareMaxViewsInput" value="" placeholder="max views" aria-label="Document share max views">
             </div>
+            <input id="documentSharePasswordInput" type="password" value="" placeholder="share password" aria-label="Document share password">
             <div id="documentShareList" class="member-list muted" style="margin-top:12px">No document shares loaded.</div>
             <input id="shareUrlOutput" readonly value="" placeholder="latest share URL" aria-label="Latest share URL">
           </section>
@@ -753,6 +755,7 @@ DASHBOARD_HTML = """<!doctype html>
     const conversationExportText = document.getElementById("conversationExportText");
     const conversationShareRedactInput = document.getElementById("conversationShareRedactInput");
     const conversationShareMaxViewsInput = document.getElementById("conversationShareMaxViewsInput");
+    const conversationSharePasswordInput = document.getElementById("conversationSharePasswordInput");
     const conversationShareList = document.getElementById("conversationShareList");
     const memberUserInput = document.getElementById("memberUserInput");
     const memberRoleInput = document.getElementById("memberRoleInput");
@@ -808,6 +811,7 @@ DASHBOARD_HTML = """<!doctype html>
     const documentShareList = document.getElementById("documentShareList");
     const documentShareRedactInput = document.getElementById("documentShareRedactInput");
     const documentShareMaxViewsInput = document.getElementById("documentShareMaxViewsInput");
+    const documentSharePasswordInput = document.getElementById("documentSharePasswordInput");
     const shareUrlOutput = document.getElementById("shareUrlOutput");
     const folderList = document.getElementById("folderList");
     const virtualNodeList = document.getElementById("virtualNodeList");
@@ -1418,6 +1422,11 @@ DASHBOARD_HTML = """<!doctype html>
       return { cancelled: false, payload: { max_views: maxViews } };
     }
 
+    function sharePasswordPayload(input) {
+      const password = input.value.trim();
+      return password ? { password } : {};
+    }
+
     function publicShareUrl(kind, token) {
       return `${window.location.origin}/public/${kind}/${encodeURIComponent(token)}`;
     }
@@ -1441,7 +1450,7 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="member-row">
             <div>
               <strong>${escapeHtml(link.active ? "active" : "inactive")}</strong>
-              <div class="muted">${escapeHtml(link.id)} | ${escapeHtml(link.redact_content ? "redacted" : "raw")} | views ${escapeHtml(shareViewSummary(link))}${link.last_viewed_at ? ` | last viewed ${escapeHtml(link.last_viewed_at)}` : ""}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
+              <div class="muted">${escapeHtml(link.id)} | ${escapeHtml(link.redact_content ? "redacted" : "raw")}${link.password_protected ? " | protected" : ""} | views ${escapeHtml(shareViewSummary(link))}${link.last_viewed_at ? ` | last viewed ${escapeHtml(link.last_viewed_at)}` : ""}${link.expires_at ? ` | expires ${escapeHtml(link.expires_at)}` : ""}</div>
             </div>
             <button class="secondary" type="button" data-revoke-share-kind="${escapeHtml(kind)}" data-revoke-share-target-id="${escapeHtml(link[targetKey] || "")}" data-revoke-share-link-path="${escapeHtml(path)}" data-revoke-share-link-id="${escapeHtml(link.id)}"${link.active ? "" : " disabled"}>Revoke</button>
           </div>
@@ -2139,6 +2148,7 @@ DASHBOARD_HTML = """<!doctype html>
       const payloadBody = {
         ...expiry.payload,
         ...maxViews.payload,
+        ...sharePasswordPayload(documentSharePasswordInput),
         redact_content: documentShareRedactInput.checked
       };
       const payload = await api(`/documents/${encodeURIComponent(docId)}/share-links`, {
@@ -2782,6 +2792,7 @@ DASHBOARD_HTML = """<!doctype html>
       const payloadBody = {
         ...expiry.payload,
         ...maxViews.payload,
+        ...sharePasswordPayload(conversationSharePasswordInput),
         redact_content: conversationShareRedactInput.checked
       };
       const payload = await api(`/conversations/${encodeURIComponent(conversationId)}/share-links`, {

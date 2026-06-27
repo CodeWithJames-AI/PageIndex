@@ -10717,6 +10717,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=owner_write_headers,
                     status=201,
                 )["share_link"]
+                password_created = _post_json(
+                    url,
+                    {"password": "let-me-in"},
+                    headers=owner_write_headers,
+                    status=201,
+                )["share_link"]
                 bad_redact = _post_json(
                     url,
                     {"redact_content": "yes"},
@@ -10729,12 +10735,21 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=owner_write_headers,
                     status=400,
                 )
+                bad_password = _post_json(
+                    url,
+                    {"password": 123},
+                    headers=owner_write_headers,
+                    status=400,
+                )
                 listed = _get_json(url, headers=owner_write_headers)["share_links"]
                 public = _get_json(f"{base}/public/conversations/{created['token']}")
                 redacted_public = _get_json(f"{base}/public/conversations/{redacted_created['token']}")
                 limited = _get_json(f"{base}/public/conversations/{created['token']}?limit=1")
                 capped_public = _get_json(f"{base}/public/conversations/{capped_created['token']}")
                 capped_after_limit = _get_error(f"{base}/public/conversations/{capped_created['token']}")
+                password_missing = _get_error(f"{base}/public/conversations/{password_created['token']}")
+                password_wrong = _get_error(f"{base}/public/conversations/{password_created['token']}?password=wrong")
+                password_public = _get_json(f"{base}/public/conversations/{password_created['token']}?password=let-me-in")
                 public_html, public_html_type = _get_text(
                     f"{base}/public/conversations/{created['token']}",
                     headers={"Accept": "text/html"},
@@ -10766,6 +10781,7 @@ class EnterpriseStoreTest(unittest.TestCase):
 
             serialized_public = json.dumps(public, sort_keys=True)
             serialized_redacted_public = json.dumps(redacted_public, sort_keys=True)
+            serialized_password_public = json.dumps(password_public, sort_keys=True)
             serialized_list = json.dumps(listed, sort_keys=True)
             serialized_share_view_events = json.dumps(share_view_events, sort_keys=True)
             listed_by_id = {link["id"]: link for link in listed}
@@ -10775,24 +10791,31 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(bob_denied["error"], "conversation access denied")
             self.assertEqual(bad_redact["error"], "redact_content must be a boolean")
             self.assertEqual(bad_max_views["error"], "max_views must be a positive integer")
+            self.assertEqual(bad_password["error"], "password must be a string")
             self.assertTrue(created["token"].startswith("pcs_"))
             self.assertFalse(created["redact_content"])
             self.assertTrue(redacted_created["redact_content"])
             self.assertEqual(capped_created["max_views"], 1)
             self.assertEqual(capped_created["view_count"], 0)
             self.assertTrue(capped_created["active"])
+            self.assertTrue(password_created["password_protected"])
+            self.assertEqual(password_created["view_count"], 0)
             self.assertEqual(created["view_count"], 0)
             self.assertIsNone(created["last_viewed_at"])
             self.assertEqual(redacted_created["view_count"], 0)
             self.assertIsNone(redacted_created["last_viewed_at"])
             self.assertNotIn("token_hash", created)
             self.assertNotIn(created["token"], serialized_list)
+            self.assertNotIn("password_hash", serialized_list)
+            self.assertNotIn("password_salt", serialized_list)
+            self.assertNotIn("let-me-in", serialized_list)
             self.assertFalse(listed_by_id[created["id"]]["redact_content"])
             self.assertTrue(listed_by_id[redacted_created["id"]]["redact_content"])
             self.assertEqual(listed_by_id[created["id"]]["view_count"], 0)
             self.assertIsNone(listed_by_id[redacted_created["id"]]["last_viewed_at"])
             self.assertEqual(listed_by_id[capped_created["id"]]["max_views"], 1)
             self.assertTrue(listed_by_id[capped_created["id"]]["active"])
+            self.assertTrue(listed_by_id[password_created["id"]]["password_protected"])
             self.assertTrue(listed_by_id[created["id"]]["active"])
             self.assertEqual(public["conversation"]["title"], "HTTP shared chat")
             self.assertEqual([message["role"] for message in public["messages"]], ["user", "assistant"])
@@ -10801,6 +10824,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(capped_public["conversation"]["title"], "HTTP shared chat")
             self.assertEqual(capped_after_limit["status"], 404)
             self.assertEqual(capped_after_limit["error"], "share link not found")
+            self.assertEqual(password_missing["status"], 404)
+            self.assertEqual(password_wrong["status"], 404)
+            self.assertEqual(password_public["conversation"]["title"], "HTTP shared chat")
             self.assertTrue(redacted_public["share_link"]["redact_content"])
             self.assertIn("conversation share", redacted_public["messages"][0]["content"])
             self.assertIn("[redacted]", redacted_public["messages"][0]["content"])
@@ -10826,11 +10852,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn(run_id, public["citations"])
             self.assertEqual(public["citations"][run_id][0]["doc_name"], sensitive_doc_name)
             self.assertIn(redacted_run_id, redacted_public["citations"])
-            for key in ("max_views", "view_count", "last_viewed_at"):
+            self.assertNotIn("let-me-in", serialized_password_public)
+            for key in ("password_protected", "max_views", "view_count", "last_viewed_at"):
                 self.assertNotIn(key, public["share_link"])
                 self.assertNotIn(key, redacted_public["share_link"])
                 self.assertNotIn(key, limited["share_link"])
                 self.assertNotIn(key, capped_public["share_link"])
+                self.assertNotIn(key, password_public["share_link"])
             redacted_citation = redacted_public["citations"][redacted_run_id][0]
             for key in ("id", "doc_id", "evidence_id"):
                 self.assertNotIn(key, redacted_citation)
@@ -10860,37 +10888,45 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(revoked, {"revoked": True})
             self.assertEqual(public_after_revoke["status"], 404)
             self.assertEqual(public_after_revoke["error"], "share link not found")
-            self.assertEqual(len(share_view_events), 6)
+            self.assertEqual(len(share_view_events), 7)
             self.assertEqual({event["user_id"] for event in share_view_events}, {"public"})
             self.assertEqual({event["target_id"] for event in share_view_events}, {conversation["id"]})
             self.assertEqual(
                 sorted(event["details"]["response_format"] for event in share_view_events),
-                ["html", "html", "json", "json", "json", "json"],
+                ["html", "html", "json", "json", "json", "json", "json"],
             )
             self.assertEqual(
                 sorted(event["details"]["redact_content"] for event in share_view_events),
-                [False, False, False, False, True, True],
+                [False, False, False, False, False, True, True],
             )
             self.assertEqual(
                 sorted(event["details"]["limit"] for event in share_view_events),
-                [1, 100, 100, 100, 100, 100],
+                [1, 100, 100, 100, 100, 100, 100],
             )
             self.assertIn(created["id"], {event["details"]["share_link_id"] for event in share_view_events})
             self.assertIn(redacted_created["id"], {event["details"]["share_link_id"] for event in share_view_events})
             self.assertIn(capped_created["id"], {event["details"]["share_link_id"] for event in share_view_events})
+            self.assertIn(password_created["id"], {event["details"]["share_link_id"] for event in share_view_events})
             self.assertNotIn(created["token"], serialized_share_view_events)
             self.assertNotIn(redacted_created["token"], serialized_share_view_events)
             self.assertNotIn(capped_created["token"], serialized_share_view_events)
+            self.assertNotIn(password_created["token"], serialized_share_view_events)
+            self.assertNotIn("let-me-in", serialized_share_view_events)
             self.assertNotIn("token_hash", serialized_share_view_events)
+            self.assertNotIn("password_hash", serialized_share_view_events)
             share_links_after_views_by_id = {link["id"]: link for link in share_links_after_views}
             self.assertEqual(share_links_after_views_by_id[created["id"]]["view_count"], 3)
             self.assertEqual(share_links_after_views_by_id[redacted_created["id"]]["view_count"], 2)
             self.assertEqual(share_links_after_views_by_id[capped_created["id"]]["view_count"], 1)
             self.assertEqual(share_links_after_views_by_id[capped_created["id"]]["max_views"], 1)
             self.assertFalse(share_links_after_views_by_id[capped_created["id"]]["active"])
+            self.assertEqual(share_links_after_views_by_id[password_created["id"]]["view_count"], 1)
+            self.assertTrue(share_links_after_views_by_id[password_created["id"]]["password_protected"])
+            self.assertTrue(share_links_after_views_by_id[password_created["id"]]["active"])
             self.assertIsNotNone(share_links_after_views_by_id[created["id"]]["last_viewed_at"])
             self.assertIsNotNone(share_links_after_views_by_id[redacted_created["id"]]["last_viewed_at"])
             self.assertIsNotNone(share_links_after_views_by_id[capped_created["id"]]["last_viewed_at"])
+            self.assertIsNotNone(share_links_after_views_by_id[password_created["id"]]["last_viewed_at"])
 
     def test_http_strict_document_delete_requires_write_role(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -11053,6 +11089,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=owner_write_headers,
                     status=201,
                 )["share_link"]
+                password_created = _post_json(
+                    url,
+                    {"password": "doc-open"},
+                    headers=owner_write_headers,
+                    status=201,
+                )["share_link"]
                 bad_redact = _post_json(
                     url,
                     {"redact_content": "yes"},
@@ -11065,6 +11107,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=owner_write_headers,
                     status=400,
                 )
+                bad_password = _post_json(
+                    url,
+                    {"password": 123},
+                    headers=owner_write_headers,
+                    status=400,
+                )
                 listed = _get_json(url, headers=owner_write_headers)["share_links"]
                 public = _get_json(f"{base}/public/documents/{created['token']}?limit=1&max_chars=200")
                 redacted_public = _get_json(
@@ -11073,6 +11121,15 @@ class EnterpriseStoreTest(unittest.TestCase):
                 capped_public = _get_json(f"{base}/public/documents/{capped_created['token']}?limit=1&max_chars=200")
                 capped_after_limit = _get_error(
                     f"{base}/public/documents/{capped_created['token']}?limit=1&max_chars=200"
+                )
+                password_missing = _get_error(f"{base}/public/documents/{password_created['token']}?limit=1&max_chars=200")
+                password_wrong = _get_error(
+                    f"{base}/public/documents/{password_created['token']}?limit=1&max_chars=200",
+                    headers={"X-PageIndex-Share-Password": "wrong"},
+                )
+                password_public = _get_json(
+                    f"{base}/public/documents/{password_created['token']}?limit=1&max_chars=200",
+                    headers={"X-PageIndex-Share-Password": "doc-open"},
                 )
                 public_html, public_html_type = _get_text(
                     f"{base}/public/documents/{created['token']}?limit=1&max_chars=200",
@@ -11119,6 +11176,7 @@ class EnterpriseStoreTest(unittest.TestCase):
 
             serialized_public = json.dumps(public, sort_keys=True)
             serialized_redacted_public = json.dumps(redacted_public, sort_keys=True)
+            serialized_password_public = json.dumps(password_public, sort_keys=True)
             serialized_list = json.dumps(listed, sort_keys=True)
             serialized_share_view_events = json.dumps(share_view_events, sort_keys=True)
             listed_by_id = {link["id"]: link for link in listed}
@@ -11128,24 +11186,31 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(missing_doc["error"], "document not found")
             self.assertEqual(bad_redact["error"], "redact_content must be a boolean")
             self.assertEqual(bad_max_views["error"], "max_views must be a positive integer")
+            self.assertEqual(bad_password["error"], "password must be a string")
             self.assertTrue(created["token"].startswith("pis_"))
             self.assertFalse(created["redact_content"])
             self.assertTrue(redacted_created["redact_content"])
             self.assertEqual(capped_created["max_views"], 1)
             self.assertEqual(capped_created["view_count"], 0)
             self.assertTrue(capped_created["active"])
+            self.assertTrue(password_created["password_protected"])
+            self.assertEqual(password_created["view_count"], 0)
             self.assertEqual(created["view_count"], 0)
             self.assertIsNone(created["last_viewed_at"])
             self.assertEqual(redacted_created["view_count"], 0)
             self.assertIsNone(redacted_created["last_viewed_at"])
             self.assertNotIn("token_hash", created)
             self.assertNotIn(created["token"], serialized_list)
+            self.assertNotIn("password_hash", serialized_list)
+            self.assertNotIn("password_salt", serialized_list)
+            self.assertNotIn("doc-open", serialized_list)
             self.assertFalse(listed_by_id[created["id"]]["redact_content"])
             self.assertTrue(listed_by_id[redacted_created["id"]]["redact_content"])
             self.assertEqual(listed_by_id[created["id"]]["view_count"], 0)
             self.assertIsNone(listed_by_id[redacted_created["id"]]["last_viewed_at"])
             self.assertEqual(listed_by_id[capped_created["id"]]["max_views"], 1)
             self.assertTrue(listed_by_id[capped_created["id"]]["active"])
+            self.assertTrue(listed_by_id[password_created["id"]]["password_protected"])
             self.assertTrue(listed_by_id[created["id"]]["active"])
             self.assertEqual(public["document"]["id"], doc_id)
             self.assertEqual(public["document"]["name"], sensitive_doc_name)
@@ -11154,13 +11219,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(capped_public["document"]["id"], doc_id)
             self.assertEqual(capped_after_limit["status"], 404)
             self.assertEqual(capped_after_limit["error"], "share link not found")
+            self.assertEqual(password_missing["status"], 404)
+            self.assertEqual(password_wrong["status"], 404)
+            self.assertEqual(password_public["document"]["id"], doc_id)
             self.assertIn("[redacted]", redacted_public["document"]["name"])
             self.assertIn("[redacted-path]", redacted_public["document"]["description"])
             self.assertIn("[redacted-email]", redacted_public["pages"][0]["content"])
-            for key in ("max_views", "view_count", "last_viewed_at"):
+            self.assertNotIn("doc-open", serialized_password_public)
+            for key in ("password_protected", "max_views", "view_count", "last_viewed_at"):
                 self.assertNotIn(key, public["share_link"])
                 self.assertNotIn(key, redacted_public["share_link"])
                 self.assertNotIn(key, capped_public["share_link"])
+                self.assertNotIn(key, password_public["share_link"])
             for key in ("id", "workspace_id", "doc_id", "created_by"):
                 self.assertNotIn(key, redacted_public["share_link"])
             for key in ("id", "workspace_id", "access_mode"):
@@ -11198,35 +11268,43 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(revoked, {"revoked": True})
             self.assertEqual(public_after_revoke["status"], 404)
             self.assertEqual(public_after_revoke["error"], "share link not found")
-            self.assertEqual(len(share_view_events), 5)
+            self.assertEqual(len(share_view_events), 6)
             self.assertEqual({event["user_id"] for event in share_view_events}, {"public"})
             self.assertEqual({event["target_id"] for event in share_view_events}, {doc_id})
             self.assertEqual(
                 sorted(event["details"]["response_format"] for event in share_view_events),
-                ["html", "html", "json", "json", "json"],
+                ["html", "html", "json", "json", "json", "json"],
             )
             self.assertEqual(
                 sorted(event["details"]["redact_content"] for event in share_view_events),
-                [False, False, False, True, True],
+                [False, False, False, False, True, True],
             )
             self.assertTrue(all(event["details"]["limit"] == 1 for event in share_view_events))
             self.assertTrue(all(event["details"]["max_chars"] == 200 for event in share_view_events))
             self.assertIn(created["id"], {event["details"]["share_link_id"] for event in share_view_events})
             self.assertIn(redacted_created["id"], {event["details"]["share_link_id"] for event in share_view_events})
             self.assertIn(capped_created["id"], {event["details"]["share_link_id"] for event in share_view_events})
+            self.assertIn(password_created["id"], {event["details"]["share_link_id"] for event in share_view_events})
             self.assertNotIn(created["token"], serialized_share_view_events)
             self.assertNotIn(redacted_created["token"], serialized_share_view_events)
             self.assertNotIn(capped_created["token"], serialized_share_view_events)
+            self.assertNotIn(password_created["token"], serialized_share_view_events)
+            self.assertNotIn("doc-open", serialized_share_view_events)
             self.assertNotIn("token_hash", serialized_share_view_events)
+            self.assertNotIn("password_hash", serialized_share_view_events)
             share_links_after_views_by_id = {link["id"]: link for link in share_links_after_views}
             self.assertEqual(share_links_after_views_by_id[created["id"]]["view_count"], 2)
             self.assertEqual(share_links_after_views_by_id[redacted_created["id"]]["view_count"], 2)
             self.assertEqual(share_links_after_views_by_id[capped_created["id"]]["view_count"], 1)
             self.assertEqual(share_links_after_views_by_id[capped_created["id"]]["max_views"], 1)
             self.assertFalse(share_links_after_views_by_id[capped_created["id"]]["active"])
+            self.assertEqual(share_links_after_views_by_id[password_created["id"]]["view_count"], 1)
+            self.assertTrue(share_links_after_views_by_id[password_created["id"]]["password_protected"])
+            self.assertTrue(share_links_after_views_by_id[password_created["id"]]["active"])
             self.assertIsNotNone(share_links_after_views_by_id[created["id"]]["last_viewed_at"])
             self.assertIsNotNone(share_links_after_views_by_id[redacted_created["id"]]["last_viewed_at"])
             self.assertIsNotNone(share_links_after_views_by_id[capped_created["id"]]["last_viewed_at"])
+            self.assertIsNotNone(share_links_after_views_by_id[password_created["id"]]["last_viewed_at"])
 
     def test_http_document_access_filters_documents_query_and_pages(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -12655,11 +12733,14 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("documentShareList", body)
                     self.assertIn("documentShareRedactInput", body)
                     self.assertIn("documentShareMaxViewsInput", body)
+                    self.assertIn("documentSharePasswordInput", body)
                     self.assertIn("document-share-links", body)
                     self.assertIn("redact_content: documentShareRedactInput.checked", body)
                     self.assertIn("...maxViews.payload", body)
+                    self.assertIn("...sharePasswordPayload(documentSharePasswordInput)", body)
                     self.assertIn("shareViewSummary", body)
                     self.assertIn("link.max_views != null", body)
+                    self.assertIn("link.password_protected", body)
                     self.assertIn("link.last_viewed_at", body)
                     self.assertIn('publicShareUrl("documents"', body)
                     self.assertIn("createDocumentShareLink", body)
@@ -12705,9 +12786,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("conversationShareList", body)
                     self.assertIn("conversationShareRedactInput", body)
                     self.assertIn("conversationShareMaxViewsInput", body)
+                    self.assertIn("conversationSharePasswordInput", body)
                     self.assertIn("conversation-share-links", body)
                     self.assertIn("redact_content: conversationShareRedactInput.checked", body)
                     self.assertIn("...maxViews.payload", body)
+                    self.assertIn("...sharePasswordPayload(conversationSharePasswordInput)", body)
                     self.assertIn('link.redact_content ? "redacted" : "raw"', body)
                     self.assertIn('publicShareUrl("conversations"', body)
                     self.assertIn("createConversationShareLink", body)

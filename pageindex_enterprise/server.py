@@ -914,6 +914,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             else False
         )
         max_views = _optional_positive_int(payload.get("max_views"), "max_views") if "max_views" in payload else None
+        password = _optional_str(payload.get("password"), "password") if "password" in payload else None
         store = EnterpriseStore(self.server.root)
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope="write")
@@ -926,6 +927,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                         expires_at=expires_at,
                         redact_content=redact_content,
                         max_views=max_views,
+                        password=password,
                     )
                 },
                 HTTPStatus.CREATED,
@@ -949,15 +951,17 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
     def _public_conversation_share(self, token: str, query: str) -> None:
         params = parse_qs(query)
         limit = max(1, min(_int_param(params, "limit", 100), 500))
+        password = _share_password_value(params, self.headers)
         store = EnterpriseStore(self.server.root)
         try:
-            shared = store.resolve_conversation_share_link(token, limit=limit)
+            shared = store.resolve_conversation_share_link(token, password=password, limit=limit)
             if shared is None:
                 self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
                 return
             wants_html = _share_response_wants_html(self.headers.get("Accept", ""), _str_param(params, "format"))
             recorded = store.record_conversation_share_link_view(
                 token,
+                password=password,
                 response_format="html" if wants_html else "json",
                 limit=limit,
             )
@@ -1485,6 +1489,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             else False
         )
         max_views = _optional_positive_int(payload.get("max_views"), "max_views") if "max_views" in payload else None
+        password = _optional_str(payload.get("password"), "password") if "password" in payload else None
         store = EnterpriseStore(self.server.root)
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope="write")
@@ -1495,6 +1500,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 expires_at=expires_at,
                 redact_content=redact_content,
                 max_views=max_views,
+                password=password,
             )
             if share_link is None:
                 self._json({"error": "document not found"}, HTTPStatus.NOT_FOUND)
@@ -1521,6 +1527,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         limit = max(1, min(_int_param(params, "limit", 20), 100))
         offset = max(0, _int_param(params, "offset", 0))
         max_chars = max(200, min(_int_param(params, "max_chars", 4000), 20000))
+        password = _share_password_value(params, self.headers)
         store = EnterpriseStore(self.server.root)
         try:
             shared = store.resolve_document_share_link(
@@ -1528,6 +1535,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 limit=limit,
                 offset=offset,
                 max_chars=max_chars,
+                password=password,
             )
             if shared is None:
                 self._json({"error": "share link not found"}, HTTPStatus.NOT_FOUND)
@@ -1535,6 +1543,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
             wants_html = _share_response_wants_html(self.headers.get("Accept", ""), _str_param(params, "format"))
             recorded = store.record_document_share_link_view(
                 token,
+                password=password,
                 response_format="html" if wants_html else "json",
                 limit=limit,
                 offset=offset,
@@ -3243,6 +3252,13 @@ def _str_param(params: dict[str, list[str]], name: str, default: str | None = No
     if not values:
         return default
     return values[0]
+
+
+def _share_password_value(params: dict[str, list[str]], headers: Any) -> str | None:
+    header_password = headers.get("X-PageIndex-Share-Password")
+    if header_password is not None:
+        return header_password
+    return _str_param(params, "password")
 
 
 def _bool_param(params: dict[str, list[str]], name: str, default: bool) -> bool:

@@ -31,7 +31,9 @@ API_TOKEN_SCOPES = ("read", "write", "audit")
 MAX_CONVERSATION_MESSAGE_CHARS = 4000
 MAX_CONVERSATION_TITLE_CHARS = 72
 DEFAULT_CONVERSATION_TITLE = "New conversation"
+MAX_SHARE_PASSWORD_CHARS = 256
 MAX_LEGAL_HOLD_REASON_CHARS = 500
+SHARE_PASSWORD_HASH_ITERATIONS = 120_000
 CHAT_TRACE_QUERY = "[conversation message redacted]"
 QUESTION_SUGGESTION_STOPWORDS = {
     "about",
@@ -203,6 +205,45 @@ def _normalize_policy_days(days: int | None, name: str) -> int | None:
 
 def _normalize_share_max_views(max_views: int | None) -> int | None:
     return _normalize_policy_days(max_views, "max_views")
+
+
+def _normalize_share_password(password: str | None) -> str | None:
+    if password is None:
+        return None
+    if not isinstance(password, str):
+        raise ValueError("password must be a string")
+    normalized = password.strip()
+    if not normalized:
+        return None
+    if len(normalized) > MAX_SHARE_PASSWORD_CHARS:
+        raise ValueError(f"password must be {MAX_SHARE_PASSWORD_CHARS} characters or fewer")
+    return normalized
+
+
+def _share_password_digest(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        SHARE_PASSWORD_HASH_ITERATIONS,
+    ).hex()
+
+
+def _share_password_fields(password: str | None) -> tuple[str | None, str | None]:
+    normalized = _normalize_share_password(password)
+    if normalized is None:
+        return None, None
+    salt = secrets.token_hex(16)
+    return salt, _share_password_digest(normalized, salt)
+
+
+def _share_password_matches(password: str | None, salt: str | None, expected_hash: str | None) -> bool:
+    if not expected_hash:
+        return True
+    normalized = _normalize_share_password(password)
+    if normalized is None or not salt:
+        return False
+    return hmac.compare_digest(_share_password_digest(normalized, salt), expected_hash)
 
 
 def _normalize_quota_limit(limit: int | None, name: str) -> int | None:
@@ -755,7 +796,7 @@ def _minimize_redacted_public_share_link(link: dict[str, Any], target_key: str) 
 
 def _strip_public_share_link_management_fields(link: dict[str, Any]) -> dict[str, Any]:
     public_link = dict(link)
-    for key in ("max_views", "view_count", "last_viewed_at"):
+    for key in ("password_protected", "max_views", "view_count", "last_viewed_at"):
         public_link.pop(key, None)
     return public_link
 
@@ -992,6 +1033,8 @@ class EnterpriseStore:
               doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
               created_by TEXT NOT NULL,
               token_hash TEXT NOT NULL UNIQUE,
+              password_salt TEXT,
+              password_hash TEXT,
               redact_content INTEGER NOT NULL DEFAULT 0,
               max_views INTEGER,
               view_count INTEGER NOT NULL DEFAULT 0,
@@ -1073,6 +1116,8 @@ class EnterpriseStore:
               conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
               created_by TEXT NOT NULL,
               token_hash TEXT NOT NULL UNIQUE,
+              password_salt TEXT,
+              password_hash TEXT,
               redact_content INTEGER NOT NULL DEFAULT 0,
               max_views INTEGER,
               view_count INTEGER NOT NULL DEFAULT 0,
@@ -1264,6 +1309,8 @@ class EnterpriseStore:
                 "revoked_at": "TEXT",
                 "redact_content": "INTEGER NOT NULL DEFAULT 0",
                 "max_views": "INTEGER",
+                "password_salt": "TEXT",
+                "password_hash": "TEXT",
                 "view_count": "INTEGER NOT NULL DEFAULT 0",
                 "last_viewed_at": "TEXT",
             },
@@ -1271,6 +1318,8 @@ class EnterpriseStore:
                 "revoked_at": "TEXT",
                 "redact_content": "INTEGER NOT NULL DEFAULT 0",
                 "max_views": "INTEGER",
+                "password_salt": "TEXT",
+                "password_hash": "TEXT",
                 "view_count": "INTEGER NOT NULL DEFAULT 0",
                 "last_viewed_at": "TEXT",
             },
@@ -4515,10 +4564,12 @@ class EnterpriseStore:
         expires_at: str | None = None,
         redact_content: bool = False,
         max_views: int | None = None,
+        password: str | None = None,
     ) -> dict[str, Any] | None:
         if not isinstance(redact_content, bool):
             raise ValueError("redact_content must be a boolean")
         max_views = _normalize_share_max_views(max_views)
+        password_salt, password_hash = _share_password_fields(password)
         doc_id = doc_id.strip()
         if not doc_id:
             raise ValueError("Document id is required.")
@@ -4537,9 +4588,10 @@ class EnterpriseStore:
                 """
                 INSERT INTO document_share_links (
                   id, workspace_id, doc_id, created_by, token_hash,
-                  redact_content, max_views, created_at, expires_at, revoked_at
+                  password_salt, password_hash, redact_content, max_views,
+                  created_at, expires_at, revoked_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     share_link_id,
@@ -4547,6 +4599,8 @@ class EnterpriseStore:
                     document["id"],
                     actor_user_id.strip(),
                     _hash_token(token),
+                    password_salt,
+                    password_hash,
                     1 if redact_content else 0,
                     max_views,
                     created_at,
@@ -4564,6 +4618,7 @@ class EnterpriseStore:
                     "expires_at": expires_at,
                     "redact_content": redact_content,
                     "max_views": max_views,
+                    "password_protected": password_hash is not None,
                 },
             )
         link = self._document_share_link(share_link_id)
@@ -4587,7 +4642,8 @@ class EnterpriseStore:
         self._require_document_write(document, actor_user_id)
         rows = self.conn.execute(
             """
-            SELECT id, workspace_id, doc_id, created_by, redact_content, max_views, view_count, last_viewed_at,
+            SELECT id, workspace_id, doc_id, created_by, redact_content, max_views,
+                   password_hash IS NOT NULL AS password_protected, view_count, last_viewed_at,
                    created_at, expires_at, revoked_at
             FROM document_share_links
             WHERE doc_id = ?
@@ -4636,6 +4692,7 @@ class EnterpriseStore:
         self,
         token: str,
         *,
+        password: str | None = None,
         response_format: str,
         limit: int,
         offset: int,
@@ -4647,13 +4704,16 @@ class EnterpriseStore:
         token_hash = _hash_token(token)
         row = self._one(
             """
-            SELECT id, workspace_id, doc_id, token_hash, redact_content, expires_at, revoked_at
+            SELECT id, workspace_id, doc_id, token_hash, password_salt, password_hash,
+                   redact_content, expires_at, revoked_at
             FROM document_share_links
             WHERE token_hash = ?
             """,
             (token_hash,),
         )
         if not row or not hmac.compare_digest(row["token_hash"], token_hash):
+            return False
+        if not _share_password_matches(password, row["password_salt"], row["password_hash"]):
             return False
         if row["revoked_at"] is not None or _is_expired(row["expires_at"]):
             return False
@@ -4693,6 +4753,7 @@ class EnterpriseStore:
         self,
         token: str,
         *,
+        password: str | None = None,
         limit: int = 20,
         offset: int = 0,
         max_chars: int = 4000,
@@ -4704,7 +4765,8 @@ class EnterpriseStore:
         row = self._one(
             """
             SELECT l.id AS share_link_id, l.workspace_id, l.doc_id, l.created_by,
-                   l.token_hash, l.redact_content, l.max_views, l.view_count,
+                   l.token_hash, l.password_salt, l.password_hash,
+                   l.redact_content, l.max_views, l.view_count,
                    l.created_at, l.expires_at, l.revoked_at,
                    d.name, d.description, d.kind, d.access_mode, d.page_count, d.line_count
             FROM document_share_links l
@@ -4714,6 +4776,8 @@ class EnterpriseStore:
             (token_hash,),
         )
         if not row or not hmac.compare_digest(row["token_hash"], token_hash):
+            return None
+        if not _share_password_matches(password, row["password_salt"], row["password_hash"]):
             return None
         if row["revoked_at"] is not None or _is_expired(row["expires_at"]):
             return None
@@ -4758,6 +4822,7 @@ class EnterpriseStore:
                 "created_by": row["created_by"],
                 "redact_content": row["redact_content"],
                 "max_views": row["max_views"],
+                "password_protected": row["password_hash"] is not None,
                 "view_count": row["view_count"],
                 "created_at": row["created_at"],
                 "expires_at": row["expires_at"],
@@ -5974,10 +6039,12 @@ class EnterpriseStore:
         expires_at: str | None = None,
         redact_content: bool = False,
         max_views: int | None = None,
+        password: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(redact_content, bool):
             raise ValueError("redact_content must be a boolean")
         max_views = _normalize_share_max_views(max_views)
+        password_salt, password_hash = _share_password_fields(password)
         conversation = self._conversation_for_actor(
             conversation_id,
             actor_user_id,
@@ -5993,9 +6060,10 @@ class EnterpriseStore:
                 """
                 INSERT INTO conversation_share_links (
                   id, workspace_id, conversation_id, created_by, token_hash,
-                  redact_content, max_views, created_at, expires_at, revoked_at
+                  password_salt, password_hash, redact_content, max_views,
+                  created_at, expires_at, revoked_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     share_link_id,
@@ -6003,6 +6071,8 @@ class EnterpriseStore:
                     conversation["id"],
                     actor_user_id.strip(),
                     _hash_token(token),
+                    password_salt,
+                    password_hash,
                     1 if redact_content else 0,
                     max_views,
                     created_at,
@@ -6020,6 +6090,7 @@ class EnterpriseStore:
                     "expires_at": expires_at,
                     "redact_content": redact_content,
                     "max_views": max_views,
+                    "password_protected": password_hash is not None,
                 },
             )
         link = self._conversation_share_link(share_link_id)
@@ -6042,7 +6113,8 @@ class EnterpriseStore:
         )
         rows = self.conn.execute(
             """
-            SELECT id, workspace_id, conversation_id, created_by, redact_content, max_views, view_count, last_viewed_at,
+            SELECT id, workspace_id, conversation_id, created_by, redact_content, max_views,
+                   password_hash IS NOT NULL AS password_protected, view_count, last_viewed_at,
                    created_at, expires_at, revoked_at
             FROM conversation_share_links
             WHERE conversation_id = ?
@@ -6095,6 +6167,7 @@ class EnterpriseStore:
         self,
         token: str,
         *,
+        password: str | None = None,
         response_format: str,
         limit: int,
     ) -> bool:
@@ -6105,7 +6178,7 @@ class EnterpriseStore:
         row = self._one(
             """
             SELECT l.id, l.workspace_id, l.conversation_id, l.token_hash, l.redact_content,
-                   l.expires_at, l.revoked_at, c.archived_at
+                   l.password_salt, l.password_hash, l.expires_at, l.revoked_at, c.archived_at
             FROM conversation_share_links l
             JOIN conversations c ON c.id = l.conversation_id
             WHERE l.token_hash = ?
@@ -6113,6 +6186,8 @@ class EnterpriseStore:
             (token_hash,),
         )
         if not row or not hmac.compare_digest(row["token_hash"], token_hash):
+            return False
+        if not _share_password_matches(password, row["password_salt"], row["password_hash"]):
             return False
         if row["revoked_at"] is not None or _is_expired(row["expires_at"]) or row["archived_at"] is not None:
             return False
@@ -6155,6 +6230,7 @@ class EnterpriseStore:
         self,
         token: str,
         *,
+        password: str | None = None,
         limit: int = 100,
     ) -> dict[str, Any] | None:
         token = token.strip()
@@ -6164,7 +6240,8 @@ class EnterpriseStore:
         row = self._one(
             """
             SELECT l.id AS share_link_id, l.workspace_id, l.conversation_id, l.created_by,
-                   l.token_hash, l.redact_content, l.max_views, l.view_count,
+                   l.token_hash, l.password_salt, l.password_hash,
+                   l.redact_content, l.max_views, l.view_count,
                    l.created_at, l.expires_at, l.revoked_at,
                    c.title, c.created_at AS conversation_created_at, c.updated_at, c.archived_at
             FROM conversation_share_links l
@@ -6174,6 +6251,8 @@ class EnterpriseStore:
             (token_hash,),
         )
         if not row or not hmac.compare_digest(row["token_hash"], token_hash):
+            return None
+        if not _share_password_matches(password, row["password_salt"], row["password_hash"]):
             return None
         if row["revoked_at"] is not None or _is_expired(row["expires_at"]) or row["archived_at"] is not None:
             return None
@@ -6245,6 +6324,7 @@ class EnterpriseStore:
                 "created_by": row["created_by"],
                 "redact_content": row["redact_content"],
                 "max_views": row["max_views"],
+                "password_protected": row["password_hash"] is not None,
                 "view_count": row["view_count"],
                 "created_at": row["created_at"],
                 "expires_at": row["expires_at"],
@@ -7625,7 +7705,8 @@ class EnterpriseStore:
     def _document_share_link(self, share_link_id: str) -> dict[str, Any] | None:
         row = self._one(
             """
-            SELECT id, workspace_id, doc_id, created_by, redact_content, max_views, view_count, last_viewed_at,
+            SELECT id, workspace_id, doc_id, created_by, redact_content, max_views,
+                   password_hash IS NOT NULL AS password_protected, view_count, last_viewed_at,
                    created_at, expires_at, revoked_at
             FROM document_share_links
             WHERE id = ?
@@ -7637,7 +7718,8 @@ class EnterpriseStore:
     def _conversation_share_link(self, share_link_id: str) -> dict[str, Any] | None:
         row = self._one(
             """
-            SELECT id, workspace_id, conversation_id, created_by, redact_content, max_views, view_count, last_viewed_at,
+            SELECT id, workspace_id, conversation_id, created_by, redact_content, max_views,
+                   password_hash IS NOT NULL AS password_protected, view_count, last_viewed_at,
                    created_at, expires_at, revoked_at
             FROM conversation_share_links
             WHERE id = ?
@@ -7779,6 +7861,7 @@ def _share_link_is_active(link: dict[str, Any]) -> bool:
 def _decorate_document_share_link(link: dict[str, Any]) -> dict[str, Any]:
     decorated = dict(link)
     decorated["redact_content"] = bool(decorated.get("redact_content"))
+    decorated["password_protected"] = bool(decorated.get("password_protected"))
     decorated["max_views"] = int(decorated["max_views"]) if decorated.get("max_views") is not None else None
     decorated["view_count"] = int(decorated.get("view_count") or 0)
     decorated["last_viewed_at"] = decorated.get("last_viewed_at")
@@ -7789,6 +7872,7 @@ def _decorate_document_share_link(link: dict[str, Any]) -> dict[str, Any]:
 def _decorate_conversation_share_link(link: dict[str, Any]) -> dict[str, Any]:
     decorated = dict(link)
     decorated["redact_content"] = bool(decorated.get("redact_content"))
+    decorated["password_protected"] = bool(decorated.get("password_protected"))
     decorated["max_views"] = int(decorated["max_views"]) if decorated.get("max_views") is not None else None
     decorated["view_count"] = int(decorated.get("view_count") or 0)
     decorated["last_viewed_at"] = decorated.get("last_viewed_at")

@@ -1688,6 +1688,83 @@ class EnterpriseStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Conversation not found"):
                 store.list_conversation_messages(markdown_conversation["id"], "alice")
 
+    def test_conversation_source_set_scope_filters_chat_messages_by_actor_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            public_source = root / "public-scope.txt"
+            secret_source = root / "secret-scope.txt"
+            override_source = root / "override-scope.txt"
+            public_source.write_text("Public renewal evidence for scoped chat.", encoding="utf-8")
+            secret_source.write_text("Secret acquisition evidence for scoped chat.", encoding="utf-8")
+            override_source.write_text("Override billing evidence for explicit document scope.", encoding="utf-8")
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            public_doc_id = store.ingest_file(
+                public_source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Public scope memo",
+            )
+            secret_doc_id = store.ingest_file(
+                secret_source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Secret scope memo",
+            )
+            override_doc_id = store.ingest_file(
+                override_source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Override scope memo",
+            )
+            store.set_document_access_mode(
+                secret_doc_id,
+                access_mode="restricted",
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+            )
+            source_set = store.create_query_source_set(
+                workspace_id,
+                "alice",
+                "Pinned chat scope",
+                [public_doc_id, secret_doc_id],
+            )
+
+            conversation = store.create_conversation(
+                workspace_id,
+                "bob",
+                title="Pinned scope chat",
+                source_set_id=source_set["id"],
+            )
+            default_chat = store.chat_message(conversation["id"], "bob", "renewal", limit=4)
+            override_chat = store.chat_message(
+                conversation["id"],
+                "bob",
+                "billing",
+                doc_ids=[override_doc_id],
+                limit=4,
+            )
+            listed = store.list_conversations(workspace_id, "bob")
+
+            self.assertEqual(conversation["source_set_id"], source_set["id"])
+            self.assertEqual(listed[0]["source_set_id"], source_set["id"])
+            self.assertEqual(default_chat["conversation"]["source_set_id"], source_set["id"])
+            self.assertEqual(default_chat["result"]["trace"]["scope"]["source_set_id"], source_set["id"])
+            self.assertEqual(default_chat["result"]["trace"]["scope"]["doc_ids"], [public_doc_id])
+            self.assertEqual(default_chat["result"]["trace"]["scope"]["source_set_document_count"], 1)
+            self.assertEqual(default_chat["result"]["citations"][0]["doc_id"], public_doc_id)
+            self.assertNotIn("source_set_id", override_chat["result"]["trace"]["scope"])
+            self.assertEqual(override_chat["result"]["trace"]["scope"]["doc_ids"], [override_doc_id])
+            with self.assertRaisesRegex(ValueError, "Query source set not found"):
+                store.create_conversation(
+                    workspace_id,
+                    "bob",
+                    title="Missing scope",
+                    source_set_id="qss_missing",
+                )
+
     def test_conversation_share_links_publish_bounded_transcripts_with_citations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2117,17 +2194,45 @@ class EnterpriseStoreTest(unittest.TestCase):
                 text=True,
                 check=True,
             )
-            subprocess.run(
+            doc_id = subprocess.run(
                 [*base, "ingest-file", str(source), "--workspace-id", "ws_cli", "--user-id", "alice", "--name", "Chat note"],
                 cwd=repo_root,
                 env=env,
                 capture_output=True,
                 text=True,
                 check=True,
+            ).stdout.strip()
+            source_set = json.loads(
+                subprocess.run(
+                    [
+                        *base,
+                        "query-source-set",
+                        "ws_cli",
+                        "alice",
+                        "--create",
+                        "CLI pinned scope",
+                        "--doc-id",
+                        doc_id,
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
             )
             conversation = json.loads(
                 subprocess.run(
-                    [*base, "create-conversation", "ws_cli", "alice", "--title", "CLI chat"],
+                    [
+                        *base,
+                        "create-conversation",
+                        "ws_cli",
+                        "alice",
+                        "--title",
+                        "CLI chat",
+                        "--source-set-id",
+                        source_set["id"],
+                    ],
                     cwd=repo_root,
                     env=env,
                     capture_output=True,
@@ -2278,10 +2383,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             exported_lines = [json.loads(line) for line in exported_jsonl.splitlines()]
 
             self.assertEqual(renamed["title"], "CLI renamed")
+            self.assertEqual(conversation["source_set_id"], source_set["id"])
             self.assertEqual(conversations[0]["title"], "CLI renamed")
+            self.assertEqual(conversations[0]["source_set_id"], source_set["id"])
             self.assertEqual(conversations[0]["message_count"], 2)
             self.assertEqual([message["role"] for message in messages], ["user", "assistant"])
             self.assertEqual(messages[1]["run_id"], chat["result"]["run_id"])
+            self.assertEqual(chat["result"]["trace"]["scope"]["source_set_id"], source_set["id"])
+            self.assertEqual(chat["result"]["trace"]["scope"]["doc_ids"], [doc_id])
             self.assertTrue(chat["result"]["verification"]["ok"], chat["result"]["verification"]["errors"])
             self.assertTrue(chat["result"]["citations"])
             self.assertEqual(exported_lines[0]["conversation"]["title"], "CLI renamed")
@@ -3965,6 +4074,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                 [doc_id],
                 description="Source set export preservation",
             )
+            scoped_conversation = store.create_conversation(
+                workspace_id,
+                "alice",
+                title="Import scoped chat",
+                source_set_id=source_set["id"],
+            )
             store.create_api_token(workspace_id, "alice", name="secret-token")
             store.query_corpus("dry-run", workspace_id=workspace_id, actor_user_id="alice")
             store.set_query_retention_policy(workspace_id, "alice", retention_days=45)
@@ -4047,6 +4162,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                 restored_quota_policy = restored_store.get_workspace_quota_policy(workspace_id, "alice")
                 restored_provider = restored_store.get_workspace_provider_config(workspace_id, "alice")
                 restored_source_sets = restored_store.list_query_source_sets(workspace_id, "alice")
+                restored_conversations = restored_store.list_conversations(workspace_id, "alice")
+                restored_scoped_chat = restored_store.chat_message(
+                    scoped_conversation["id"],
+                    "alice",
+                    "dry-run",
+                    limit=4,
+                )
                 restored_source_set_query = restored_store.query_corpus(
                     "import dry-run",
                     workspace_id=workspace_id,
@@ -4093,6 +4215,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(restored_provider["api_key_env_var"], "PAGEINDEX_RESTORE_PROVIDER_KEY")
             self.assertEqual(restored_source_sets[0]["id"], source_set["id"])
             self.assertEqual(restored_source_sets[0]["doc_ids"], [doc_id])
+            self.assertEqual(restored_conversations[0]["id"], scoped_conversation["id"])
+            self.assertEqual(restored_conversations[0]["source_set_id"], source_set["id"])
+            self.assertEqual(restored_scoped_chat["result"]["trace"]["scope"]["source_set_id"], source_set["id"])
+            self.assertEqual(restored_scoped_chat["result"]["trace"]["scope"]["doc_ids"], [doc_id])
             self.assertEqual(restored_source_set_query["trace"]["scope"]["source_set_id"], source_set["id"])
             self.assertEqual(restored_source_set_query["citations"][0]["doc_id"], doc_id)
             self.assertTrue(any(event.get("integrity_hash") for event in restored_audit_events))
@@ -8607,7 +8733,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             alice_read_token = store.create_api_token(workspace_id, "alice", name="alice-read", scopes=["read"])["token"]
             bob_token = store.create_api_token(workspace_id, "bob", name="bob")["token"]
             charlie_token = store.create_api_token(workspace_id, "charlie", name="charlie")["token"]
-            store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Conversation memo")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Conversation memo")
+            source_set = store.create_query_source_set(
+                workspace_id,
+                "alice",
+                "HTTP pinned scope",
+                [doc_id],
+            )
             charlie_conversation = store.create_conversation(workspace_id, "charlie", title="Legacy write token")
             store.add_workspace_member(workspace_id, "charlie", "viewer", actor_user_id="alice")
             store.close()
@@ -8622,7 +8754,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             try:
                 conversation = _post_json(
                     f"{base}/conversations",
-                    {"title": "HTTP chat"},
+                    {"title": "HTTP chat", "source_set_id": source_set["id"]},
                     headers=alice_headers,
                     status=201,
                 )
@@ -8760,6 +8892,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )
 
                 self.assertEqual(alice_conversations[0]["id"], conversation["id"])
+                self.assertEqual(conversation["source_set_id"], source_set["id"])
+                self.assertEqual(alice_conversations[0]["source_set_id"], source_set["id"])
                 self.assertEqual(renamed["title"], "HTTP renamed")
                 self.assertEqual(bad_rename["error"], "title is required")
                 self.assertEqual(read_rename["error"], "api token scope denied")
@@ -8796,6 +8930,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertEqual(after_delete_conversations, [])
                 self.assertEqual(deleted_messages["status"], 400)
                 self.assertIn("Conversation not found", deleted_messages["error"])
+                self.assertEqual(chat["result"]["trace"]["scope"]["source_set_id"], source_set["id"])
+                self.assertEqual(chat["result"]["trace"]["scope"]["doc_ids"], [doc_id])
                 self.assertTrue(chat["result"]["verification"]["ok"], chat["result"]["verification"]["errors"])
                 self.assertTrue(chat["result"]["citations"])
             finally:

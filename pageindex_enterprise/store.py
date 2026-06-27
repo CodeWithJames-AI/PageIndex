@@ -224,6 +224,14 @@ def _normalize_source_set_description(description: str | None) -> str:
     return normalized
 
 
+def _optional_source_set_id(source_set_id: str | None) -> str | None:
+    if source_set_id is None:
+        return None
+    if not isinstance(source_set_id, str):
+        raise ValueError("source_set_id must be a string")
+    return source_set_id.strip() or None
+
+
 def _normalize_source_set_doc_ids(doc_ids: list[str] | None) -> list[str]:
     if not doc_ids:
         raise ValueError("At least one document id is required.")
@@ -994,6 +1002,7 @@ class EnterpriseStore:
               workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
               created_by TEXT NOT NULL,
               title TEXT NOT NULL,
+              source_set_id TEXT REFERENCES query_source_sets(id) ON DELETE SET NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               archived_at TEXT
@@ -1166,6 +1175,7 @@ class EnterpriseStore:
                 "line_count": "INTEGER",
             },
             "conversations": {
+                "source_set_id": "TEXT REFERENCES query_source_sets(id) ON DELETE SET NULL",
                 "archived_at": "TEXT",
             },
             "virtual_nodes": {
@@ -3137,7 +3147,7 @@ class EnterpriseStore:
             "conversations.jsonl": _rows(
                 self.conn.execute(
                     """
-                    SELECT id, workspace_id, created_by, title, created_at, updated_at, archived_at
+                    SELECT id, workspace_id, created_by, title, source_set_id, created_at, updated_at, archived_at
                     FROM conversations
                     WHERE workspace_id = ?
                     ORDER BY created_at, id
@@ -5271,18 +5281,22 @@ class EnterpriseStore:
         workspace_id: str,
         actor_user_id: str,
         title: str | None = None,
+        source_set_id: str | None = None,
     ) -> dict[str, Any]:
         actor_user_id = actor_user_id.strip()
         self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_WRITE_ROLES)
         title = (title or "New conversation").strip() or "New conversation"
+        normalized_source_set_id = _optional_source_set_id(source_set_id)
+        if normalized_source_set_id:
+            self.resolve_query_source_set_doc_ids(workspace_id, actor_user_id, normalized_source_set_id)
         conversation_id = f"conv_{uuid.uuid4().hex}"
         now = _now()
         self.conn.execute(
             """
-            INSERT INTO conversations (id, workspace_id, created_by, title, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO conversations (id, workspace_id, created_by, title, source_set_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (conversation_id, workspace_id, actor_user_id, title, now, now),
+            (conversation_id, workspace_id, actor_user_id, title, normalized_source_set_id, now, now),
         )
         self._commit()
         return {
@@ -5290,6 +5304,7 @@ class EnterpriseStore:
             "workspace_id": workspace_id,
             "created_by": actor_user_id,
             "title": title,
+            "source_set_id": normalized_source_set_id,
             "created_at": now,
             "updated_at": now,
             "archived_at": None,
@@ -5782,9 +5797,11 @@ class EnterpriseStore:
                     user_message["created_at"],
                 ),
             )
+            source_set_id = conversation.get("source_set_id") if doc_ids is None else None
             result = self.query_corpus(
                 retrieval_query,
                 doc_ids=doc_ids,
+                source_set_id=source_set_id,
                 expert_hints=expert_hints,
                 workspace_id=conversation["workspace_id"],
                 limit=limit,

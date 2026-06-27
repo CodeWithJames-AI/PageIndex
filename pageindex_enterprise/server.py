@@ -733,6 +733,10 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                     workspace_id,
                     user_id,
                     title=_optional_str(payload.get("title"), "title"),
+                    source_set_id=_optional_str(
+                        payload.get("source_set_id", payload.get("sourceSetId")),
+                        "source_set_id",
+                    ),
                 ),
                 HTTPStatus.CREATED,
             )

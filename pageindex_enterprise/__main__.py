@@ -317,6 +317,7 @@ def main() -> None:
     create_conversation.add_argument("workspace_id")
     create_conversation.add_argument("user_id")
     create_conversation.add_argument("--title")
+    create_conversation.add_argument("--source-set-id")
 
     list_conversations = sub.add_parser("list-conversations")
     list_conversations.add_argument("workspace_id")
@@ -941,7 +942,12 @@ def main() -> None:
             print(
                 json.dumps(
                     _conversation_cli(
-                        lambda: store.create_conversation(args.workspace_id, args.user_id, title=args.title)
+                        lambda: store.create_conversation(
+                            args.workspace_id,
+                            args.user_id,
+                            title=args.title,
+                            source_set_id=args.source_set_id,
+                        )
                     ),
                     indent=2,
                 )

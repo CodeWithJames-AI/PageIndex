@@ -935,13 +935,67 @@ class EnterpriseStoreTest(unittest.TestCase):
                     reason="should fail",
                 )
 
+    def test_trace_line_level_citations_validate_page_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EnterpriseStore(tmp)
+            doc_id = store.register_document(
+                name="Policy memo",
+                source_path="/docs/policy.txt",
+                kind="txt",
+                page_count=1,
+            )
+            store.put_pages(doc_id, ["Overview\nInflation authority is delegated.\nAppendix"])
+            run_id = store.start_query("inflation authority", {"doc_ids": [doc_id]})
+            evidence_id = store.add_evidence(
+                run_id=run_id,
+                doc_id=doc_id,
+                page_start=1,
+                page_end=1,
+                line_start=2,
+                line_end=2,
+                text="Inflation authority is delegated.",
+                reason="matches line-level question",
+                score=2,
+            )
+            citation = store.add_citation(run_id=run_id, evidence_id=evidence_id)
+            store.finish_query(run_id)
+
+            verification = store.verify_trace(run_id)
+            trace = store.get_trace(run_id)
+
+            self.assertTrue(verification["ok"], verification["errors"])
+            self.assertEqual(citation["line_start"], 2)
+            self.assertEqual(citation["line_end"], 2)
+            self.assertIn("line 2", citation["label"])
+            self.assertEqual(trace["evidence"][0]["line_start"], 2)
+            self.assertEqual(trace["citations"][0]["line_end"], 2)
+
+            invalid_run_id = store.start_query("bad line", {"doc_ids": [doc_id]})
+            with self.assertRaisesRegex(ValueError, "line range exceeds page line count"):
+                store.add_evidence(
+                    run_id=invalid_run_id,
+                    doc_id=doc_id,
+                    page_start=1,
+                    page_end=1,
+                    line_start=2,
+                    line_end=4,
+                    text="out of range",
+                    reason="should fail",
+                )
+
     def test_query_corpus_returns_multi_document_citations_and_trace(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fed = root / "fed.txt"
             law = root / "law.txt"
-            fed.write_text("Inflation increased the deferred asset reported by the central bank.", encoding="utf-8")
-            law.write_text("The FSOC authority is expanded for systemic financial stability risks.", encoding="utf-8")
+            fed.write_text(
+                "Overview\nInflation increased the deferred asset reported by the central bank.\nDeferred asset detail",
+                encoding="utf-8",
+            )
+            law.write_text(
+                "Context\nThe FSOC authority is expanded for systemic financial stability risks.\nStability appendix",
+                encoding="utf-8",
+            )
             store = EnterpriseStore(root / "workspace")
             fed_id = store.ingest_file(fed)
             law_id = store.ingest_file(law)
@@ -957,6 +1011,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(result["trace"]["scope"]["query_tree"]["document_count"], 2)
             self.assertEqual(result["trace"]["scope"]["hybrid_policy"]["page_fallback_hits"], 2)
             self.assertEqual(result["trace"]["scope"]["hybrid_policy"]["section_hits"], 0)
+            self.assertTrue(all(citation["line_start"] == 2 for citation in result["citations"]))
+            self.assertTrue(all(citation["line_end"] == 2 for citation in result["citations"]))
+            self.assertTrue(all("line 2" in citation["label"] for citation in result["citations"]))
+            for citation in result["trace"]["citations"]:
+                evidence = next(ev for ev in result["trace"]["evidence"] if ev["id"] == citation["evidence_id"])
+                self.assertEqual(citation["line_start"], evidence["line_start"])
+                self.assertEqual(citation["line_end"], evidence["line_end"])
             self.assertTrue(result["verification"]["ok"], result["verification"]["errors"])
             self.assertIn("Found relevant evidence", result["answer"])
 

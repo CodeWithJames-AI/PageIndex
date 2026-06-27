@@ -917,6 +917,8 @@ class EnterpriseStore:
               node_id TEXT,
               page_start INTEGER,
               page_end INTEGER,
+              line_start INTEGER,
+              line_end INTEGER,
               text TEXT NOT NULL,
               reason TEXT NOT NULL,
               score REAL NOT NULL DEFAULT 0,
@@ -931,6 +933,8 @@ class EnterpriseStore:
               label TEXT NOT NULL,
               page_start INTEGER NOT NULL,
               page_end INTEGER NOT NULL,
+              line_start INTEGER,
+              line_end INTEGER,
               created_at TEXT NOT NULL
             );
 
@@ -1045,6 +1049,14 @@ class EnterpriseStore:
                 "source_node_id": "TEXT",
                 "page_start": "INTEGER",
                 "page_end": "INTEGER",
+            },
+            "evidence": {
+                "line_start": "INTEGER",
+                "line_end": "INTEGER",
+            },
+            "citations": {
+                "line_start": "INTEGER",
+                "line_end": "INTEGER",
             },
         }
         for table, table_additions in additions.items():
@@ -2801,7 +2813,7 @@ class EnterpriseStore:
                 self.conn.execute(
                     """
                     SELECT e.id, e.run_id, e.doc_id, e.node_id, e.page_start, e.page_end,
-                           e.text, e.reason, e.score, e.created_at
+                           e.line_start, e.line_end, e.text, e.reason, e.score, e.created_at
                     FROM evidence e
                     JOIN query_runs q ON q.id = e.run_id
                     WHERE q.workspace_id = ?
@@ -2814,7 +2826,7 @@ class EnterpriseStore:
                 self.conn.execute(
                     """
                     SELECT c.id, c.run_id, c.evidence_id, c.doc_id, c.label,
-                           c.page_start, c.page_end, c.created_at
+                           c.page_start, c.page_end, c.line_start, c.line_end, c.created_at
                     FROM citations c
                     JOIN query_runs q ON q.id = c.run_id
                     WHERE q.workspace_id = ?
@@ -4958,6 +4970,9 @@ class EnterpriseStore:
             haystack = f"{hit['doc_name']} {hit['content']}".casefold()
             hit["score"] = sum(haystack.count(term) for term in terms)
             if hit["score"]:
+                line_range = _matching_line_range(hit["content"], terms)
+                hit["line_start"] = line_range[0] if line_range else None
+                hit["line_end"] = line_range[1] if line_range else None
                 hits.append(hit)
         hits.sort(key=lambda h: (-h["score"], h["doc_name"], h["page"]))
         return hits[:limit]
@@ -5014,6 +5029,8 @@ class EnterpriseStore:
                     node_id=hit["node_id"],
                     page_start=hit["page_start"],
                     page_end=hit["page_end"],
+                    line_start=hit.get("line_start"),
+                    line_end=hit.get("line_end"),
                     text=hit["content"],
                     reason=hit["reason"],
                     score=hit["score"],
@@ -5462,6 +5479,8 @@ class EnterpriseStore:
         node_id: str | None = None,
         page_start: int | None = None,
         page_end: int | None = None,
+        line_start: int | None = None,
+        line_end: int | None = None,
         score: float = 0.0,
     ) -> str:
         if not self._one("SELECT id FROM query_runs WHERE id = ?", (run_id,)):
@@ -5474,15 +5493,49 @@ class EnterpriseStore:
                 raise ValueError("Evidence page range is invalid.")
             if doc.get("page_count") and page_end > doc["page_count"]:
                 raise ValueError("Evidence page range exceeds document page count.")
+        if line_start is not None or line_end is not None:
+            if (
+                line_start is None
+                or line_end is None
+                or line_start < 1
+                or line_end < line_start
+            ):
+                raise ValueError("Evidence line range is invalid.")
+            if page_start is None or page_end is None:
+                raise ValueError("Evidence line range requires a page range.")
+            if page_start != page_end:
+                raise ValueError("Evidence line range requires single-page evidence.")
+            page = self._one(
+                "SELECT content FROM document_pages WHERE doc_id = ? AND page = ?",
+                (doc_id, page_start),
+            )
+            if not page:
+                raise ValueError("Evidence line range requires stored page text.")
+            if line_end > _content_line_count(page["content"]):
+                raise ValueError("Evidence line range exceeds page line count.")
         evidence_id = f"ev_{uuid.uuid4().hex}"
         self.conn.execute(
             """
             INSERT INTO evidence (
-              id, run_id, doc_id, node_id, page_start, page_end, text, reason, score, created_at
+              id, run_id, doc_id, node_id, page_start, page_end,
+              line_start, line_end, text, reason, score, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (evidence_id, run_id, doc_id, node_id, page_start, page_end, text, reason, score, _now()),
+            (
+                evidence_id,
+                run_id,
+                doc_id,
+                node_id,
+                page_start,
+                page_end,
+                line_start,
+                line_end,
+                text,
+                reason,
+                score,
+                _now(),
+            ),
         )
         self._commit()
         return evidence_id
@@ -5500,10 +5553,18 @@ class EnterpriseStore:
         label = f"{doc['name']} p.{evidence['page_start']}"
         if evidence["page_end"] != evidence["page_start"]:
             label = f"{doc['name']} pp.{evidence['page_start']}-{evidence['page_end']}"
+        if evidence["line_start"] is not None:
+            if evidence["line_start"] == evidence["line_end"]:
+                label = f"{label} line {evidence['line_start']}"
+            else:
+                label = f"{label} lines {evidence['line_start']}-{evidence['line_end']}"
         self.conn.execute(
             """
-            INSERT INTO citations (id, run_id, evidence_id, doc_id, label, page_start, page_end, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO citations (
+              id, run_id, evidence_id, doc_id, label, page_start, page_end,
+              line_start, line_end, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 citation_id,
@@ -5513,6 +5574,8 @@ class EnterpriseStore:
                 label,
                 evidence["page_start"],
                 evidence["page_end"],
+                evidence["line_start"],
+                evidence["line_end"],
                 _now(),
             ),
         )
@@ -5525,6 +5588,8 @@ class EnterpriseStore:
             "label": label,
             "page_start": evidence["page_start"],
             "page_end": evidence["page_end"],
+            "line_start": evidence["line_start"],
+            "line_end": evidence["line_end"],
         }
 
     def finish_query(self, run_id: str) -> None:
@@ -5731,6 +5796,26 @@ class EnterpriseStore:
             for page in range(ev["page_start"], ev["page_end"] + 1):
                 if not self._evidence_page_exists(ev, page):
                     errors.append(f"evidence {ev['id']} references missing page {page}")
+            if ev["line_start"] is None and ev["line_end"] is None:
+                continue
+            if ev["line_start"] is None or ev["line_end"] is None:
+                errors.append(f"evidence {ev['id']} has invalid line range")
+                continue
+            if ev["line_start"] < 1 or ev["line_end"] < ev["line_start"]:
+                errors.append(f"evidence {ev['id']} has invalid line range")
+                continue
+            if ev["page_start"] != ev["page_end"]:
+                errors.append(f"evidence {ev['id']} has line range across multiple pages")
+                continue
+            page = self._one(
+                "SELECT content FROM document_pages WHERE doc_id = ? AND page = ?",
+                (ev["doc_id"], ev["page_start"]),
+            )
+            if not page:
+                errors.append(f"evidence {ev['id']} has line range without stored page text")
+                continue
+            if ev["line_end"] > _content_line_count(page["content"]):
+                errors.append(f"evidence {ev['id']} line range exceeds page line count")
         for citation in trace["citations"]:
             if citation["evidence_id"] not in evidence_ids:
                 errors.append(f"citation {citation['id']} references missing evidence")
@@ -5739,6 +5824,8 @@ class EnterpriseStore:
                 citation["doc_id"] != ev["doc_id"]
                 or citation["page_start"] != ev["page_start"]
                 or citation["page_end"] != ev["page_end"]
+                or citation["line_start"] != ev["line_start"]
+                or citation["line_end"] != ev["line_end"]
             ):
                 errors.append(f"citation {citation['id']} does not match evidence {ev['id']}")
         return {"ok": not errors, "errors": errors}
@@ -5903,6 +5990,24 @@ def _unsafe_hint_reason(hint: str) -> str | None:
 def _terms_for(query: str, expert_hints: list[str] | None = None) -> list[str]:
     text = " ".join([query, *_prepare_hints(expert_hints)["accepted"]])
     return [term.casefold() for term in text.split() if term.strip()]
+
+
+def _matching_line_range(content: str, terms: list[str]) -> tuple[int, int] | None:
+    lowered_terms = [term.casefold() for term in terms if term.strip()]
+    if not lowered_terms:
+        return None
+    matches = []
+    for index, line in enumerate(str(content).splitlines() or [str(content)], 1):
+        lowered = line.casefold()
+        if any(term in lowered for term in lowered_terms):
+            matches.append(index)
+    if not matches:
+        return None
+    return matches[0], matches[-1]
+
+
+def _content_line_count(content: str) -> int:
+    return max(1, len(str(content).splitlines()))
 
 
 def _question_subject(name: str) -> str:

@@ -144,7 +144,10 @@ WORKSPACE_EXPORT_OMITTED_TABLES = (
 WORKSPACE_EXPORT_REQUIRED_OMITTED_POLICIES = ("api_tokens", "document filesystem paths")
 WORKSPACE_EXPORT_OMITTED_POLICIES = (*WORKSPACE_EXPORT_REQUIRED_OMITTED_POLICIES, "public share link secrets")
 _UNSET = object()
-_AUDIT_SINK_SECRET_VALUE = re.compile(r"(pit_[A-Za-z0-9_-]+|Bearer\s+\S+|sk-[A-Za-z0-9_-]+)", re.IGNORECASE)
+_AUDIT_SINK_SECRET_VALUE = re.compile(
+    r"((?:pit|pis|pcs|pss)_[A-Za-z0-9_-]+|Bearer\s+\S+|sk-[A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
 _EMAIL_ADDRESS = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _ENV_VAR_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _ABSOLUTE_SOURCE_PATH = re.compile(

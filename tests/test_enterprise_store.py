@@ -6825,6 +6825,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                         "note": f"raw value {token['token']}",
                         "message": "Bearer live_header_should_not_leave",
                         "public": "sk-livekey_should_not_leave",
+                        "document_link": "created pis_doc_should_not_leave",
+                        "conversation_link": "created pcs_chat_should_not_leave",
+                        "source_set_link": "created pss_set_should_not_leave",
                     },
                 )
                 sink_path = root / "audit" / "external.jsonl"
@@ -6845,10 +6848,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                     lines[1]["details"],
                     {
                         "message": "[redacted]",
+                        "conversation_link": "[redacted]",
+                        "document_link": "[redacted]",
                         "nested": {"note": "kept"},
                         "note": "[redacted]",
                         "public": "[redacted]",
                         "safe": "kept",
+                        "source_set_link": "[redacted]",
                     },
                 )
                 self.assertNotIn(token["token"], serialized)
@@ -6856,6 +6862,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 self.assertNotIn("key_should_not_leave", serialized)
                 self.assertNotIn("live_header_should_not_leave", serialized)
                 self.assertNotIn("livekey_should_not_leave", serialized)
+                self.assertNotIn("pis_doc_should_not_leave", serialized)
+                self.assertNotIn("pcs_chat_should_not_leave", serialized)
+                self.assertNotIn("pss_set_should_not_leave", serialized)
                 self.assertNotIn("token_hash", serialized)
                 self.assertEqual(lines_after_failure, lines_before_failure)
         finally:
@@ -6946,6 +6955,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     "nested": {"password": "pw_should_not_leave", "note": "kept"},
                     "message": "Bearer live_header_should_not_leave",
                     "public": "sk-livekey_should_not_leave",
+                    "document_link": "created pis_doc_should_not_leave",
+                    "conversation_link": "created pcs_chat_should_not_leave",
+                    "source_set_link": "created pss_set_should_not_leave",
                 },
             )
 
@@ -6971,7 +6983,21 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("pw_should_not_leave", serialized)
             self.assertNotIn("live_header_should_not_leave", serialized)
             self.assertNotIn("livekey_should_not_leave", serialized)
-            self.assertEqual(lines[2]["details"], {"message": "[redacted]", "nested": {"note": "kept"}, "public": "[redacted]", "safe": "kept"})
+            self.assertNotIn("pis_doc_should_not_leave", serialized)
+            self.assertNotIn("pcs_chat_should_not_leave", serialized)
+            self.assertNotIn("pss_set_should_not_leave", serialized)
+            self.assertEqual(
+                lines[2]["details"],
+                {
+                    "conversation_link": "[redacted]",
+                    "document_link": "[redacted]",
+                    "message": "[redacted]",
+                    "nested": {"note": "kept"},
+                    "public": "[redacted]",
+                    "safe": "kept",
+                    "source_set_link": "[redacted]",
+                },
+            )
             self.assertTrue(disabled["configured"])
             self.assertFalse(disabled["enabled"])
             self.assertEqual(lines_after_disable, lines_before_disable)

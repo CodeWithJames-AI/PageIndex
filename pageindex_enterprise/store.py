@@ -4539,6 +4539,140 @@ class EnterpriseStore:
             "group_grants": [dict(row) for row in group_rows],
         }
 
+    def explain_folder_access(
+        self,
+        folder_id: str,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        target_user_id: str,
+    ) -> dict[str, Any] | None:
+        folder = self._one("SELECT * FROM folders WHERE id = ?", (folder_id.strip(),))
+        if not folder or folder["workspace_id"] != workspace_id:
+            return None
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        target_user_id = target_user_id.strip()
+        if not target_user_id:
+            raise ValueError("target_user_id is required.")
+        workspace_role = self.workspace_role(workspace_id, target_user_id)
+        matched_grants: list[dict[str, Any]] = []
+        for row in self.conn.execute(
+            """
+            SELECT fag.role, fag.granted_by, fag.created_at,
+                   granted_folder.id AS folder_id, granted_folder.path AS folder_path
+            FROM folder_access_grants fag
+            JOIN folders granted_folder ON granted_folder.id = fag.folder_id
+            WHERE fag.workspace_id = ?
+              AND fag.user_id = ?
+              AND (
+                ? = granted_folder.path
+                OR substr(?, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                OR substr(granted_folder.path, 1, length(?) + 1) = ? || '/'
+              )
+            ORDER BY length(granted_folder.path) DESC, granted_folder.path
+            """,
+            (workspace_id, target_user_id, folder["path"], folder["path"], folder["path"], folder["path"]),
+        ):
+            matched_grants.append(
+                {
+                    "scope": "folder",
+                    "principal_type": "user",
+                    "principal_id": target_user_id,
+                    "folder_id": row["folder_id"],
+                    "folder_path": row["folder_path"],
+                    "role": row["role"],
+                    "granted_by": row["granted_by"],
+                    "created_at": row["created_at"],
+                }
+            )
+        for row in self.conn.execute(
+            """
+            SELECT fgag.role, fgag.granted_by, fgag.created_at,
+                   granted_folder.id AS folder_id, granted_folder.path AS folder_path,
+                   g.id AS group_id, g.name AS group_name
+            FROM folder_group_access_grants fgag
+            JOIN folders granted_folder ON granted_folder.id = fgag.folder_id
+            JOIN workspace_groups g ON g.id = fgag.group_id
+            JOIN workspace_group_members wgm ON wgm.group_id = fgag.group_id
+            WHERE fgag.workspace_id = ?
+              AND wgm.workspace_id = ?
+              AND wgm.user_id = ?
+              AND (
+                ? = granted_folder.path
+                OR substr(?, 1, length(granted_folder.path) + 1) = granted_folder.path || '/'
+                OR substr(granted_folder.path, 1, length(?) + 1) = ? || '/'
+              )
+            ORDER BY length(granted_folder.path) DESC, granted_folder.path, g.name, g.id
+            """,
+            (workspace_id, workspace_id, target_user_id, folder["path"], folder["path"], folder["path"], folder["path"]),
+        ):
+            matched_grants.append(
+                {
+                    "scope": "folder",
+                    "principal_type": "group",
+                    "principal_id": row["group_id"],
+                    "principal_name": row["group_name"],
+                    "folder_id": row["folder_id"],
+                    "folder_path": row["folder_path"],
+                    "role": row["role"],
+                    "granted_by": row["granted_by"],
+                    "created_at": row["created_at"],
+                }
+            )
+        descendant_pattern = f"{_escape_like(folder['path'])}/%"
+        rows = self.conn.execute(
+            """
+            SELECT d.*
+            FROM documents d
+            JOIN folders f ON f.id = d.folder_id
+            WHERE d.workspace_id = ?
+              AND (f.path = ? OR f.path LIKE ? ESCAPE '\\')
+            ORDER BY f.path, d.name, d.id
+            """,
+            (workspace_id, folder["path"], descendant_pattern),
+        )
+        document_count = 0
+        readable_document_count = 0
+        writable_document_count = 0
+        for row in rows:
+            document_count += 1
+            document = dict(row)
+            if workspace_role and self._can_read_document(document, target_user_id):
+                readable_document_count += 1
+            if workspace_role and self._can_write_document(document, target_user_id):
+                writable_document_count += 1
+        denied = bool(workspace_role and workspace_role not in WORKSPACE_ADMIN_ROLES and any(grant["role"] == "deny" for grant in matched_grants))
+        if not workspace_role:
+            decision = "workspace_not_member"
+        elif workspace_role in WORKSPACE_ADMIN_ROLES:
+            decision = "workspace_admin"
+        elif denied and readable_document_count == 0:
+            decision = "deny"
+        elif denied:
+            decision = "partial_deny"
+        elif writable_document_count:
+            decision = "write"
+        elif readable_document_count:
+            decision = "read"
+        else:
+            decision = "no_access"
+        return {
+            "folder_id": folder["id"],
+            "folder_path": folder["path"],
+            "workspace_id": workspace_id,
+            "user_id": target_user_id,
+            "workspace_role": workspace_role,
+            "document_count": document_count,
+            "readable_document_count": readable_document_count,
+            "writable_document_count": writable_document_count,
+            "blocked_document_count": max(0, document_count - readable_document_count),
+            "can_read": readable_document_count > 0,
+            "can_write": writable_document_count > 0,
+            "denied": denied,
+            "decision": decision,
+            "matched_grants": matched_grants,
+        }
+
     def grant_folder_access(
         self,
         folder_id: str,

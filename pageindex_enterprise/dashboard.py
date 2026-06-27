@@ -1594,6 +1594,22 @@ DASHBOARD_HTML = """<!doctype html>
       const grants = access.grants || [];
       const groupGrants = access.group_grants || [];
       const folder = access.folder || {};
+      const effective = access.effective_access || null;
+      const effectiveMatches = effective && effective.matched_grants ? effective.matched_grants : [];
+      const effectiveMatchesHtml = effectiveMatches.length
+        ? effectiveMatches.map((grant) => {
+          const principal = grant.principal_name || grant.principal_id || "unknown";
+          return `<li>${escapeHtml(grant.role || "read")} | ${escapeHtml(grant.folder_path || grant.folder_id || "")} | ${escapeHtml(grant.principal_type || "user")} ${escapeHtml(principal)}</li>`;
+        }).join("")
+        : "";
+      const effectiveHtml = effective
+        ? `
+          <div class="status ${effective.denied ? "warn" : (effective.can_read ? "ok" : "warn")}">
+            ${escapeHtml(effective.user_id)} | ${escapeHtml(effective.decision)} | readable ${escapeHtml(effective.readable_document_count || 0)}/${escapeHtml(effective.document_count || 0)} | writable ${escapeHtml(effective.writable_document_count || 0)}
+          </div>
+          ${effectiveMatchesHtml ? `<ul class="muted">${effectiveMatchesHtml}</ul>` : `<div class="muted">No matching folder grants.</div>`}
+        `
+        : `<div class="muted">No effective folder preview.</div>`;
       const grantsHtml = grants.length
         ? grants.map((grant) => `
           <article class="member">
@@ -1625,6 +1641,11 @@ DASHBOARD_HTML = """<!doctype html>
         <article class="folder">
           <strong>${escapeHtml(folder.path || folder.name || folder.id || "Folder")}</strong>
           <div class="muted">inherited by descendant folders</div>
+          <div class="access-actions" style="margin-top:8px">
+            <input id="folderEffectiveAccessUserInput" value="${escapeHtml(effective ? effective.user_id : "")}" placeholder="effective user id" aria-label="Effective folder access user id">
+            <button id="previewFolderEffectiveAccessButton" class="secondary" type="button">Preview effective</button>
+          </div>
+          <div id="folderEffectiveAccessPanel">${effectiveHtml}</div>
         </article>
         <div class="member-list">
           <strong>Direct folder grants</strong>
@@ -1641,6 +1662,7 @@ DASHBOARD_HTML = """<!doctype html>
       folderAccessPanel.querySelectorAll("[data-revoke-folder-access-group-id]").forEach((button) => {
         button.addEventListener("click", () => revokeFolderGroupAccess(button.dataset.revokeFolderAccessGroupId).catch((error) => setStatus(error.message, "error")));
       });
+      document.getElementById("previewFolderEffectiveAccessButton").addEventListener("click", () => previewFolderEffectiveAccess().catch((error) => setStatus(error.message, "error")));
     }
 
     function renderVirtualNodes(nodes) {
@@ -2373,6 +2395,22 @@ DASHBOARD_HTML = """<!doctype html>
       const payload = await api(`/folders/${encodeURIComponent(folderId)}/access`);
       renderFolderAccess(payload.access);
       setStatus("Folder access refreshed.", "ok");
+    }
+
+    async function previewFolderEffectiveAccess(folderId = selectedFolderId()) {
+      const input = document.getElementById("folderEffectiveAccessUserInput");
+      const userId = input.value.trim();
+      if (!folderId) {
+        setStatus("Select a folder.", "warn");
+        return;
+      }
+      if (!userId) {
+        setStatus("Enter a user id.", "warn");
+        return;
+      }
+      const payload = await api(`/folders/${encodeURIComponent(folderId)}/access?effective_user_id=${encodeURIComponent(userId)}`);
+      renderFolderAccess(payload.access);
+      setStatus("Effective folder access refreshed.", "ok");
     }
 
     async function updateFolderAccess(folderId, payload, message) {

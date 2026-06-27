@@ -12525,6 +12525,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                 name="Folder write memo",
             )
             written_pages = store.list_document_pages(doc_id, workspace_id=workspace_id, actor_user_id="bob")
+            effective_folder_write = store.explain_folder_access(
+                parent,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                target_user_id="bob",
+            )
             deny_granted = store.grant_folder_access(
                 child,
                 workspace_id=workspace_id,
@@ -12534,6 +12540,12 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             denied_docs = store.list_documents(workspace_id=workspace_id, actor_user_id="bob")
             denied_query = store.query_corpus("inherited folder access", workspace_id=workspace_id, actor_user_id="bob")
+            effective_folder_deny = store.explain_folder_access(
+                parent,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                target_user_id="bob",
+            )
             with self.assertRaisesRegex(PermissionError, "document write access denied"):
                 store.reindex_document_file(doc_id, write_source, workspace_id=workspace_id, actor_user_id="bob")
             deny_revoked = store.revoke_folder_access(child, workspace_id=workspace_id, actor_user_id="alice", user_id="bob")
@@ -12601,9 +12613,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(write_granted["grants"][0]["role"], "write")
             self.assertEqual(written["name"], "Folder write memo")
             self.assertEqual(written_pages["pages"][0]["content"], "Inherited folder access evidence after user write.")
+            self.assertEqual(effective_folder_write["decision"], "write")
+            self.assertEqual(effective_folder_write["readable_document_count"], 1)
+            self.assertEqual(effective_folder_write["writable_document_count"], 1)
             self.assertEqual(deny_granted["grants"][0]["role"], "deny")
             self.assertEqual(denied_docs, [])
             self.assertEqual(denied_query["citations"], [])
+            self.assertEqual(effective_folder_deny["decision"], "deny")
+            self.assertEqual(effective_folder_deny["blocked_document_count"], 1)
             self.assertTrue(deny_revoked)
             self.assertEqual([doc["id"] for doc in restored_docs], [doc_id])
             self.assertTrue(revoked)
@@ -12827,11 +12844,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                     headers=member_headers,
                 )
                 member_pages_after_write = _get_json(f"{base}/documents/{doc_id}/pages", headers=member_headers)
+                effective_write = _get_json(f"{access_url}?effective_user_id=bob", headers=audit_headers)
                 denied = _post_json(
                     child_access_url,
                     {"grant_user_id": "bob", "grant_role": "deny"},
                     headers=owner_headers,
                 )
+                effective_deny = _get_json(f"{access_url}?effective_user_id=bob", headers=audit_headers)
                 denied_query = _post_json(f"{base}/query", {"query": "inherited folder access"}, headers=member_headers)
                 denied_reindex = _put_json(
                     f"{base}/documents/{doc_id}",
@@ -12888,7 +12907,11 @@ class EnterpriseStoreTest(unittest.TestCase):
                 member_pages_after_write["pages"][0]["content"],
                 "HTTP inherited folder access evidence after user write.",
             )
+            self.assertEqual(effective_write["access"]["effective_access"]["decision"], "write")
+            self.assertEqual(effective_write["access"]["effective_access"]["writable_document_count"], 1)
             self.assertEqual(denied["access"]["grants"][0]["role"], "deny")
+            self.assertEqual(effective_deny["access"]["effective_access"]["decision"], "deny")
+            self.assertEqual(effective_deny["access"]["effective_access"]["blocked_document_count"], 1)
             self.assertEqual(denied_query["citations"], [])
             self.assertEqual(denied_reindex["error"], "document write access denied")
             self.assertTrue(deny_revoked["revoked"])
@@ -14102,6 +14125,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn('<option value="deny">deny</option>', body)
                     self.assertIn("documentEffectiveAccessUserInput", body)
                     self.assertIn("previewDocumentEffectiveAccess", body)
+                    self.assertIn("folderEffectiveAccessUserInput", body)
+                    self.assertIn("previewFolderEffectiveAccess", body)
                     self.assertIn("effective_access", body)
                     self.assertIn("data-rename-folder-id", body)
                     self.assertIn("data-move-folder-id", body)

@@ -290,6 +290,16 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#status", "Folder access refreshed.");
     await waitForText(page, "#folderAccessPanel", "No direct folder grants.");
 
+    await page.fill("#folderEffectiveAccessUserInput", "alice");
+    const effectiveFolderAccessResponse = page.waitForResponse(
+      (response) => response.url().includes(`/folders/${folderId}/access?effective_user_id=alice`)
+        && response.request().method() === "GET"
+    );
+    await page.click("#previewFolderEffectiveAccessButton");
+    await effectiveFolderAccessResponse;
+    await waitForText(page, "#status", "Effective folder access refreshed.");
+    await waitForText(page, "#folderEffectiveAccessPanel", "workspace_admin");
+
     await page.fill("#folderAccessUserInput", "alice");
     await page.selectOption("#folderAccessGrantRoleInput", "write");
     const grantFolderAccessResponse = page.waitForResponse(

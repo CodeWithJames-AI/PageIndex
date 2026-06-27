@@ -63,7 +63,7 @@ async function waitForAnyText(page, selector, expectedValues) {
     await waitForText(page, "#documentList", expectedDocument);
     await waitForAnyText(page, "#status", ["Team refreshed.", "Documents and chats refreshed."]);
     await waitForText(page, "#usageSummary", "1 docs");
-    await waitForText(page, "#usageSummary", "1 tokens");
+    await waitForText(page, "#usageSummary", "tokens 1 active");
     const initialUsage = JSON.parse((await page.textContent("#usageReportText")) || "{}");
     assert(initialUsage.documents?.count === 1, "usage report did not count seeded document");
     assert(initialUsage.documents?.pages === 1, "usage report did not count seeded page");

@@ -1933,11 +1933,12 @@ DASHBOARD_HTML = """<!doctype html>
       const retrieval = usage.retrieval || {};
       const audit = usage.audit || {};
       const docShares = usage.share_links || {};
+      const tokenText = `${tokens.active || 0} active / ${tokens.expired || 0} expired`;
       const conversationShareText = `${conversations.share_links_active || 0} active / ${conversations.share_links_expired || 0} expired / ${conversations.share_links_exhausted || 0} exhausted / ${conversations.share_links_revoked || 0} revoked`;
       const documentShareText = `${docShares.active || 0} active / ${docShares.expired || 0} expired / ${docShares.exhausted || 0} exhausted / ${docShares.revoked || 0} revoked`;
       const sourceSetShareText = `${sourceSets.share_links_active || 0} active / ${sourceSets.share_links_expired || 0} expired / ${sourceSets.share_links_exhausted || 0} exhausted / ${sourceSets.share_links_revoked || 0} revoked`;
       usageSummary.className = "muted";
-      usageSummary.textContent = `${documents.count || 0} docs | ${documents.pages || 0} pages | ${team.members || 0} members | ${team.groups || 0} groups | ${tokens.active || 0} tokens | ${conversations.count || 0} chats | ${sourceSets.count || 0} sets | ${retrieval.query_runs || 0} queries | ${audit.events || 0} audit events | doc shares ${documentShareText} | chat shares ${conversationShareText} | set shares ${sourceSetShareText}`;
+      usageSummary.textContent = `${documents.count || 0} docs | ${documents.pages || 0} pages | ${team.members || 0} members | ${team.groups || 0} groups | tokens ${tokenText} | ${conversations.count || 0} chats | ${sourceSets.count || 0} sets | ${retrieval.query_runs || 0} queries | ${audit.events || 0} audit events | doc shares ${documentShareText} | chat shares ${conversationShareText} | set shares ${sourceSetShareText}`;
       usageReportText.textContent = JSON.stringify(usage, null, 2);
     }
 

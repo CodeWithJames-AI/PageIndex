@@ -2188,9 +2188,27 @@ class EnterpriseStore:
                 ),
             },
             "api_tokens": {
-                "active": count("SELECT COUNT(*) AS count FROM api_tokens WHERE workspace_id = ?"),
+                "active": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM api_tokens
+                    WHERE workspace_id = ?
+                      AND (expires_at IS NULL OR expires_at > ?)
+                    """,
+                    (workspace_id, share_now),
+                ),
                 "with_expiration": count(
                     "SELECT COUNT(*) AS count FROM api_tokens WHERE workspace_id = ? AND expires_at IS NOT NULL"
+                ),
+                "expired": count(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM api_tokens
+                    WHERE workspace_id = ?
+                      AND expires_at IS NOT NULL
+                      AND expires_at <= ?
+                    """,
+                    (workspace_id, share_now),
                 ),
             },
             "conversations": {

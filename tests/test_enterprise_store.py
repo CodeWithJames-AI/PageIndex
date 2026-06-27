@@ -917,6 +917,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                 name="usage",
                 expires_at=future,
             )
+            store.create_api_token(
+                workspace_id,
+                "alice",
+                name="stale usage",
+                expires_at=past,
+            )
             conversation = store.create_conversation(workspace_id, "alice", title="Usage chat")
             store.chat_message(conversation["id"], "alice", "usage analytics", limit=4)
 
@@ -936,7 +942,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(summary["team"]["invitations_by_status"], {"expired": 1, "pending": 1})
             self.assertEqual(store._workspace_invitation(expired_invitation["id"])["status"], "expired")
             self.assertEqual(summary["api_tokens"]["active"], 1)
-            self.assertEqual(summary["api_tokens"]["with_expiration"], 1)
+            self.assertEqual(summary["api_tokens"]["with_expiration"], 2)
+            self.assertEqual(summary["api_tokens"]["expired"], 1)
             self.assertEqual(summary["conversations"]["count"], 1)
             self.assertEqual(summary["conversations"]["messages"], 2)
             self.assertEqual(summary["retrieval"]["query_runs"], 1)
@@ -6944,9 +6951,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
             store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="HTTP usage memo")
             store.create_workspace_group(workspace_id, "alice", "Analysts")
+            past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
             owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
             write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
             member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            store.create_api_token(workspace_id, "alice", name="expired", expires_at=past)
             store.conn.execute(
                 "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
                 (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
@@ -6979,6 +6988,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(usage["team"]["members"], 2)
             self.assertEqual(usage["team"]["groups"], 1)
             self.assertEqual(usage["api_tokens"]["active"], 3)
+            self.assertEqual(usage["api_tokens"]["expired"], 1)
+            self.assertEqual(usage["api_tokens"]["with_expiration"], 1)
             self.assertNotIn("pit_", serialized)
             self.assertNotIn("token_hash", serialized)
 
@@ -15255,6 +15266,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("usageReportText", body)
                     self.assertIn("refreshUsage", body)
                     self.assertIn("renderWorkspaceUsage", body)
+                    self.assertIn("tokenText", body)
+                    self.assertIn("tokens ${tokenText}", body)
                     self.assertIn("documentShareText", body)
                     self.assertIn("conversationShareText", body)
                     self.assertIn("sourceSetShareText", body)

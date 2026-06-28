@@ -16871,6 +16871,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(report["checks"]["root_writable"]["ok"], False)
             self.assertEqual(report["checks"]["schema"]["ok"], False)
             self.assertEqual(
+                report["checks"]["audit_integrity"],
+                {
+                    "ok": False,
+                    "workspace_count": 0,
+                    "checked": 0,
+                    "legacy": 0,
+                    "failing_workspaces": [],
+                    "skipped": True,
+                    "reason": "store was not opened because root is not writable",
+                },
+            )
+            self.assertEqual(
                 report["checks"]["active_api_token"],
                 {
                     "ok": False,

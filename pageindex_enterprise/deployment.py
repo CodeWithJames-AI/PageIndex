@@ -72,7 +72,9 @@ def run_deployment_check(
                 "root_writable": root_writable,
                 "schema": _check(False, error="store was not opened because root is not writable"),
                 "workspace_owner": _check(False, workspace_count=0, owner_count=0, skipped=True),
-                "audit_integrity": _check(False, workspace_count=0, skipped=True),
+                "audit_integrity": _unavailable_audit_integrity_check(
+                    reason="store was not opened because root is not writable"
+                ),
                 "audit_sink_delivery": _unavailable_audit_sink_delivery_check(
                     require_audit_sink,
                     required_format=required_audit_sink_format,
@@ -97,7 +99,7 @@ def run_deployment_check(
                 "root_writable": root_writable,
                 "schema": _check(False, error=str(exc)),
                 "workspace_owner": _check(False, workspace_count=0, owner_count=0, skipped=True),
-                "audit_integrity": _check(False, workspace_count=0, skipped=True),
+                "audit_integrity": _unavailable_audit_integrity_check(reason="store was not opened"),
                 "audit_sink_delivery": _unavailable_audit_sink_delivery_check(
                     require_audit_sink,
                     required_format=required_audit_sink_format,
@@ -198,6 +200,18 @@ def _workspace_owner_check(store: EnterpriseStore) -> dict[str, Any]:
         workspace_count > 0 and owner_count > 0,
         workspace_count=workspace_count,
         owner_count=owner_count,
+    )
+
+
+def _unavailable_audit_integrity_check(*, reason: str) -> dict[str, Any]:
+    return _check(
+        False,
+        workspace_count=0,
+        checked=0,
+        legacy=0,
+        failing_workspaces=[],
+        skipped=True,
+        reason=reason,
     )
 
 

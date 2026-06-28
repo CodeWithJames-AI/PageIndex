@@ -20,6 +20,13 @@ from typing import Any
 PACKAGE_NAME = "pageindex_enterprise_cleanroom"
 VERSION = "0.1.0"
 SOURCE_DIRTY_PATH_LIMIT = 50
+SECRET_SHAPED_PATTERNS = {
+    "api_token": re.compile(r"\bpit_[A-Za-z0-9_-]{20,}\b"),
+    "document_share_token": re.compile(r"\bpis_[A-Za-z0-9_-]{20,}\b"),
+    "conversation_share_token": re.compile(r"\bpcs_[A-Za-z0-9_-]{20,}\b"),
+    "source_set_share_token": re.compile(r"\bpss_[A-Za-z0-9_-]{20,}\b"),
+    "provider_api_key": re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
+}
 
 
 def main() -> None:
@@ -121,6 +128,17 @@ def run_release_smoke(
             wheel_content=wheel_content,
         )
         sbom = _sbom_document(manifest)
+        secret_hygiene = _release_secret_hygiene(
+            {
+                "console_help_stdout": help_result.stdout,
+                "console_help_stderr": help_result.stderr,
+                "eval_stdout": eval_result.stdout,
+                "eval_stderr": eval_result.stderr,
+                "deployment_report": json.dumps(deployment_report, sort_keys=True),
+                "artifact_manifest": json.dumps(manifest, sort_keys=True),
+                "sbom": json.dumps(sbom, sort_keys=True),
+            }
+        )
         if manifest_output is not None:
             manifest_output = manifest_output.expanduser().resolve()
             manifest_output.parent.mkdir(parents=True, exist_ok=True)
@@ -142,6 +160,7 @@ def run_release_smoke(
             "eval_checks": eval_report.get("summary", {}),
             "deployment_check": deployment_report.get("ok") is True,
             "deployment_checks": deployment_report.get("summary", {}),
+            "secret_hygiene": secret_hygiene["ok"],
         }
         if require_clean_source:
             checks["source_clean"] = manifest["source"]["dirty"] is False
@@ -162,6 +181,8 @@ def run_release_smoke(
                 "source_dirty_paths_truncated": manifest["source"]["dirty_paths_truncated"],
                 "deployment_check_ok": deployment_report.get("ok") is True,
                 "deployment_check_failed": deployment_report.get("summary", {}).get("failed"),
+                "secret_hygiene_finding_count": secret_hygiene["finding_count"],
+                "secret_hygiene_ok": secret_hygiene["ok"],
                 "wheel_content_policy_ok": manifest["artifacts"][0]["content"]["ok"],
                 "wheel_record_hashes_valid": manifest["artifacts"][0]["record"]["ok"],
                 "wheel_sha256": manifest["artifacts"][0]["sha256"],
@@ -260,6 +281,20 @@ def _run_packaged_deployment_check(
         env=env,
     )
     return json.loads(result.stdout)
+
+
+def _release_secret_hygiene(outputs: dict[str, str]) -> dict[str, Any]:
+    findings: list[dict[str, str]] = []
+    for output_name, value in outputs.items():
+        text = value or ""
+        for kind, pattern in SECRET_SHAPED_PATTERNS.items():
+            if pattern.search(text):
+                findings.append({"output": output_name, "kind": kind})
+    return {
+        "ok": not findings,
+        "finding_count": len(findings),
+        "findings": findings,
+    }
 
 
 def _inspect_wheel(wheel: Path) -> None:

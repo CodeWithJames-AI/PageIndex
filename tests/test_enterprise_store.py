@@ -16930,8 +16930,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                 check=True,
             )
             report = json.loads(result.stdout)
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+            manifest_text = manifest_path.read_text(encoding="utf-8")
+            sbom_text = sbom_path.read_text(encoding="utf-8")
+            manifest = json.loads(manifest_text)
+            sbom = json.loads(sbom_text)
 
         self.assertEqual(report["ok"], True)
         self.assertEqual(report["wheel"], "pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl")
@@ -16947,6 +16949,11 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["eval_checks"]["failed"], 0)
         self.assertEqual(report["checks"]["deployment_check"], True)
         self.assertEqual(report["checks"]["deployment_checks"]["failed"], 0)
+        self.assertEqual(report["checks"]["secret_hygiene"], True)
+        self.assertNotIn("pit_", result.stdout)
+        self.assertNotIn("sk-", result.stdout)
+        self.assertNotIn("pit_", manifest_text)
+        self.assertNotIn("sk-", sbom_text)
         self.assertEqual(Path(report["manifest"]["path"]).resolve(), manifest_path.resolve())
         self.assertEqual(report["manifest"]["artifact_count"], 1)
         self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
@@ -16958,6 +16965,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["source_dirty_paths_truncated"], manifest["source"]["dirty_paths_truncated"])
         self.assertEqual(report["manifest"]["deployment_check_ok"], True)
         self.assertEqual(report["manifest"]["deployment_check_failed"], 0)
+        self.assertEqual(report["manifest"]["secret_hygiene_ok"], True)
+        self.assertEqual(report["manifest"]["secret_hygiene_finding_count"], 0)
         self.assertEqual(report["manifest"]["wheel_content_policy_ok"], True)
         self.assertEqual(report["manifest"]["wheel_record_hashes_valid"], True)
         self.assertEqual(manifest["schema_version"], 1)
@@ -17030,17 +17039,42 @@ class EnterpriseStoreTest(unittest.TestCase):
             "eval_checks": {"failed": 0},
             "deployment_check": True,
             "deployment_checks": {"failed": 0},
+            "secret_hygiene": True,
         }
         bad_record = {**checks, "wheel_record_hashes": False}
         bad_eval_summary = {**checks, "eval_checks": {"failed": 1}}
         bad_deployment_summary = {**checks, "deployment_checks": {"failed": 1}}
+        bad_secret_hygiene = {**checks, "secret_hygiene": False}
         bad_source_clean = {**checks, "source_clean": False}
 
         self.assertEqual(_release_checks_ok(checks), True)
         self.assertEqual(_release_checks_ok(bad_record), False)
         self.assertEqual(_release_checks_ok(bad_eval_summary), False)
         self.assertEqual(_release_checks_ok(bad_deployment_summary), False)
+        self.assertEqual(_release_checks_ok(bad_secret_hygiene), False)
         self.assertEqual(_release_checks_ok(bad_source_clean), False)
+
+    def test_release_smoke_secret_hygiene_detects_secret_shaped_output(self):
+        from scripts.release_smoke import _release_secret_hygiene
+
+        safe = _release_secret_hygiene({"report": '{"ok": true}'})
+        leaked = _release_secret_hygiene(
+            {
+                "report": '{"token": "pit_abcdefghijklmnopqrstuvwxyz1234567890"}',
+                "stderr": "provider key sk-abcdefghijklmnopqrstuvwxyz leaked",
+            }
+        )
+
+        self.assertEqual(safe, {"ok": True, "finding_count": 0, "findings": []})
+        self.assertEqual(leaked["ok"], False)
+        self.assertEqual(leaked["finding_count"], 2)
+        self.assertEqual(
+            leaked["findings"],
+            [
+                {"output": "report", "kind": "api_token"},
+                {"output": "stderr", "kind": "provider_api_key"},
+            ],
+        )
 
     def test_release_smoke_exit_code_follows_report_ok(self):
         from scripts.release_smoke import _release_smoke_exit_code

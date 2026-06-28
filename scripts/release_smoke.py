@@ -65,6 +65,7 @@ def run_release_smoke(
 ) -> dict[str, Any]:
     repo_root = repo_root.expanduser().resolve()
     source_metadata = _source_metadata(repo_root)
+    ci_metadata = _ci_metadata()
     with tempfile.TemporaryDirectory(prefix="pageindex-release-smoke-") as tmp:
         tmp_path = Path(tmp)
         wheel_dir = tmp_path / "wheels"
@@ -133,6 +134,7 @@ def run_release_smoke(
             wheel,
             package_metadata=package_metadata,
             build_environment=_build_environment(),
+            ci=ci_metadata,
             source=source_metadata,
             dependencies=dependencies,
             dependency_policy=dependency_policy,
@@ -203,6 +205,14 @@ def run_release_smoke(
                 "artifact_type": manifest["artifacts"][0]["artifact_type"],
                 "build_platform": manifest["build_environment"]["platform"],
                 "build_python_version": manifest["build_environment"]["python_version"],
+                "ci_provider": manifest["ci"]["provider"],
+                "ci_ref": manifest["ci"]["ref"],
+                "ci_repository": manifest["ci"]["repository"],
+                "ci_run_attempt": manifest["ci"]["run_attempt"],
+                "ci_run_id": manifest["ci"]["run_id"],
+                "ci_run_url": manifest["ci"]["run_url"],
+                "ci_sha": manifest["ci"]["sha"],
+                "ci_workflow": manifest["ci"]["workflow"],
                 "created_at": manifest["created_at"],
                 "dependency_count": len(manifest["dependencies"]),
                 "direct_dependencies_pinned": manifest["dependency_policy"]["direct_dependencies_pinned"],
@@ -409,6 +419,7 @@ def _artifact_manifest(
     *,
     package_metadata: dict[str, str],
     build_environment: dict[str, str],
+    ci: dict[str, str | None],
     source: dict[str, Any],
     dependencies: list[dict[str, Any]],
     dependency_policy: dict[str, Any],
@@ -426,6 +437,7 @@ def _artifact_manifest(
             "summary": package_metadata["summary"],
         },
         "build_environment": build_environment,
+        "ci": ci,
         "source": source,
         "dependencies": dependencies,
         "dependency_policy": dependency_policy,
@@ -649,6 +661,34 @@ def _build_environment_ok(environment: dict[str, str]) -> bool:
         "system",
     }
     return all(isinstance(environment.get(key), str) and bool(environment[key]) for key in required)
+
+
+def _ci_metadata() -> dict[str, str | None]:
+    repository = _env_value("GITHUB_REPOSITORY")
+    run_id = _env_value("GITHUB_RUN_ID")
+    server_url = _env_value("GITHUB_SERVER_URL") or "https://github.com"
+    if repository and run_id:
+        run_url = f"{server_url.rstrip('/')}/{repository}/actions/runs/{run_id}"
+    else:
+        run_url = None
+    return {
+        "provider": "github-actions" if repository and run_id else "local",
+        "ref": _env_value("GITHUB_REF_NAME") or _env_value("GITHUB_REF"),
+        "repository": repository,
+        "run_attempt": _env_value("GITHUB_RUN_ATTEMPT"),
+        "run_id": run_id,
+        "run_url": run_url,
+        "sha": _env_value("GITHUB_SHA"),
+        "workflow": _env_value("GITHUB_WORKFLOW"),
+    }
+
+
+def _env_value(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
 def _wheel_dependencies(wheel: Path) -> list[dict[str, Any]]:

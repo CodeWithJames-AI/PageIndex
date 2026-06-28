@@ -16935,6 +16935,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             manifest_path = Path(tmp) / "release-manifest.json"
             report_path = Path(tmp) / "release-report.json"
             sbom_path = Path(tmp) / "release-sbom.spdx.json"
+            release_env = os.environ.copy()
+            for name in (
+                "GITHUB_REF",
+                "GITHUB_REF_NAME",
+                "GITHUB_REPOSITORY",
+                "GITHUB_RUN_ATTEMPT",
+                "GITHUB_RUN_ID",
+                "GITHUB_SERVER_URL",
+                "GITHUB_SHA",
+                "GITHUB_WORKFLOW",
+            ):
+                release_env.pop(name, None)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -16950,6 +16962,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 ],
                 cwd="/tmp",
                 capture_output=True,
+                env=release_env,
                 text=True,
                 check=True,
             )
@@ -16997,6 +17010,14 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["artifact_count"], 1)
         self.assertEqual(report["manifest"]["artifact_media_type"], "application/zip")
         self.assertEqual(report["manifest"]["artifact_type"], "python-wheel")
+        self.assertEqual(report["manifest"]["ci_provider"], "local")
+        self.assertEqual(report["manifest"]["ci_ref"], None)
+        self.assertEqual(report["manifest"]["ci_repository"], None)
+        self.assertEqual(report["manifest"]["ci_run_attempt"], None)
+        self.assertEqual(report["manifest"]["ci_run_id"], None)
+        self.assertEqual(report["manifest"]["ci_run_url"], None)
+        self.assertEqual(report["manifest"]["ci_sha"], None)
+        self.assertEqual(report["manifest"]["ci_workflow"], None)
         self.assertEqual(report["manifest"]["created_at"], manifest["created_at"])
         self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
         self.assertEqual(report["manifest"]["direct_dependencies_pinned"], True)
@@ -17056,6 +17077,19 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "python_implementation": platform.python_implementation(),
                 "python_version": platform.python_version(),
                 "system": platform.system(),
+            },
+        )
+        self.assertEqual(
+            manifest["ci"],
+            {
+                "provider": "local",
+                "ref": None,
+                "repository": None,
+                "run_attempt": None,
+                "run_id": None,
+                "run_url": None,
+                "sha": None,
+                "workflow": None,
             },
         )
         expected_branch = subprocess.run(
@@ -17308,6 +17342,54 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertLess(events.index("source"), events.index("build"))
         self.assertEqual(report["checks"]["source_clean"], True)
         self.assertEqual(report["manifest"]["source_dirty"], False)
+
+    def test_release_smoke_ci_metadata_tracks_github_actions_run(self):
+        from unittest import mock
+
+        from scripts.release_smoke import _ci_metadata
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GITHUB_REF": "refs/heads/main",
+                "GITHUB_REF_NAME": "codex/enterprise-cleanroom",
+                "GITHUB_REPOSITORY": "CodeWithJames-AI/PageIndex",
+                "GITHUB_RUN_ATTEMPT": "2",
+                "GITHUB_RUN_ID": "12345",
+                "GITHUB_SERVER_URL": "https://github.example",
+                "GITHUB_SHA": "abc123",
+                "GITHUB_WORKFLOW": "Release smoke",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                _ci_metadata(),
+                {
+                    "provider": "github-actions",
+                    "ref": "codex/enterprise-cleanroom",
+                    "repository": "CodeWithJames-AI/PageIndex",
+                    "run_attempt": "2",
+                    "run_id": "12345",
+                    "run_url": "https://github.example/CodeWithJames-AI/PageIndex/actions/runs/12345",
+                    "sha": "abc123",
+                    "workflow": "Release smoke",
+                },
+            )
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                _ci_metadata(),
+                {
+                    "provider": "local",
+                    "ref": None,
+                    "repository": None,
+                    "run_attempt": None,
+                    "run_id": None,
+                    "run_url": None,
+                    "sha": None,
+                    "workflow": None,
+                },
+            )
 
     def test_release_smoke_secret_hygiene_detects_secret_shaped_output(self):
         from scripts.release_smoke import _merge_secret_hygiene, _release_secret_hygiene

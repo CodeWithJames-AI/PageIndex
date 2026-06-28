@@ -17433,6 +17433,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "wheel_built": True,
                 "console_script": True,
                 "manifest_generated": True,
+                "artifact_identity": True,
+                "manifest_sidecar_integrity": True,
+                "manifest_timestamp": True,
+                "sbom_sidecar_integrity": True,
                 "source_clean": True,
                 "secret_hygiene": True,
                 "package_license": True,
@@ -17510,6 +17514,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Wheel SHA-256: `wheelhash`", summary)
         self.assertIn("- Wheel size bytes: `165251`", summary)
         self.assertIn("- Artifact identity: `count=1, type=python-wheel, media_type=application/zip`", summary)
+        self.assertIn(
+            "- Artifact gates: `identity=True, manifest_sidecar=True, manifest_timestamp=True, sbom_sidecar=True`",
+            summary,
+        )
         self.assertIn("- Packaging gates: `wheel_built=True, console_script=True, manifest_generated=True`", summary)
         self.assertIn("- Wheel integrity: `content_ok=True, record_ok=True`", summary)
         self.assertIn("- Source: `codex/enterprise-cleanroom@abc123`", summary)
@@ -17594,6 +17602,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Wheel size bytes: `unknown`", summary)
         self.assertIn("- Artifact identity: `count=unknown, type=unknown, media_type=unknown`", summary)
         self.assertIn(
+            "- Artifact gates: `identity=unknown, manifest_sidecar=unknown, manifest_timestamp=unknown, sbom_sidecar=unknown`",
+            summary,
+        )
+        self.assertIn(
             "- Packaging gates: `wheel_built=unknown, console_script=unknown, manifest_generated=unknown`",
             summary,
         )
@@ -17651,6 +17663,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "wheel_built": "ok`wheel\nnext",
                 "console_script": "ok`console\nnext",
                 "manifest_generated": "ok`manifest\nnext",
+                "artifact_identity": "ok`identity\nnext",
+                "manifest_sidecar_integrity": "ok`manifest-sidecar\nnext",
+                "manifest_timestamp": "ok`timestamp\nnext",
+                "sbom_sidecar_integrity": "ok`sbom-sidecar\nnext",
                 "source_clean": True,
                 "secret_hygiene": True,
                 "package_license": "ok`yes\nnext",
@@ -17720,6 +17736,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             summary,
         )
         self.assertIn(
+            "- Artifact gates: `` identity=ok`identity next, manifest_sidecar=ok`manifest-sidecar next, manifest_timestamp=ok`timestamp next, sbom_sidecar=ok`sbom-sidecar next ``",
+            summary,
+        )
+        self.assertIn(
             "- Packaging gates: `` wheel_built=ok`wheel next, console_script=ok`console next, manifest_generated=ok`manifest next ``",
             summary,
         )
@@ -17764,6 +17784,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("1`artifact\nnext", summary)
         self.assertNotIn("python`wheel\nnext", summary)
         self.assertNotIn("application`zip\nnext", summary)
+        self.assertNotIn("ok`identity\nnext", summary)
+        self.assertNotIn("ok`manifest-sidecar\nnext", summary)
+        self.assertNotIn("ok`timestamp\nnext", summary)
+        self.assertNotIn("ok`sbom-sidecar\nnext", summary)
         self.assertNotIn("ok`wheel\nnext", summary)
         self.assertNotIn("ok`console\nnext", summary)
         self.assertNotIn("ok`manifest\nnext", summary)

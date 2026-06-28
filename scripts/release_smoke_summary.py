@@ -66,6 +66,12 @@ def render_release_smoke_summary(report_path: Path) -> str:
         f"type={manifest.get('artifact_type', 'unknown')}, "
         f"media_type={manifest.get('artifact_media_type', 'unknown')}"
     )
+    artifact_gates = (
+        f"identity={checks.get('artifact_identity', 'unknown')}, "
+        f"manifest_sidecar={checks.get('manifest_sidecar_integrity', 'unknown')}, "
+        f"manifest_timestamp={checks.get('manifest_timestamp', 'unknown')}, "
+        f"sbom_sidecar={checks.get('sbom_sidecar_integrity', 'unknown')}"
+    )
     wheel_integrity = (
         f"content_ok={manifest.get('wheel_content_policy_ok', checks.get('wheel_content_policy', 'unknown'))}, "
         f"record_ok={manifest.get('wheel_record_hashes_valid', checks.get('wheel_record_hashes', 'unknown'))}"
@@ -126,6 +132,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Wheel SHA-256: {_inline_code(manifest.get('wheel_sha256', 'unknown'))}",
             f"- Wheel size bytes: {_inline_code(manifest.get('wheel_size_bytes', 'unknown'))}",
             f"- Artifact identity: {_inline_code(artifact_identity)}",
+            f"- Artifact gates: {_inline_code(artifact_gates)}",
             f"- Packaging gates: {_inline_code(packaging_gates)}",
             f"- Wheel integrity: {_inline_code(wheel_integrity)}",
             f"- Source: {_inline_code(source)}",

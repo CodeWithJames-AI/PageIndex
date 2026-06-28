@@ -16915,6 +16915,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         workflow = (repo_root / ".github" / "workflows" / "release-smoke.yml").read_text(encoding="utf-8")
 
         self.assertIn("python -m pip install -r requirements.txt", workflow)
+        self.assertIn("python -m pip check", workflow)
         self.assertNotIn("python -m pip install --no-deps -r requirements.txt", workflow)
 
     def test_release_smoke_workflow_uses_node24_actions(self):

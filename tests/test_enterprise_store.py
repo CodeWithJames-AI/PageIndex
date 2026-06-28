@@ -17449,6 +17449,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "source_dirty_paths_truncated": False,
                 "wheel_sha256": "wheelhash",
                 "wheel_size_bytes": 165251,
+                "wheel_content_policy_ok": True,
+                "wheel_record_hashes_valid": True,
                 "dependency_count": 5,
                 "direct_dependencies_pinned": True,
                 "build_platform": "Linux-6.11.0-1018-azure-x86_64-with-glibc2.39",
@@ -17479,6 +17481,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Wheel: `pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl`", summary)
         self.assertIn("- Wheel SHA-256: `wheelhash`", summary)
         self.assertIn("- Wheel size bytes: `165251`", summary)
+        self.assertIn("- Wheel integrity: `content_ok=True, record_ok=True`", summary)
         self.assertIn("- Source: `codex/enterprise-cleanroom@abc123`", summary)
         self.assertIn("- CI context: `github-actions:CodeWithJames-AI/PageIndex@codex/enterprise-cleanroom`", summary)
         self.assertIn(
@@ -17542,6 +17545,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Source: `detached@abc123`", summary)
         self.assertIn("- Wheel SHA-256: `unknown`", summary)
         self.assertIn("- Wheel size bytes: `unknown`", summary)
+        self.assertIn("- Wheel integrity: `content_ok=unknown, record_ok=unknown`", summary)
         self.assertIn("- CI context: `local`", summary)
         self.assertIn("- CI run: `not-applicable`", summary)
         self.assertIn("- Eval checks: `?/?` passed", summary)
@@ -17596,6 +17600,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "source_dirty_paths_truncated": "false`ish",
                 "wheel_sha256": "wheel`hash",
                 "wheel_size_bytes": "123`456\n789",
+                "wheel_content_policy_ok": "true`content\nnext",
+                "wheel_record_hashes_valid": "true`record\nnext",
                 "dependency_count": "5`deps\nnext",
                 "direct_dependencies_pinned": "true`yes",
                 "build_python_version": "3`11\nnext",
@@ -17617,6 +17623,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Wheel: `` wheel`name x.whl ``", summary)
         self.assertIn("- Wheel SHA-256: `` wheel`hash ``", summary)
         self.assertIn("- Wheel size bytes: `` 123`456 789 ``", summary)
+        self.assertIn("- Wheel integrity: `` content_ok=true`content next, record_ok=true`record next ``", summary)
         self.assertIn("- Source: `` branch`name next@abc`123 ``", summary)
         self.assertIn("- CI context: `` github`actions:repo`name next@ref`name next ``", summary)
         self.assertIn("- CI run: `` https://example.invalid/run`one next attempt=attempt`1 ``", summary)
@@ -17632,6 +17639,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Manifest SHA-256: `` hash`one ``", summary)
         self.assertNotIn("wheel`name\nx.whl", summary)
         self.assertNotIn("123`456\n789", summary)
+        self.assertNotIn("true`content\nnext", summary)
+        self.assertNotIn("true`record\nnext", summary)
         self.assertNotIn("7`paths\nnext", summary)
         self.assertNotIn("5`deps\nnext", summary)
         self.assertNotIn("Linux`arm\nnext", summary)

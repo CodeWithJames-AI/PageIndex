@@ -84,6 +84,10 @@ def render_release_smoke_summary(report_path: Path) -> str:
         f"count={manifest.get('dependency_count', 'unknown')}, "
         f"pinned={manifest.get('direct_dependencies_pinned', 'unknown')}"
     )
+    dependency_gates = (
+        f"inventory={checks.get('dependency_inventory', 'unknown')}, "
+        f"pins={checks.get('dependency_pins', 'unknown')}"
+    )
     build_environment = (
         f"python={manifest.get('build_python_version', 'unknown')}, "
         f"platform={manifest.get('build_platform', 'unknown')}"
@@ -148,6 +152,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Deployment checks: {_inline_code(deployment_count)} passed",
             f"- Command gates: {_inline_code(command_gates)}",
             f"- Dependencies: {_inline_code(dependency_status)}",
+            f"- Dependency gates: {_inline_code(dependency_gates)}",
             f"- Build environment: {_inline_code(build_environment)}",
             f"- Package license: {_inline_code(package_license)}",
             f"- Secret hygiene: {_inline_code(checks.get('secret_hygiene'))}",

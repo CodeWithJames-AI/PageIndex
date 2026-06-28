@@ -17439,6 +17439,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "sbom_sidecar_integrity": True,
                 "source_clean": True,
                 "secret_hygiene": True,
+                "dependency_inventory": True,
+                "dependency_pins": True,
                 "package_license": True,
                 "manifest_generator": True,
                 "sbom_generated": True,
@@ -17536,6 +17538,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Deployment checks: `9/9` passed", summary)
         self.assertIn("- Command gates: `eval_ok=True, deployment_ok=True, deployment_failed=0`", summary)
         self.assertIn("- Dependencies: `count=5, pinned=True`", summary)
+        self.assertIn("- Dependency gates: `inventory=True, pins=True`", summary)
         self.assertIn(
             "- Build environment: `python=3.11.15, platform=Linux-6.11.0-1018-azure-x86_64-with-glibc2.39`",
             summary,
@@ -17619,6 +17622,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Command gates: `eval_ok=unknown, deployment_ok=unknown, deployment_failed=unknown`", summary)
         self.assertIn("- Source dirty paths: `count=unknown, paths_truncated=unknown`", summary)
         self.assertIn("- Dependencies: `count=unknown, pinned=unknown`", summary)
+        self.assertIn("- Dependency gates: `inventory=unknown, pins=unknown`", summary)
         self.assertIn("- Build environment: `python=unknown, platform=unknown`", summary)
         self.assertIn("- Package license: `declared=unknown, check=unknown`", summary)
         self.assertIn("- Secret hygiene findings: `unknown`", summary)
@@ -17669,6 +17673,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "sbom_sidecar_integrity": "ok`sbom-sidecar\nnext",
                 "source_clean": True,
                 "secret_hygiene": True,
+                "dependency_inventory": "ok`inventory\nnext",
+                "dependency_pins": "ok`pins\nnext",
                 "package_license": "ok`yes\nnext",
                 "manifest_generator": "ok`generator\nnext",
                 "sbom_generated": "ok`sbom\nnext",
@@ -17757,6 +17763,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             summary,
         )
         self.assertIn("- Dependencies: `` count=5`deps next, pinned=true`yes ``", summary)
+        self.assertIn("- Dependency gates: `` inventory=ok`inventory next, pins=ok`pins next ``", summary)
         self.assertIn("- Build environment: `` python=3`11 next, platform=Linux`arm next ``", summary)
         self.assertIn("- Package license: `` declared=MIT`custom next, check=ok`yes next ``", summary)
         self.assertIn("- Secret hygiene findings: `` 1`finding next ``", summary)
@@ -17804,6 +17811,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("true`record\nnext", summary)
         self.assertNotIn("7`paths\nnext", summary)
         self.assertNotIn("5`deps\nnext", summary)
+        self.assertNotIn("ok`inventory\nnext", summary)
+        self.assertNotIn("ok`pins\nnext", summary)
         self.assertNotIn("Linux`arm\nnext", summary)
         self.assertNotIn("MIT`custom\nnext", summary)
         self.assertNotIn("ok`yes\nnext", summary)

@@ -17448,6 +17448,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "wheel_size_bytes": 165251,
                 "dependency_count": 5,
                 "direct_dependencies_pinned": True,
+                "build_platform": "Linux-6.11.0-1018-azure-x86_64-with-glibc2.39",
+                "build_python_version": "3.11.15",
                 "manifest_payload_matches_output": True,
                 "manifest_written": True,
                 "manifest_sha256": "manifesthash",
@@ -17479,6 +17481,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Eval checks: `17/17` passed", summary)
         self.assertIn("- Deployment checks: `9/9` passed", summary)
         self.assertIn("- Dependencies: `count=5, pinned=True`", summary)
+        self.assertIn(
+            "- Build environment: `python=3.11.15, platform=Linux-6.11.0-1018-azure-x86_64-with-glibc2.39`",
+            summary,
+        )
         self.assertIn("- Secret hygiene: `True`", summary)
         self.assertIn("- Report output written: `True`", summary)
         self.assertIn("- Manifest sidecar: `written=True, matches=True`", summary)
@@ -17528,6 +17534,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- CI run: `not-applicable`", summary)
         self.assertIn("- Eval checks: `?/?` passed", summary)
         self.assertIn("- Dependencies: `count=unknown, pinned=unknown`", summary)
+        self.assertIn("- Build environment: `python=unknown, platform=unknown`", summary)
 
     def test_release_smoke_summary_handles_malformed_report(self):
         from scripts.release_smoke_summary import render_release_smoke_summary
@@ -17573,6 +17580,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "wheel_size_bytes": "123`456\n789",
                 "dependency_count": "5`deps\nnext",
                 "direct_dependencies_pinned": "true`yes",
+                "build_python_version": "3`11\nnext",
+                "build_platform": "Linux`arm\nnext",
                 "manifest_sha256": "hash`one",
             },
         }
@@ -17589,10 +17598,12 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- CI context: `` github`actions:repo`name next@ref`name next ``", summary)
         self.assertIn("- CI run: `` https://example.invalid/run`one next attempt=attempt`1 ``", summary)
         self.assertIn("- Dependencies: `` count=5`deps next, pinned=true`yes ``", summary)
+        self.assertIn("- Build environment: `` python=3`11 next, platform=Linux`arm next ``", summary)
         self.assertIn("- Manifest SHA-256: `` hash`one ``", summary)
         self.assertNotIn("wheel`name\nx.whl", summary)
         self.assertNotIn("123`456\n789", summary)
         self.assertNotIn("5`deps\nnext", summary)
+        self.assertNotIn("Linux`arm\nnext", summary)
         self.assertNotIn("branch`name\nnext", summary)
         self.assertNotIn("https://example.invalid/run`one\nnext", summary)
 

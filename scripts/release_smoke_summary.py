@@ -51,6 +51,10 @@ def render_release_smoke_summary(report_path: Path) -> str:
         f"count={manifest.get('dependency_count', 'unknown')}, "
         f"pinned={manifest.get('direct_dependencies_pinned', 'unknown')}"
     )
+    build_environment = (
+        f"python={manifest.get('build_python_version', 'unknown')}, "
+        f"platform={manifest.get('build_platform', 'unknown')}"
+    )
     manifest_sidecar = (
         f"written={manifest.get('manifest_written', False)}, "
         f"matches={manifest.get('manifest_payload_matches_output', '?')}"
@@ -72,6 +76,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Eval checks: {_inline_code(eval_count)} passed",
             f"- Deployment checks: {_inline_code(deployment_count)} passed",
             f"- Dependencies: {_inline_code(dependency_status)}",
+            f"- Build environment: {_inline_code(build_environment)}",
             f"- Secret hygiene: {_inline_code(checks.get('secret_hygiene'))}",
             f"- Report output written: {_inline_code(report_output.get('written', False))}",
             f"- Manifest sidecar: {_inline_code(manifest_sidecar)}",

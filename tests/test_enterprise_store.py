@@ -17437,6 +17437,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             },
             "report": {"written": True},
             "manifest": {
+                "ci_provider": "github-actions",
+                "ci_ref": "codex/enterprise-cleanroom",
+                "ci_repository": "CodeWithJames-AI/PageIndex",
+                "ci_run_attempt": "1",
+                "ci_run_url": "https://github.com/CodeWithJames-AI/PageIndex/actions/runs/12345",
                 "source_branch": "codex/enterprise-cleanroom",
                 "source_commit": "abc123",
                 "manifest_payload_matches_output": True,
@@ -17459,6 +17464,11 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Result: `pass`", summary)
         self.assertIn("- Wheel: `pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl`", summary)
         self.assertIn("- Source: `codex/enterprise-cleanroom@abc123`", summary)
+        self.assertIn("- CI context: `github-actions:CodeWithJames-AI/PageIndex@codex/enterprise-cleanroom`", summary)
+        self.assertIn(
+            "- CI run: `https://github.com/CodeWithJames-AI/PageIndex/actions/runs/12345 attempt=1`",
+            summary,
+        )
         self.assertIn("- Source clean: `True`", summary)
         self.assertIn("- Eval checks: `17/17` passed", summary)
         self.assertIn("- Deployment checks: `9/9` passed", summary)
@@ -17505,6 +17515,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("- Result: `fail`", summary)
         self.assertIn("- Source: `detached@abc123`", summary)
+        self.assertIn("- CI context: `local`", summary)
+        self.assertIn("- CI run: `not-applicable`", summary)
         self.assertIn("- Eval checks: `?/?` passed", summary)
 
     def test_release_smoke_summary_handles_malformed_report(self):
@@ -17540,6 +17552,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             "wheel": "wheel`name\nx.whl",
             "checks": {"source_clean": True, "secret_hygiene": True},
             "manifest": {
+                "ci_provider": "github`actions",
+                "ci_ref": "ref`name\nnext",
+                "ci_repository": "repo`name\nnext",
+                "ci_run_attempt": "attempt`1",
+                "ci_run_url": "https://example.invalid/run`one\nnext",
                 "source_branch": "branch`name\nnext",
                 "source_commit": "abc`123",
                 "manifest_sha256": "hash`one",
@@ -17553,9 +17570,12 @@ class EnterpriseStoreTest(unittest.TestCase):
 
         self.assertIn("- Wheel: `` wheel`name x.whl ``", summary)
         self.assertIn("- Source: `` branch`name next@abc`123 ``", summary)
+        self.assertIn("- CI context: `` github`actions:repo`name next@ref`name next ``", summary)
+        self.assertIn("- CI run: `` https://example.invalid/run`one next attempt=attempt`1 ``", summary)
         self.assertIn("- Manifest SHA-256: `` hash`one ``", summary)
         self.assertNotIn("wheel`name\nx.whl", summary)
         self.assertNotIn("branch`name\nnext", summary)
+        self.assertNotIn("https://example.invalid/run`one\nnext", summary)
 
     def test_release_smoke_exit_code_follows_report_ok(self):
         from scripts.release_smoke import _release_smoke_exit_code

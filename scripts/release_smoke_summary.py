@@ -43,6 +43,8 @@ def render_release_smoke_summary(report_path: Path) -> str:
     manifest = _mapping(report.get("manifest"))
     report_output = _mapping(report.get("report"))
     source = f"{manifest.get('source_branch') or 'detached'}@{manifest.get('source_commit') or 'unknown'}"
+    ci_context = _ci_context(manifest)
+    ci_run = _ci_run(manifest)
     eval_count = f"{eval_checks.get('passed', '?')}/{eval_checks.get('total', '?')}"
     deployment_count = f"{deployment_checks.get('passed', '?')}/{deployment_checks.get('total', '?')}"
     manifest_sidecar = (
@@ -58,6 +60,8 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Result: {_inline_code('pass' if report.get('ok') is True else 'fail')}",
             f"- Wheel: {_inline_code(report.get('wheel', 'unknown'))}",
             f"- Source: {_inline_code(source)}",
+            f"- CI context: {_inline_code(ci_context)}",
+            f"- CI run: {_inline_code(ci_run)}",
             f"- Source clean: {_inline_code(checks.get('source_clean', 'not-required'))}",
             f"- Eval checks: {_inline_code(eval_count)} passed",
             f"- Deployment checks: {_inline_code(deployment_count)} passed",
@@ -71,6 +75,23 @@ def render_release_smoke_summary(report_path: Path) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _ci_context(manifest: dict[str, Any]) -> str:
+    provider = manifest.get("ci_provider") or "local"
+    repository = manifest.get("ci_repository")
+    ref = manifest.get("ci_ref")
+    if provider == "local" and not repository and not ref:
+        return "local"
+    return f"{provider}:{repository or 'unknown'}@{ref or 'unknown'}"
+
+
+def _ci_run(manifest: dict[str, Any]) -> str:
+    run = manifest.get("ci_run_url") or manifest.get("ci_run_id") or "not-applicable"
+    attempt = manifest.get("ci_run_attempt")
+    if attempt:
+        return f"{run} attempt={attempt}"
+    return str(run)
 
 
 def _mapping(value: Any) -> dict[str, Any]:

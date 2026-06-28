@@ -17454,6 +17454,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "build_platform": "Linux-6.11.0-1018-azure-x86_64-with-glibc2.39",
                 "build_python_version": "3.11.15",
                 "license_declared": "MIT",
+                "secret_hygiene_finding_count": 0,
                 "manifest_payload_matches_output": True,
                 "manifest_written": True,
                 "manifest_sha256": "manifesthash",
@@ -17495,6 +17496,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         )
         self.assertIn("- Package license: `declared=MIT, check=True`", summary)
         self.assertIn("- Secret hygiene: `True`", summary)
+        self.assertIn("- Secret hygiene findings: `0`", summary)
         self.assertIn("- Report output written: `True`", summary)
         self.assertIn("- Manifest sidecar: `written=True, matches=True`", summary)
         self.assertIn("- SBOM sidecar: `written=True, matches=True`", summary)
@@ -17547,6 +17549,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Dependencies: `count=unknown, pinned=unknown`", summary)
         self.assertIn("- Build environment: `python=unknown, platform=unknown`", summary)
         self.assertIn("- Package license: `declared=unknown, check=unknown`", summary)
+        self.assertIn("- Secret hygiene findings: `unknown`", summary)
         self.assertIn("- SBOM inventory: `components=unknown, external_refs=unknown, describes=unknown`", summary)
 
     def test_release_smoke_summary_handles_malformed_report(self):
@@ -17598,6 +17601,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "build_python_version": "3`11\nnext",
                 "build_platform": "Linux`arm\nnext",
                 "license_declared": "MIT`custom\nnext",
+                "secret_hygiene_finding_count": "1`finding\nnext",
                 "manifest_sha256": "hash`one",
                 "sbom_component_count": "6`components\nnext",
                 "sbom_external_ref_count": "6`refs\nnext",
@@ -17620,6 +17624,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Dependencies: `` count=5`deps next, pinned=true`yes ``", summary)
         self.assertIn("- Build environment: `` python=3`11 next, platform=Linux`arm next ``", summary)
         self.assertIn("- Package license: `` declared=MIT`custom next, check=ok`yes next ``", summary)
+        self.assertIn("- Secret hygiene findings: `` 1`finding next ``", summary)
         self.assertIn(
             "- SBOM inventory: `` components=6`components next, external_refs=6`refs next, describes=1`desc next ``",
             summary,
@@ -17632,6 +17637,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("Linux`arm\nnext", summary)
         self.assertNotIn("MIT`custom\nnext", summary)
         self.assertNotIn("ok`yes\nnext", summary)
+        self.assertNotIn("1`finding\nnext", summary)
         self.assertNotIn("6`components\nnext", summary)
         self.assertNotIn("branch`name\nnext", summary)
         self.assertNotIn("https://example.invalid/run`one\nnext", summary)

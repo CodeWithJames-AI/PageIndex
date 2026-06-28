@@ -93,6 +93,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Build environment: {_inline_code(build_environment)}",
             f"- Package license: {_inline_code(package_license)}",
             f"- Secret hygiene: {_inline_code(checks.get('secret_hygiene'))}",
+            f"- Secret hygiene findings: {_inline_code(manifest.get('secret_hygiene_finding_count', 'unknown'))}",
             f"- Report output written: {_inline_code(report_output.get('written', False))}",
             f"- Manifest sidecar: {_inline_code(manifest_sidecar)}",
             f"- SBOM sidecar: {_inline_code(sbom_sidecar)}",

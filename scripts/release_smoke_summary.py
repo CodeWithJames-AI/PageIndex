@@ -33,6 +33,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
     eval_checks = _mapping(checks.get("eval_checks"))
     deployment_checks = _mapping(checks.get("deployment_checks"))
     manifest = _mapping(report.get("manifest"))
+    report_output = _mapping(report.get("report"))
     lines.extend(
         [
             f"- Result: `{'pass' if report.get('ok') is True else 'fail'}`",
@@ -42,6 +43,17 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Eval checks: `{eval_checks.get('passed', '?')}/{eval_checks.get('total', '?')}` passed",
             f"- Deployment checks: `{deployment_checks.get('passed', '?')}/{deployment_checks.get('total', '?')}` passed",
             f"- Secret hygiene: `{checks.get('secret_hygiene')}`",
+            f"- Report output written: `{report_output.get('written', False)}`",
+            (
+                "- Manifest sidecar: "
+                f"`written={manifest.get('manifest_written', False)}, "
+                f"matches={manifest.get('manifest_payload_matches_output', '?')}`"
+            ),
+            (
+                "- SBOM sidecar: "
+                f"`written={manifest.get('sbom_written', False)}, "
+                f"matches={manifest.get('sbom_payload_matches_output', '?')}`"
+            ),
             f"- Manifest SHA-256: `{manifest.get('manifest_sha256', 'unknown')}`",
             f"- SBOM SHA-256: `{manifest.get('sbom_sha256', 'unknown')}`",
             "",

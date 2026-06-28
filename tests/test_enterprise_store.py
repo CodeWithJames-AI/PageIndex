@@ -17334,10 +17334,15 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "eval_checks": {"passed": 17, "total": 17},
                 "deployment_checks": {"passed": 9, "total": 9},
             },
+            "report": {"written": True},
             "manifest": {
                 "source_branch": "codex/enterprise-cleanroom",
                 "source_commit": "abc123",
+                "manifest_payload_matches_output": True,
+                "manifest_written": True,
                 "manifest_sha256": "manifesthash",
+                "sbom_payload_matches_output": True,
+                "sbom_written": True,
                 "sbom_sha256": "sbomhash",
             },
         }
@@ -17357,6 +17362,9 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Eval checks: `17/17` passed", summary)
         self.assertIn("- Deployment checks: `9/9` passed", summary)
         self.assertIn("- Secret hygiene: `True`", summary)
+        self.assertIn("- Report output written: `True`", summary)
+        self.assertIn("- Manifest sidecar: `written=True, matches=True`", summary)
+        self.assertIn("- SBOM sidecar: `written=True, matches=True`", summary)
         self.assertIn("- Manifest SHA-256: `manifesthash`", summary)
         self.assertIn("- SBOM SHA-256: `sbomhash`", summary)
         self.assertEqual(missing_summary, "## Release smoke\n\nRelease smoke report was not generated.\n")

@@ -29,6 +29,32 @@ The missing enterprise feature is not just "allow `doc_id` to be a list." Public
 
 The clean-room plan should therefore build a corpus retrieval layer on top of the existing per-document tree index, then harden it into an enterprise workspace system.
 
+## Implementation Status On 2026-06-28
+
+The current branch implements a release-ready local enterprise MVP for the backend, CLI, HTTP API, and local dashboard surfaces. It does not claim to copy private PageIndex cloud internals; it reimplements the public enterprise behaviors through independently designed storage, retrieval, authorization, audit, packaging, and verification code.
+
+Implemented and verified surfaces:
+
+- Multi-workspace tenant model with members, roles, invitations, API tokens, token policy, role-aware scopes, expiration, rotation, and strict Bearer-token HTTP mode.
+- Workspace folders with nested paths, move/rename/delete lifecycle, folder-scoped ingest/query/chat, inherited folder grants, effective access previews, deny precedence, and bulk ACL import/revoke controls.
+- Multi-document retrieval with source sets, folder scopes, query history, trace evidence, citations, line-level citation validation, virtual nodes, query-dependent tree planning, and deterministic hybrid evidence selection.
+- Conversation and Chat Completions surfaces, including scoped conversations, folder/source-set scope updates, generated titles, archive/rename/delete, transcript export, public share links, and streaming Chat Completions metadata.
+- Document lifecycle controls for upload, import, reindex, delete, versions, page previews, suggested questions, share links, and workspace export/import preservation of managed uploads.
+- Enterprise operator controls for provider configuration, deployment readiness, eval harness, audit ledger/integrity/export, audit/query retention, legal hold, workspace usage, SIEM-style JSONL audit sinks, and sink delivery readiness.
+- Release hardening for wheel packaging, console entrypoint, release manifest, SBOM, dependency/build/artifact/secret gates, GitHub Actions release smoke, and summary rendering.
+
+Fresh acceptance evidence collected on 2026-06-28:
+
+- Full enterprise unit suite: `python -m unittest discover -s tests -p 'test*.py' -v` ran 204 tests in 303.916s with `OK (skipped=1)`, zero FAIL markers, and zero ERROR markers.
+- Dashboard browser smoke: `tests.test_enterprise_store.EnterpriseStoreTest.test_dashboard_playwright_smoke_interacts_with_local_app_when_available` ran with bundled Node/Playwright in 8.730s with `OK` and no skip markers.
+- Clean-source release smoke: `scripts/release_smoke.py --require-clean-source` returned `release_ok=True`, `source_clean=True`, `source_dirty=False`, eval checks `17/17`, deployment checks `9/9`, and passing secret, build, dependency, artifact, and SBOM gates.
+- Remote evidence: `origin/codex/enterprise-cleanroom` points to `6d064030500a3d854867000ce1e9f3c10a84b1c6`; GitHub Actions run `28319968633` completed successfully for that SHA.
+
+Completion call:
+
+- Backend/API/CLI/local-dashboard enterprise clean-room MVP: complete for release-readiness purposes.
+- Full hosted cloud product parity: not claimed until a separate product decision accepts or rejects SaaS-only surfaces such as billing checkout, account identity provider integration, private deployment automation, live hosted storage, and exact visual parity with the authenticated PageIndex cloud dashboard.
+
 ## Evidence Inventory
 
 ### Official Product And Docs Evidence

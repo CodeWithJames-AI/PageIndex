@@ -499,16 +499,35 @@ def _active_api_token_check(store: EnterpriseStore) -> dict[str, Any]:
         "SELECT workspace_id, user_id, expires_at, scopes_json FROM api_tokens"
     ).fetchall()
     active_count = 0
+    expired_count = 0
+    inaccessible_count = 0
+    invalid_scope_count = 0
+    no_effective_scope_count = 0
     for row in rows:
+        if _is_expired(row["expires_at"]):
+            expired_count += 1
+            continue
         scopes = _decode_api_token_scopes(row["scopes_json"])
-        if scopes is None or _is_expired(row["expires_at"]):
+        if scopes is None:
+            invalid_scope_count += 1
             continue
         if not store.user_can_access_workspace(row["workspace_id"], row["user_id"]):
+            inaccessible_count += 1
             continue
         role = store.workspace_role(row["workspace_id"], row["user_id"])
         if _cap_api_token_scopes_to_role(scopes, role):
             active_count += 1
-    return _check(active_count > 0, active_token_count=active_count)
+        else:
+            no_effective_scope_count += 1
+    return _check(
+        active_count > 0,
+        token_count=len(rows),
+        active_token_count=active_count,
+        expired_token_count=expired_count,
+        invalid_scope_count=invalid_scope_count,
+        inaccessible_token_count=inaccessible_count,
+        no_effective_scope_count=no_effective_scope_count,
+    )
 
 
 def _provider_config_check(*, check_provider: bool, require_provider_api_key: bool) -> dict[str, Any]:

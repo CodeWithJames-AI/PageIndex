@@ -16404,11 +16404,28 @@ class EnterpriseStoreTest(unittest.TestCase):
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Production")
             store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "mona", "member", actor_user_id="alice")
             store.add_workspace_member(workspace_id, "vivi", "viewer", actor_user_id="alice")
             stale_token = store.create_api_token(workspace_id, "vivi", name="stale-viewer")
+            store.create_api_token(
+                workspace_id,
+                "alice",
+                name="expired",
+                expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+            )
+            invalid_scope_token = store.create_api_token(workspace_id, "alice", name="invalid-scopes")
+            store.create_api_token(workspace_id, "mona", name="removed-member")
             store.conn.execute(
                 "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
                 (json.dumps(["write", "audit"]), stale_token["id"]),
+            )
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                ("not-json", invalid_scope_token["id"]),
+            )
+            store.conn.execute(
+                "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+                (workspace_id, "mona"),
             )
             store.conn.commit()
             stale_report = run_deployment_check(root, require_api_token=True)
@@ -16421,8 +16438,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(stale_report["checks"]["workspace_owner"]["ok"], True)
             self.assertEqual(stale_report["checks"]["active_api_token"]["ok"], False)
             self.assertEqual(stale_report["checks"]["active_api_token"]["active_token_count"], 0)
+            self.assertEqual(stale_report["checks"]["active_api_token"]["token_count"], 4)
+            self.assertEqual(stale_report["checks"]["active_api_token"]["expired_token_count"], 1)
+            self.assertEqual(stale_report["checks"]["active_api_token"]["invalid_scope_count"], 1)
+            self.assertEqual(stale_report["checks"]["active_api_token"]["inaccessible_token_count"], 1)
+            self.assertEqual(stale_report["checks"]["active_api_token"]["no_effective_scope_count"], 1)
             self.assertEqual(ready_report["ok"], True, ready_report)
+            self.assertEqual(ready_report["checks"]["active_api_token"]["token_count"], 5)
             self.assertEqual(ready_report["checks"]["active_api_token"]["active_token_count"], 1)
+            self.assertEqual(ready_report["checks"]["active_api_token"]["expired_token_count"], 1)
+            self.assertEqual(ready_report["checks"]["active_api_token"]["invalid_scope_count"], 1)
+            self.assertEqual(ready_report["checks"]["active_api_token"]["inaccessible_token_count"], 1)
+            self.assertEqual(ready_report["checks"]["active_api_token"]["no_effective_scope_count"], 1)
 
     def test_deployment_check_can_require_audit_sink_delivery(self):
         with tempfile.TemporaryDirectory() as tmp:

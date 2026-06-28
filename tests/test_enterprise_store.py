@@ -16869,7 +16869,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             report = json.loads(result.stdout)
             self.assertEqual(report["ok"], False)
             self.assertEqual(report["checks"]["root_writable"]["ok"], False)
-            self.assertEqual(report["checks"]["schema"]["ok"], False)
+            self.assertEqual(
+                report["checks"]["schema"],
+                {
+                    "ok": False,
+                    "table_count": 0,
+                    "expected_table_count": len(EXPECTED_TABLES),
+                    "missing_tables": [],
+                    "skipped": True,
+                    "reason": "store was not opened because root is not writable",
+                    "error": "store was not opened because root is not writable",
+                },
+            )
             self.assertEqual(
                 report["checks"]["audit_integrity"],
                 {

@@ -70,7 +70,10 @@ def run_deployment_check(
             root_path,
             {
                 "root_writable": root_writable,
-                "schema": _check(False, error="store was not opened because root is not writable"),
+                "schema": _unavailable_schema_check(
+                    error="store was not opened because root is not writable",
+                    reason="store was not opened because root is not writable",
+                ),
                 "workspace_owner": _check(False, workspace_count=0, owner_count=0, skipped=True),
                 "audit_integrity": _unavailable_audit_integrity_check(
                     reason="store was not opened because root is not writable"
@@ -97,7 +100,7 @@ def run_deployment_check(
             root_path,
             {
                 "root_writable": root_writable,
-                "schema": _check(False, error=str(exc)),
+                "schema": _unavailable_schema_check(error=str(exc), reason="store was not opened"),
                 "workspace_owner": _check(False, workspace_count=0, owner_count=0, skipped=True),
                 "audit_integrity": _unavailable_audit_integrity_check(reason="store was not opened"),
                 "audit_sink_delivery": _unavailable_audit_sink_delivery_check(
@@ -188,6 +191,18 @@ def _schema_check(store: EnterpriseStore) -> dict[str, Any]:
         table_count=len(tables),
         expected_table_count=len(EXPECTED_TABLES),
         missing_tables=missing,
+    )
+
+
+def _unavailable_schema_check(*, error: str, reason: str) -> dict[str, Any]:
+    return _check(
+        False,
+        table_count=0,
+        expected_table_count=len(EXPECTED_TABLES),
+        missing_tables=[],
+        skipped=True,
+        reason=reason,
+        error=error,
     )
 
 

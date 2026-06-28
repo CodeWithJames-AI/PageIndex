@@ -6591,6 +6591,95 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("Workspace already exists", duplicate.stderr)
             self.assertNotIn("Traceback", duplicate.stderr)
 
+    def test_workspace_export_import_preserves_managed_upload_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            restore_root = tmp_path / "restored-workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team", workspace_id="ws_upload_restore")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            upload_dir = store.root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            upload_path = upload_dir / "browser-upload.txt"
+            upload_bytes = b"Managed upload restore evidence.\n"
+            upload_path.write_bytes(upload_bytes)
+            doc_id = store.ingest_file(
+                upload_path,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Uploaded restore memo",
+                audit_action="document.upload",
+            )
+            export_path = tmp_path / "managed-upload-export.zip"
+            manifest = store.export_workspace_bundle(workspace_id, "alice", export_path)
+            validation = store.validate_workspace_import_bundle(export_path)
+            store.close()
+
+            with zipfile.ZipFile(export_path) as archive:
+                names = set(archive.namelist())
+                manifest_from_zip = json.loads(archive.read("manifest.json").decode("utf-8"))
+                upload_meta = manifest_from_zip["managed_uploads"][0]
+                uploaded_payload = archive.read(upload_meta["entry"])
+                serialized_metadata = "\n".join(
+                    archive.read(name).decode("utf-8")
+                    for name in names
+                    if name == "manifest.json" or name.endswith(".jsonl")
+                )
+
+            tampered_path = tmp_path / "managed-upload-tampered.zip"
+            with zipfile.ZipFile(export_path) as source_zip, zipfile.ZipFile(
+                tampered_path,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as target_zip:
+                for entry in source_zip.namelist():
+                    payload = b"corrupted upload bytes" if entry == upload_meta["entry"] else source_zip.read(entry)
+                    target_zip.writestr(entry, payload)
+            validation_store = EnterpriseStore(tmp_path / "validation-workspace")
+            try:
+                tampered = validation_store.validate_workspace_import_bundle(tampered_path)
+            finally:
+                validation_store.close()
+
+            restored_store = EnterpriseStore(restore_root)
+            try:
+                restored = restored_store.import_workspace_bundle(export_path)
+                restored_document = restored_store.get_document(doc_id)
+                download = restored_store.get_managed_upload_document_file(
+                    doc_id,
+                    workspace_id=workspace_id,
+                    actor_user_id="alice",
+                )
+                usage = restored_store.get_workspace_usage_summary(workspace_id, "alice")
+            finally:
+                restored_store.close()
+
+            self.assertEqual(manifest["managed_uploads"][0]["doc_id"], doc_id)
+            self.assertTrue(upload_meta["entry"].startswith("managed_uploads/"))
+            self.assertIn(upload_meta["entry"], names)
+            self.assertEqual(upload_meta["bytes"], len(upload_bytes))
+            self.assertEqual(uploaded_payload, upload_bytes)
+            self.assertTrue(validation["ok"], validation["errors"])
+            self.assertEqual(validation["managed_uploads"], {"count": 1, "bytes": len(upload_bytes)})
+            self.assertFalse(tampered["ok"])
+            self.assertTrue(
+                any("manifest checksum mismatch for managed_uploads/" in error for error in tampered["errors"]),
+                tampered["errors"],
+            )
+            self.assertNotIn("source_path", serialized_metadata)
+            self.assertNotIn("browser-upload.txt", json.dumps(manifest_from_zip, sort_keys=True))
+            self.assertTrue(restored["ok"])
+            self.assertEqual(restored["managed_uploads"], {"restored": 1, "bytes": len(upload_bytes)})
+            self.assertIsNotNone(restored_document)
+            restored_source_path = Path(restored_document["source_path"])
+            self.assertTrue(_is_relative_to(restored_source_path.resolve(), (restore_root / "uploads" / workspace_id).resolve()))
+            self.assertNotIn(str(root), str(restored_source_path))
+            self.assertEqual(Path(download["path"]).read_bytes(), upload_bytes)
+            self.assertEqual(usage["storage"]["managed_upload_files"], 1)
+            self.assertEqual(usage["storage"]["referenced_managed_upload_files"], 1)
+            self.assertEqual(usage["storage"]["orphan_managed_upload_files"], 0)
+
     def test_workspace_import_dry_run_reports_invalid_bundles(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

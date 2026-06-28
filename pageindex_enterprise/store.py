@@ -71,6 +71,7 @@ QUESTION_SUGGESTION_STOPWORDS = {
     "with",
 }
 WORKSPACE_EXPORT_FORMAT = "pageindex.workspace-export.v1"
+WORKSPACE_MANAGED_UPLOAD_EXPORT_DIR = "managed_uploads"
 WORKSPACE_EXPORT_TABLES = (
     "workspace",
     "workspace_members",
@@ -662,6 +663,9 @@ def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
     table_counts: dict[str, int] = {}
     manifest_tables: dict[str, int] = {}
     manifest_checksums: dict[str, str] = {}
+    manifest_managed_uploads: list[dict[str, Any]] = []
+    managed_upload_bytes = 0
+    document_ids: set[str] = set()
     manifest: dict[str, Any] = {}
 
     def report() -> dict[str, Any]:
@@ -674,6 +678,10 @@ def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
             "table_counts": table_counts,
             "manifest_tables": manifest_tables,
             "manifest_checksums": manifest_checksums,
+            "managed_uploads": {
+                "count": len(manifest_managed_uploads),
+                "bytes": managed_upload_bytes,
+            },
             "artifact": path.name,
         }
 
@@ -741,6 +749,10 @@ def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
             else:
                 errors.append(f"manifest checksum must be a lowercase sha256 hex string: {filename}")
 
+        manifest_managed_uploads = _workspace_import_managed_uploads_from_manifest(manifest, errors)
+        managed_upload_bytes = sum(int(upload["bytes"]) for upload in manifest_managed_uploads)
+        _validate_workspace_import_managed_upload_files(archive, names, manifest_managed_uploads, errors)
+
         for table in WORKSPACE_EXPORT_TABLES:
             filename = f"{table}.jsonl"
             if filename not in names:
@@ -762,11 +774,16 @@ def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
                         errors.append(f"manifest checksum mismatch for {filename}: expected {expected_checksum}, found {actual_checksum}")
             rows = _read_workspace_import_jsonl(archive, filename, errors)
             table_counts[table] = len(rows)
+            if table == "documents":
+                document_ids = {str(row.get("id")) for row in rows if isinstance(row.get("id"), str)}
             expected = manifest_tables.get(table)
             if expected is None:
                 errors.append(f"manifest is missing row count for table: {table}")
             elif expected != len(rows):
                 errors.append(f"manifest row count mismatch for {table}: expected {expected}, found {len(rows)}")
+        for upload in manifest_managed_uploads:
+            if upload["doc_id"] not in document_ids:
+                errors.append(f"managed upload references missing document: {upload['doc_id']}")
 
         for table in sorted(set(manifest_tables) - set(WORKSPACE_EXPORT_TABLES)):
             if table in WORKSPACE_EXPORT_OMITTED_TABLES:
@@ -776,7 +793,12 @@ def validate_workspace_import_bundle(bundle_path: str | Path) -> dict[str, Any]:
         for filename in sorted(set(manifest_checksums) - {f"{table}.jsonl" for table in WORKSPACE_EXPORT_TABLES}):
             warnings.append(f"manifest contains unknown checksum file: {filename}")
 
+        managed_upload_entries = {upload["entry"] for upload in manifest_managed_uploads}
         for name in sorted(names):
+            if name.startswith(f"{WORKSPACE_MANAGED_UPLOAD_EXPORT_DIR}/"):
+                if name not in managed_upload_entries:
+                    errors.append(f"managed upload entry is not listed in manifest: {name}")
+                continue
             if name == "manifest.json" or name.endswith(".jsonl"):
                 _scan_workspace_import_entry(archive, name, errors)
             if name.endswith(".jsonl"):
@@ -828,6 +850,90 @@ def _read_workspace_import_jsonl(
             continue
         rows.append(row)
     return rows
+
+
+def _workspace_import_managed_uploads_from_manifest(
+    manifest: dict[str, Any],
+    errors: list[str],
+) -> list[dict[str, Any]]:
+    raw_uploads = manifest.get("managed_uploads", [])
+    if raw_uploads is None:
+        return []
+    if not isinstance(raw_uploads, list):
+        errors.append("manifest managed_uploads must be a list")
+        return []
+    uploads: list[dict[str, Any]] = []
+    seen_doc_ids: set[str] = set()
+    seen_entries: set[str] = set()
+    for index, raw_upload in enumerate(raw_uploads):
+        if not isinstance(raw_upload, dict):
+            errors.append(f"manifest managed_uploads[{index}] must be an object")
+            continue
+        doc_id = raw_upload.get("doc_id")
+        entry = raw_upload.get("entry")
+        byte_count = raw_upload.get("bytes")
+        sha256 = raw_upload.get("sha256")
+        if not isinstance(doc_id, str) or not doc_id.strip():
+            errors.append(f"manifest managed_uploads[{index}].doc_id must be a non-empty string")
+            continue
+        doc_id = doc_id.strip()
+        if doc_id in seen_doc_ids:
+            errors.append(f"manifest managed_uploads duplicate doc_id: {doc_id}")
+            continue
+        if (
+            not isinstance(entry, str)
+            or not entry.startswith(f"{WORKSPACE_MANAGED_UPLOAD_EXPORT_DIR}/")
+            or entry.endswith("/")
+            or ".." in Path(entry).parts
+            or Path(entry).is_absolute()
+        ):
+            errors.append(f"manifest managed_uploads[{index}].entry must be a safe managed_uploads path")
+            continue
+        if entry in seen_entries:
+            errors.append(f"manifest managed_uploads duplicate entry: {entry}")
+            continue
+        if not isinstance(byte_count, int) or byte_count < 0:
+            errors.append(f"manifest managed_uploads[{index}].bytes must be a non-negative integer")
+            continue
+        if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            errors.append(f"manifest managed_uploads[{index}].sha256 must be a lowercase sha256 hex string")
+            continue
+        seen_doc_ids.add(doc_id)
+        seen_entries.add(entry)
+        uploads.append(
+            {
+                "doc_id": doc_id,
+                "entry": entry,
+                "bytes": byte_count,
+                "sha256": sha256,
+            }
+        )
+    return uploads
+
+
+def _validate_workspace_import_managed_upload_files(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    uploads: list[dict[str, Any]],
+    errors: list[str],
+) -> None:
+    for upload in uploads:
+        entry = upload["entry"]
+        if entry not in names:
+            errors.append(f"managed upload entry is missing from bundle: {entry}")
+            continue
+        payload = archive.read(entry)
+        if len(payload) != upload["bytes"]:
+            errors.append(
+                f"manifest byte count mismatch for {entry}: "
+                f"expected {upload['bytes']}, found {len(payload)}"
+            )
+        actual_checksum = _sha256_bytes(payload)
+        if actual_checksum != upload["sha256"]:
+            errors.append(
+                f"manifest checksum mismatch for {entry}: "
+                f"expected {upload['sha256']}, found {actual_checksum}"
+            )
 
 
 def _workspace_import_rows_for_insert(table: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4406,12 +4512,14 @@ class EnterpriseStore:
             "provider_config.jsonl": [self._workspace_provider_config_metadata(workspace_id)],
             "audit_events.jsonl": _workspace_audit_export_rows(self.conn, workspace_id),
         }
+        managed_uploads, managed_upload_payloads = self._workspace_managed_upload_export_payloads(workspace_id)
         manifest = {
             "format": WORKSPACE_EXPORT_FORMAT,
             "workspace_id": workspace_id,
             "exported_at": _now(),
             "artifact": output.name,
             "tables": {name.removesuffix(".jsonl"): len(rows) for name, rows in exports.items()},
+            "managed_uploads": managed_uploads,
             "omitted": list(WORKSPACE_EXPORT_OMITTED_POLICIES),
         }
         export_payloads = {name: _jsonl(rows) for name, rows in exports.items()}
@@ -4422,6 +4530,8 @@ class EnterpriseStore:
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
             for name, payload in export_payloads.items():
+                archive.writestr(name, payload)
+            for name, payload in managed_upload_payloads.items():
                 archive.writestr(name, payload)
         with self._atomic():
             self._insert_audit_event(
@@ -4434,9 +4544,47 @@ class EnterpriseStore:
                     "artifact": output.name,
                     "format": manifest["format"],
                     "tables": manifest["tables"],
+                    "managed_upload_files": len(managed_uploads),
+                    "managed_upload_bytes": sum(upload["bytes"] for upload in managed_uploads),
                 },
             )
         return manifest
+
+    def _workspace_managed_upload_export_payloads(
+        self,
+        workspace_id: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+        upload_dir = self._managed_upload_dir(workspace_id)
+        uploads: list[dict[str, Any]] = []
+        payloads: dict[str, bytes] = {}
+        rows = self.conn.execute(
+            """
+            SELECT id, source_path
+            FROM documents
+            WHERE workspace_id = ?
+            ORDER BY created_at, id
+            """,
+            (workspace_id,),
+        )
+        for index, row in enumerate(rows):
+            source_path = Path(str(row["source_path"])).expanduser().resolve()
+            if not _path_is_relative_to(source_path, upload_dir) or not source_path.is_file():
+                continue
+            payload = source_path.read_bytes()
+            entry = (
+                f"{WORKSPACE_MANAGED_UPLOAD_EXPORT_DIR}/"
+                f"{index:05d}-{_safe_storage_segment(row['id'])}.bin"
+            )
+            uploads.append(
+                {
+                    "doc_id": row["id"],
+                    "entry": entry,
+                    "bytes": len(payload),
+                    "sha256": _sha256_bytes(payload),
+                }
+            )
+            payloads[entry] = payload
+        return uploads, payloads
 
     def validate_workspace_import_bundle(self, bundle_path: str | Path) -> dict[str, Any]:
         return validate_workspace_import_bundle(bundle_path)
@@ -4454,8 +4602,12 @@ class EnterpriseStore:
         bundle = Path(bundle_path).expanduser()
         errors: list[str] = []
         rows_by_table: dict[str, list[dict[str, Any]]] = {}
+        managed_uploads: list[dict[str, Any]] = []
         with zipfile.ZipFile(bundle) as archive:
             names = set(archive.namelist())
+            manifest = _read_workspace_import_manifest(archive, errors)
+            if isinstance(manifest, dict):
+                managed_uploads = _workspace_import_managed_uploads_from_manifest(manifest, errors)
             for table in WORKSPACE_EXPORT_TABLES:
                 filename = f"{table}.jsonl"
                 if filename not in names and table in WORKSPACE_EXPORT_OPTIONAL_TABLES:
@@ -4468,8 +4620,23 @@ class EnterpriseStore:
         workspace_rows = rows_by_table.get("workspace", [])
         if len(workspace_rows) != 1 or workspace_rows[0].get("id") != workspace_id:
             raise ValueError("workspace import bundle workspace row does not match manifest")
+        managed_upload_source_paths = self._workspace_import_managed_upload_source_paths(
+            workspace_id,
+            managed_uploads,
+        )
+        for document in rows_by_table.get("documents", []):
+            source_path = managed_upload_source_paths.get(str(document.get("id")))
+            if source_path is not None:
+                document["source_path"] = str(source_path)
         inserted: dict[str, int] = {}
+        restored_upload_paths: list[Path] = []
         try:
+            with zipfile.ZipFile(bundle) as archive:
+                restored_upload_paths = self._write_workspace_import_managed_uploads(
+                    archive,
+                    managed_uploads,
+                    managed_upload_source_paths,
+                )
             with self._atomic():
                 for table in WORKSPACE_IMPORT_INSERT_ORDER:
                     rows = rows_by_table.get(table, [])
@@ -4478,7 +4645,11 @@ class EnterpriseStore:
                     db_table = WORKSPACE_IMPORT_DB_TABLES.get(table, table)
                     inserted[table] = self._insert_workspace_import_rows(db_table, rows)
         except sqlite3.IntegrityError as exc:
+            self._cleanup_workspace_import_managed_uploads(restored_upload_paths)
             raise ValueError(f"workspace import failed integrity checks: {exc}") from exc
+        except Exception:
+            self._cleanup_workspace_import_managed_uploads(restored_upload_paths)
+            raise
         self.rebuild_virtual_index()
         return {
             "ok": True,
@@ -4486,9 +4657,54 @@ class EnterpriseStore:
             "artifact": validation["artifact"],
             "table_counts": validation["table_counts"],
             "inserted": inserted,
+            "managed_uploads": {
+                "restored": len(restored_upload_paths),
+                "bytes": sum(upload["bytes"] for upload in managed_uploads),
+            },
             "omitted": list(WORKSPACE_EXPORT_OMITTED_POLICIES),
             "warnings": validation["warnings"],
         }
+
+    def _workspace_import_managed_upload_source_paths(
+        self,
+        workspace_id: str,
+        managed_uploads: list[dict[str, Any]],
+    ) -> dict[str, Path]:
+        if not managed_uploads:
+            return {}
+        upload_dir = self._managed_upload_dir(workspace_id)
+        source_paths: dict[str, Path] = {}
+        for upload in managed_uploads:
+            doc_id = upload["doc_id"]
+            source_paths[doc_id] = upload_dir / (
+                f"workspace-import-{uuid.uuid4().hex}-{_safe_storage_segment(doc_id)}.bin"
+            )
+        return source_paths
+
+    def _write_workspace_import_managed_uploads(
+        self,
+        archive: zipfile.ZipFile,
+        managed_uploads: list[dict[str, Any]],
+        source_paths: dict[str, Path],
+    ) -> list[Path]:
+        restored: list[Path] = []
+        for upload in managed_uploads:
+            target = source_paths[upload["doc_id"]]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            payload = archive.read(upload["entry"])
+            if len(payload) != upload["bytes"] or _sha256_bytes(payload) != upload["sha256"]:
+                raise ValueError(f"managed upload entry failed integrity check: {upload['entry']}")
+            try:
+                target.write_bytes(payload)
+            except Exception:
+                target.unlink(missing_ok=True)
+                raise
+            restored.append(target)
+        return restored
+
+    def _cleanup_workspace_import_managed_uploads(self, paths: list[Path]) -> None:
+        for path in paths:
+            path.unlink(missing_ok=True)
 
     def _insert_workspace_import_rows(self, db_table: str, rows: list[dict[str, Any]]) -> int:
         if not rows:

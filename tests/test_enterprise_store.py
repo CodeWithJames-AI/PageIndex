@@ -17459,6 +17459,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "manifest_sha256": "manifesthash",
                 "sbom_payload_matches_output": True,
                 "sbom_written": True,
+                "sbom_component_count": 6,
+                "sbom_external_ref_count": 6,
+                "sbom_describes_count": 1,
                 "sbom_sha256": "sbomhash",
             },
         }
@@ -17495,6 +17498,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Report output written: `True`", summary)
         self.assertIn("- Manifest sidecar: `written=True, matches=True`", summary)
         self.assertIn("- SBOM sidecar: `written=True, matches=True`", summary)
+        self.assertIn("- SBOM inventory: `components=6, external_refs=6, describes=1`", summary)
         self.assertIn("- Manifest SHA-256: `manifesthash`", summary)
         self.assertIn("- SBOM SHA-256: `sbomhash`", summary)
         self.assertEqual(missing_summary, "## Release smoke\n\nRelease smoke report was not generated.\n")
@@ -17543,6 +17547,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Dependencies: `count=unknown, pinned=unknown`", summary)
         self.assertIn("- Build environment: `python=unknown, platform=unknown`", summary)
         self.assertIn("- Package license: `declared=unknown, check=unknown`", summary)
+        self.assertIn("- SBOM inventory: `components=unknown, external_refs=unknown, describes=unknown`", summary)
 
     def test_release_smoke_summary_handles_malformed_report(self):
         from scripts.release_smoke_summary import render_release_smoke_summary
@@ -17594,6 +17599,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "build_platform": "Linux`arm\nnext",
                 "license_declared": "MIT`custom\nnext",
                 "manifest_sha256": "hash`one",
+                "sbom_component_count": "6`components\nnext",
+                "sbom_external_ref_count": "6`refs\nnext",
+                "sbom_describes_count": "1`desc\nnext",
             },
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -17612,6 +17620,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Dependencies: `` count=5`deps next, pinned=true`yes ``", summary)
         self.assertIn("- Build environment: `` python=3`11 next, platform=Linux`arm next ``", summary)
         self.assertIn("- Package license: `` declared=MIT`custom next, check=ok`yes next ``", summary)
+        self.assertIn(
+            "- SBOM inventory: `` components=6`components next, external_refs=6`refs next, describes=1`desc next ``",
+            summary,
+        )
         self.assertIn("- Manifest SHA-256: `` hash`one ``", summary)
         self.assertNotIn("wheel`name\nx.whl", summary)
         self.assertNotIn("123`456\n789", summary)
@@ -17620,6 +17632,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("Linux`arm\nnext", summary)
         self.assertNotIn("MIT`custom\nnext", summary)
         self.assertNotIn("ok`yes\nnext", summary)
+        self.assertNotIn("6`components\nnext", summary)
         self.assertNotIn("branch`name\nnext", summary)
         self.assertNotIn("https://example.invalid/run`one\nnext", summary)
 

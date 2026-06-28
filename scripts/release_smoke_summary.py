@@ -71,6 +71,11 @@ def render_release_smoke_summary(report_path: Path) -> str:
         f"written={manifest.get('sbom_written', False)}, "
         f"matches={manifest.get('sbom_payload_matches_output', '?')}"
     )
+    sbom_inventory = (
+        f"components={manifest.get('sbom_component_count', 'unknown')}, "
+        f"external_refs={manifest.get('sbom_external_ref_count', 'unknown')}, "
+        f"describes={manifest.get('sbom_describes_count', 'unknown')}"
+    )
     lines.extend(
         [
             f"- Result: {_inline_code('pass' if report.get('ok') is True else 'fail')}",
@@ -91,6 +96,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Report output written: {_inline_code(report_output.get('written', False))}",
             f"- Manifest sidecar: {_inline_code(manifest_sidecar)}",
             f"- SBOM sidecar: {_inline_code(sbom_sidecar)}",
+            f"- SBOM inventory: {_inline_code(sbom_inventory)}",
             f"- Manifest SHA-256: {_inline_code(manifest.get('manifest_sha256', 'unknown'))}",
             f"- SBOM SHA-256: {_inline_code(manifest.get('sbom_sha256', 'unknown'))}",
             "",

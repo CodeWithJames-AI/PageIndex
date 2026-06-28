@@ -135,6 +135,7 @@ def run_release_smoke(
             wheel_record=wheel_record,
             wheel_content=wheel_content,
         )
+        manifest_payload = _json_document_bytes(manifest)
         sbom = _sbom_document(manifest)
         sbom_payload = _json_document_bytes(sbom)
         secret_hygiene = _release_secret_hygiene(
@@ -151,11 +152,12 @@ def run_release_smoke(
         if manifest_output is not None:
             manifest_output = manifest_output.expanduser().resolve()
             manifest_output.parent.mkdir(parents=True, exist_ok=True)
-            manifest_output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            manifest_output.write_bytes(manifest_payload)
         if sbom_output is not None:
             sbom_output = sbom_output.expanduser().resolve()
             sbom_output.parent.mkdir(parents=True, exist_ok=True)
             sbom_output.write_bytes(sbom_payload)
+        manifest_integrity = _document_integrity(manifest_payload, manifest_output)
         sbom_integrity = _document_integrity(sbom_payload, sbom_output)
         checks = {
             "wheel_built": wheel.name == f"{PACKAGE_NAME}-{VERSION}-py3-none-any.whl",
@@ -163,6 +165,7 @@ def run_release_smoke(
             "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
             "artifact_identity": _artifact_identity_ok(manifest["artifacts"][0]),
             "manifest_generator": _manifest_generator_ok(manifest["generator"]),
+            "manifest_sidecar_integrity": manifest_integrity["ok"],
             "manifest_timestamp": _utc_timestamp_ok(manifest["created_at"]),
             "sbom_generated": len(sbom["packages"]) == len(dependencies) + 1,
             "sbom_describes_root": _sbom_describes_root_package(sbom),
@@ -198,7 +201,11 @@ def run_release_smoke(
                 "license_declared": manifest["package"]["license_declared"],
                 "manifest_generator": manifest["generator"]["name"],
                 "manifest_generator_version": manifest["generator"]["version"],
+                "manifest_payload_matches_output": manifest_integrity["payload_matches_output"],
                 "manifest_schema": manifest["generator"]["schema"],
+                "manifest_sha256": manifest_integrity["sha256"],
+                "manifest_size_bytes": manifest_integrity["size_bytes"],
+                "manifest_written": manifest_integrity["written"],
                 "path": str(manifest_output) if manifest_output is not None else None,
                 "sbom_component_count": len(sbom["packages"]),
                 "sbom_describes_count": len(sbom.get("documentDescribes", [])),

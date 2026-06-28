@@ -16944,6 +16944,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["manifest_generated"], True)
         self.assertEqual(report["checks"]["artifact_identity"], True)
         self.assertEqual(report["checks"]["manifest_generator"], True)
+        self.assertEqual(report["checks"]["manifest_sidecar_integrity"], True)
         self.assertEqual(report["checks"]["manifest_timestamp"], True)
         self.assertEqual(report["checks"]["sbom_generated"], True)
         self.assertEqual(report["checks"]["sbom_describes_root"], True)
@@ -16975,7 +16976,11 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["license_declared"], "MIT")
         self.assertEqual(report["manifest"]["manifest_generator"], "pageindex-enterprise release_smoke.py")
         self.assertEqual(report["manifest"]["manifest_generator_version"], "0.1.0")
+        self.assertEqual(report["manifest"]["manifest_payload_matches_output"], True)
         self.assertEqual(report["manifest"]["manifest_schema"], "pageindex-enterprise-cleanroom.release-manifest.v1")
+        self.assertEqual(report["manifest"]["manifest_sha256"], hashlib.sha256(manifest_text.encode("utf-8")).hexdigest())
+        self.assertEqual(report["manifest"]["manifest_size_bytes"], len(manifest_text.encode("utf-8")))
+        self.assertEqual(report["manifest"]["manifest_written"], True)
         self.assertEqual(Path(report["manifest"]["sbom_path"]).resolve(), sbom_path.resolve())
         self.assertEqual(report["manifest"]["sbom_component_count"], len(manifest["dependencies"]) + 1)
         self.assertEqual(report["manifest"]["sbom_describes_count"], 1)
@@ -17138,6 +17143,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "manifest_generated": True,
             "artifact_identity": True,
             "manifest_generator": True,
+            "manifest_sidecar_integrity": True,
             "manifest_timestamp": True,
             "sbom_generated": True,
             "sbom_describes_root": True,
@@ -17159,6 +17165,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         bad_artifact_identity = {**checks, "artifact_identity": False}
         bad_record = {**checks, "wheel_record_hashes": False}
         bad_manifest_generator = {**checks, "manifest_generator": False}
+        bad_manifest_sidecar_integrity = {**checks, "manifest_sidecar_integrity": False}
         bad_manifest_timestamp = {**checks, "manifest_timestamp": False}
         bad_eval_summary = {**checks, "eval_checks": {"failed": 1}}
         bad_deployment_summary = {**checks, "deployment_checks": {"failed": 1}}
@@ -17175,6 +17182,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(_release_checks_ok(bad_artifact_identity), False)
         self.assertEqual(_release_checks_ok(bad_record), False)
         self.assertEqual(_release_checks_ok(bad_manifest_generator), False)
+        self.assertEqual(_release_checks_ok(bad_manifest_sidecar_integrity), False)
         self.assertEqual(_release_checks_ok(bad_manifest_timestamp), False)
         self.assertEqual(_release_checks_ok(bad_eval_summary), False)
         self.assertEqual(_release_checks_ok(bad_deployment_summary), False)

@@ -16910,6 +16910,13 @@ class EnterpriseStoreTest(unittest.TestCase):
             if requirement and not requirement.startswith("#"):
                 self.assertIn(f"    {requirement}", setup_cfg)
 
+    def test_release_smoke_workflow_uses_resolver_install(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        workflow = (repo_root / ".github" / "workflows" / "release-smoke.yml").read_text(encoding="utf-8")
+
+        self.assertIn("python -m pip install -r requirements.txt", workflow)
+        self.assertNotIn("python -m pip install --no-deps -r requirements.txt", workflow)
+
     def test_release_smoke_builds_packaged_console_and_eval(self):
         repo_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
@@ -17093,7 +17100,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "litellm": "==1.83.7",
                 "pymupdf": "==1.26.4",
                 "pypdf2": "==3.0.1",
-                "python-dotenv": "==1.2.2",
+                "python-dotenv": "==1.0.1",
                 "pyyaml": "==6.0.2",
             },
         )

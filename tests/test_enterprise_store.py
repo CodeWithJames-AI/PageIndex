@@ -17450,6 +17450,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "ci_run_url": "https://github.com/CodeWithJames-AI/PageIndex/actions/runs/12345",
                 "source_branch": "codex/enterprise-cleanroom",
                 "source_commit": "abc123",
+                "source_upstream": "origin/codex/enterprise-cleanroom",
                 "source_dirty_count": 0,
                 "source_dirty_paths_truncated": False,
                 "wheel_sha256": "wheelhash",
@@ -17493,6 +17494,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Artifact identity: `count=1, type=python-wheel, media_type=application/zip`", summary)
         self.assertIn("- Wheel integrity: `content_ok=True, record_ok=True`", summary)
         self.assertIn("- Source: `codex/enterprise-cleanroom@abc123`", summary)
+        self.assertIn("- Source upstream: `origin/codex/enterprise-cleanroom`", summary)
         self.assertIn("- CI context: `github-actions:CodeWithJames-AI/PageIndex@codex/enterprise-cleanroom`", summary)
         self.assertIn(
             "- CI run: `https://github.com/CodeWithJames-AI/PageIndex/actions/runs/12345 attempt=1`",
@@ -17558,6 +17560,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Result: `fail`", summary)
         self.assertIn("- Created at: `unknown`", summary)
         self.assertIn("- Source: `detached@abc123`", summary)
+        self.assertIn("- Source upstream: `unknown`", summary)
         self.assertIn("- Wheel SHA-256: `unknown`", summary)
         self.assertIn("- Wheel size bytes: `unknown`", summary)
         self.assertIn("- Artifact identity: `count=unknown, type=unknown, media_type=unknown`", summary)
@@ -17622,6 +17625,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "ci_run_url": "https://example.invalid/run`one\nnext",
                 "source_branch": "branch`name\nnext",
                 "source_commit": "abc`123",
+                "source_upstream": "origin`branch\nnext",
                 "source_dirty_count": "7`paths\nnext",
                 "source_dirty_paths_truncated": "false`ish",
                 "wheel_sha256": "wheel`hash",
@@ -17659,6 +17663,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         )
         self.assertIn("- Wheel integrity: `` content_ok=true`content next, record_ok=true`record next ``", summary)
         self.assertIn("- Source: `` branch`name next@abc`123 ``", summary)
+        self.assertIn("- Source upstream: `` origin`branch next ``", summary)
         self.assertIn("- CI context: `` github`actions:repo`name next@ref`name next ``", summary)
         self.assertIn("- CI run: `` https://example.invalid/run`one next attempt=attempt`1 ``", summary)
         self.assertIn("- Source dirty paths: `` count=7`paths next, paths_truncated=false`ish ``", summary)
@@ -17681,6 +17686,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("1`artifact\nnext", summary)
         self.assertNotIn("python`wheel\nnext", summary)
         self.assertNotIn("application`zip\nnext", summary)
+        self.assertNotIn("origin`branch\nnext", summary)
         self.assertNotIn("true`content\nnext", summary)
         self.assertNotIn("true`record\nnext", summary)
         self.assertNotIn("7`paths\nnext", summary)

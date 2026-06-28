@@ -101,6 +101,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Artifact identity: {_inline_code(artifact_identity)}",
             f"- Wheel integrity: {_inline_code(wheel_integrity)}",
             f"- Source: {_inline_code(source)}",
+            f"- Source upstream: {_inline_code(manifest.get('source_upstream') or 'unknown')}",
             f"- CI context: {_inline_code(ci_context)}",
             f"- CI run: {_inline_code(ci_run)}",
             f"- Source clean: {_inline_code(checks.get('source_clean', 'not-required'))}",

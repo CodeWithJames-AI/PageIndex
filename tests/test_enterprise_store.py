@@ -17442,6 +17442,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "artifact_count": 1,
                 "artifact_media_type": "application/zip",
                 "artifact_type": "python-wheel",
+                "created_at": "2026-06-28T09:35:00Z",
                 "ci_provider": "github-actions",
                 "ci_ref": "codex/enterprise-cleanroom",
                 "ci_repository": "CodeWithJames-AI/PageIndex",
@@ -17485,6 +17486,7 @@ class EnterpriseStoreTest(unittest.TestCase):
 
         self.assertIn("## Release smoke", summary)
         self.assertIn("- Result: `pass`", summary)
+        self.assertIn("- Created at: `2026-06-28T09:35:00Z`", summary)
         self.assertIn("- Wheel: `pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl`", summary)
         self.assertIn("- Wheel SHA-256: `wheelhash`", summary)
         self.assertIn("- Wheel size bytes: `165251`", summary)
@@ -17554,6 +17556,7 @@ class EnterpriseStoreTest(unittest.TestCase):
 
         self.assertEqual(result.stdout, "")
         self.assertIn("- Result: `fail`", summary)
+        self.assertIn("- Created at: `unknown`", summary)
         self.assertIn("- Source: `detached@abc123`", summary)
         self.assertIn("- Wheel SHA-256: `unknown`", summary)
         self.assertIn("- Wheel size bytes: `unknown`", summary)
@@ -17611,6 +17614,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "artifact_count": "1`artifact\nnext",
                 "artifact_media_type": "application`zip\nnext",
                 "artifact_type": "python`wheel\nnext",
+                "created_at": "2026`date\nnext",
                 "ci_provider": "github`actions",
                 "ci_ref": "ref`name\nnext",
                 "ci_repository": "repo`name\nnext",
@@ -17646,6 +17650,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             summary = render_release_smoke_summary(report_path)
 
         self.assertIn("- Wheel: `` wheel`name x.whl ``", summary)
+        self.assertIn("- Created at: `` 2026`date next ``", summary)
         self.assertIn("- Wheel SHA-256: `` wheel`hash ``", summary)
         self.assertIn("- Wheel size bytes: `` 123`456 789 ``", summary)
         self.assertIn(
@@ -17671,6 +17676,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         )
         self.assertIn("- Manifest SHA-256: `` hash`one ``", summary)
         self.assertNotIn("wheel`name\nx.whl", summary)
+        self.assertNotIn("2026`date\nnext", summary)
         self.assertNotIn("123`456\n789", summary)
         self.assertNotIn("1`artifact\nnext", summary)
         self.assertNotIn("python`wheel\nnext", summary)

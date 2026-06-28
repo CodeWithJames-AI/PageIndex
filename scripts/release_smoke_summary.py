@@ -94,6 +94,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
     lines.extend(
         [
             f"- Result: {_inline_code('pass' if report.get('ok') is True else 'fail')}",
+            f"- Created at: {_inline_code(manifest.get('created_at', 'unknown'))}",
             f"- Wheel: {_inline_code(report.get('wheel', 'unknown'))}",
             f"- Wheel SHA-256: {_inline_code(manifest.get('wheel_sha256', 'unknown'))}",
             f"- Wheel size bytes: {_inline_code(manifest.get('wheel_size_bytes', 'unknown'))}",

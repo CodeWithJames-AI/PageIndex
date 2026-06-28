@@ -4466,6 +4466,48 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertNotIn("New margin upside evidence.", serialized)
             self.assertIsNone(store.reindex_document_file("doc_missing", replacement, workspace_id=workspace_id, actor_user_id="alice"))
 
+    def test_reindex_document_file_removes_previous_managed_upload_after_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            upload_dir = store.root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            old_managed = upload_dir / "old-managed-reindex.txt"
+            new_managed = upload_dir / "new-managed-reindex.txt"
+            local_source = root / "local-reindex.txt"
+            replacement = root / "local-reindex-replacement.txt"
+            old_managed.write_text("Old managed reindex evidence.", encoding="utf-8")
+            new_managed.write_text("New managed reindex evidence.", encoding="utf-8")
+            local_source.write_text("Old local reindex evidence.", encoding="utf-8")
+            replacement.write_text("New local reindex evidence.", encoding="utf-8")
+            managed_doc_id = store.ingest_file(old_managed, workspace_id=workspace_id, actor_user_id="alice", name="Managed reindex")
+            local_doc_id = store.ingest_file(local_source, workspace_id=workspace_id, actor_user_id="alice", name="Local reindex")
+
+            managed_updated = store.reindex_document_file(
+                managed_doc_id,
+                new_managed,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+            )
+            managed_events = store.list_audit_events(workspace_id, "alice", action="document.reindex")
+            local_updated = store.reindex_document_file(
+                local_doc_id,
+                replacement,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+            )
+            local_events = store.list_audit_events(workspace_id, "alice", action="document.reindex")
+
+            self.assertEqual(managed_updated["source_path"], str(new_managed.resolve()))
+            self.assertFalse(old_managed.exists())
+            self.assertTrue(new_managed.exists())
+            self.assertEqual(managed_events[0]["details"]["previous_managed_upload_file_count"], 1)
+            self.assertEqual(local_updated["source_path"], str(replacement.resolve()))
+            self.assertTrue(local_source.exists())
+            self.assertEqual(local_events[0]["details"]["previous_managed_upload_file_count"], 0)
+
     def test_rename_document_updates_metadata_without_reindexing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4615,6 +4657,40 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(document["source_path"], str(original.resolve()))
             self.assertEqual([page["content"] for page in pages], ["Rollback original alpha."])
             self.assertEqual(store.retrieve_pages("beta", workspace_id=workspace_id), [])
+
+    def test_reindex_document_file_audit_failure_keeps_previous_managed_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            upload_dir = store.root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            old_managed = upload_dir / "rollback-old-managed-reindex.txt"
+            replacement = upload_dir / "rollback-new-managed-reindex.txt"
+            old_managed.write_text("Rollback old managed reindex evidence.", encoding="utf-8")
+            replacement.write_text("Rollback new managed reindex evidence.", encoding="utf-8")
+            doc_id = store.ingest_file(old_managed, workspace_id=workspace_id, actor_user_id="alice", name="Managed rollback")
+
+            def fail_audit(*args, **kwargs):
+                raise RuntimeError("audit insert failed")
+
+            store._insert_audit_event = fail_audit
+
+            with self.assertRaisesRegex(RuntimeError, "audit insert failed"):
+                store.reindex_document_file(
+                    doc_id,
+                    replacement,
+                    workspace_id=workspace_id,
+                    actor_user_id="alice",
+                    name="Managed rollback replacement",
+                )
+
+            document = store.get_document(doc_id)
+            self.assertTrue(old_managed.exists())
+            self.assertTrue(replacement.exists())
+            self.assertEqual(document["source_path"], str(old_managed.resolve()))
+            self.assertEqual(document["name"], "Managed rollback")
 
     def test_delete_document_enforces_write_role_and_cascades_index_rows(self):
         with tempfile.TemporaryDirectory() as tmp:

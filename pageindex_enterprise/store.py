@@ -6726,6 +6726,10 @@ class EnterpriseStore:
         if not replacement_name:
             raise ValueError("Document name is required.")
         target_folder_id = document["folder_id"] if folder_id is None else folder_id
+        previous_managed_upload_path = self._managed_upload_source_path(document)
+        previous_managed_upload_file_count = int(
+            previous_managed_upload_path is not None and previous_managed_upload_path.is_file()
+        )
         updated_id = self.ingest_file(
             file_path,
             folder_id=target_folder_id,
@@ -6734,9 +6738,20 @@ class EnterpriseStore:
             workspace_id=document["workspace_id"],
             actor_user_id=actor_user_id,
             audit_action="document.reindex",
-            audit_details={"previous_kind": document["kind"]},
+            audit_details={
+                "previous_kind": document["kind"],
+                "previous_managed_upload_file_count": previous_managed_upload_file_count,
+            },
         )
-        return self.get_document(updated_id)
+        updated = self.get_document(updated_id)
+        if previous_managed_upload_path is not None:
+            current_managed_upload_path = self._managed_upload_source_path(updated) if updated else None
+            if current_managed_upload_path != previous_managed_upload_path:
+                try:
+                    previous_managed_upload_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return updated
 
     def put_pages(self, doc_id: str, pages: list[str]) -> None:
         document = self.get_document(doc_id)

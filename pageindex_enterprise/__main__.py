@@ -130,6 +130,11 @@ def main() -> None:
     workspace_usage.add_argument("workspace_id")
     workspace_usage.add_argument("actor_user_id")
 
+    managed_upload_orphans = sub.add_parser("managed-upload-orphans")
+    managed_upload_orphans.add_argument("workspace_id")
+    managed_upload_orphans.add_argument("actor_user_id")
+    managed_upload_orphans.add_argument("--purge", action="store_true")
+
     workspace_quota_policy = sub.add_parser("workspace-quota-policy")
     workspace_quota_policy.add_argument("workspace_id")
     workspace_quota_policy.add_argument("user_id")
@@ -674,6 +679,19 @@ def main() -> None:
                 json.dumps(
                     _workspace_member_cli(
                         lambda: store.get_workspace_usage_summary(args.workspace_id, args.actor_user_id)
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.command == "managed-upload-orphans":
+            print(
+                json.dumps(
+                    _workspace_member_cli(
+                        lambda: store.get_managed_upload_orphan_report(
+                            args.workspace_id,
+                            args.actor_user_id,
+                            purge=args.purge,
+                        )
                     ),
                     indent=2,
                 )

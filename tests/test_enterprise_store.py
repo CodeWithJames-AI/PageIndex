@@ -1043,6 +1043,127 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn("workspace role denied", denied.stderr)
             self.assertNotIn("Traceback", denied.stderr)
 
+    def test_managed_upload_orphans_cli_previews_and_purges_without_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            repo_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+            base = [sys.executable, "-m", "pageindex_enterprise", "--root", str(root)]
+            subprocess.run(
+                [*base, "workspace", "Team", "--workspace-id", "ws_upload_orphans"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_upload_orphans", "alice", "--role", "owner"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_upload_orphans", "ada", "--role", "admin", "--actor-user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [*base, "add-member", "ws_upload_orphans", "bob", "--role", "member", "--actor-user-id", "alice"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            upload_dir = root / "uploads" / "ws_upload_orphans"
+            upload_dir.mkdir(parents=True)
+            referenced = upload_dir / "referenced.txt"
+            orphan = upload_dir / "orphan.txt"
+            referenced.write_text("Referenced upload remains.", encoding="utf-8")
+            orphan.write_text("Orphan upload can be purged.", encoding="utf-8")
+            orphan_size = orphan.stat().st_size
+            store = EnterpriseStore(root)
+            try:
+                store.ingest_file(
+                    referenced,
+                    workspace_id="ws_upload_orphans",
+                    actor_user_id="alice",
+                    name="Referenced upload",
+                )
+            finally:
+                store.close()
+
+            preview = json.loads(
+                subprocess.run(
+                    [*base, "managed-upload-orphans", "ws_upload_orphans", "alice"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            admin_preview = json.loads(
+                subprocess.run(
+                    [*base, "managed-upload-orphans", "ws_upload_orphans", "ada"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            member_denied = subprocess.run(
+                [*base, "managed-upload-orphans", "ws_upload_orphans", "bob"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            admin_purge_denied = subprocess.run(
+                [*base, "managed-upload-orphans", "ws_upload_orphans", "ada", "--purge"],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            purged = json.loads(
+                subprocess.run(
+                    [*base, "managed-upload-orphans", "ws_upload_orphans", "alice", "--purge"],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+
+            self.assertTrue(preview["dry_run"])
+            self.assertEqual(preview["upload_file_count"], 2)
+            self.assertEqual(preview["referenced_file_count"], 1)
+            self.assertEqual(preview["orphan_file_count"], 1)
+            self.assertEqual(preview["purged"], 0)
+            self.assertEqual(preview["orphans"], [{"relative_path": "orphan.txt", "bytes": orphan_size}])
+            self.assertEqual(admin_preview["orphan_file_count"], 1)
+            self.assertNotEqual(member_denied.returncode, 0)
+            self.assertIn("workspace role denied", member_denied.stderr)
+            self.assertNotIn("Traceback", member_denied.stderr)
+            self.assertNotEqual(admin_purge_denied.returncode, 0)
+            self.assertIn("workspace role denied", admin_purge_denied.stderr)
+            self.assertNotIn("Traceback", admin_purge_denied.stderr)
+            self.assertFalse(purged["dry_run"])
+            self.assertEqual(purged["matched"], 1)
+            self.assertEqual(purged["purged"], 1)
+            self.assertFalse(orphan.exists())
+            self.assertTrue(referenced.exists())
+
     def test_workspace_quota_policy_cli_sets_clears_and_enforces_without_tracebacks(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -4871,6 +4992,68 @@ class EnterpriseStoreTest(unittest.TestCase):
             local_events = store.list_audit_events(workspace_id, "alice", action="document.delete")
             self.assertTrue(local_source.exists())
             self.assertEqual(local_events[0]["details"]["managed_upload_file_count"], 0)
+
+    def test_managed_upload_orphan_report_dry_runs_and_purges_owner_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team", workspace_id="ws_upload_orphans")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "ada", "admin", actor_user_id="alice")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            upload_dir = store.root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            referenced = upload_dir / "referenced-upload.txt"
+            orphan = upload_dir / "orphan-upload.txt"
+            ignored_dir = upload_dir / "nested"
+            referenced.write_text("Referenced managed upload evidence.", encoding="utf-8")
+            orphan.write_text("Orphan managed upload evidence.", encoding="utf-8")
+            ignored_dir.mkdir()
+            doc_id = store.ingest_file(
+                referenced,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Referenced managed upload",
+            )
+            orphan_size = orphan.stat().st_size
+
+            preview = store.get_managed_upload_orphan_report(workspace_id, "alice")
+            admin_preview = store.get_managed_upload_orphan_report(workspace_id, "ada")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.get_managed_upload_orphan_report(workspace_id, "bob")
+            with self.assertRaisesRegex(PermissionError, "workspace role denied"):
+                store.get_managed_upload_orphan_report(workspace_id, "ada", purge=True)
+            purged = store.get_managed_upload_orphan_report(workspace_id, "alice", purge=True)
+            second_purge = store.get_managed_upload_orphan_report(workspace_id, "alice", purge=True)
+            events = store.list_audit_events(workspace_id, "alice", action="managed_upload.orphan.purge")
+            serialized_events = json.dumps(events, sort_keys=True)
+
+            self.assertEqual(store.get_document(doc_id)["source_path"], str(referenced.resolve()))
+            self.assertTrue(preview["dry_run"])
+            self.assertEqual(preview["upload_file_count"], 2)
+            self.assertEqual(preview["referenced_file_count"], 1)
+            self.assertEqual(preview["orphan_file_count"], 1)
+            self.assertEqual(preview["matched"], 1)
+            self.assertEqual(preview["purged"], 0)
+            self.assertEqual(preview["failed"], 0)
+            self.assertEqual(
+                preview["orphans"],
+                [{"relative_path": "orphan-upload.txt", "bytes": orphan_size}],
+            )
+            self.assertEqual(admin_preview["orphan_file_count"], 1)
+            self.assertFalse(purged["dry_run"])
+            self.assertEqual(purged["matched"], 1)
+            self.assertEqual(purged["purged"], 1)
+            self.assertEqual(purged["failed"], 0)
+            self.assertFalse(orphan.exists())
+            self.assertTrue(referenced.exists())
+            self.assertTrue(ignored_dir.exists())
+            self.assertEqual(second_purge["matched"], 0)
+            self.assertEqual(second_purge["purged"], 0)
+            purge_event = next(event for event in events if event["details"]["purged"] == 1)
+            self.assertEqual(purge_event["details"], {"matched": 1, "purged": 1, "failed": 0})
+            self.assertNotIn("orphan-upload.txt", serialized_events)
+            self.assertNotIn(str(orphan), serialized_events)
 
     def test_delete_document_rolls_back_when_audit_insert_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

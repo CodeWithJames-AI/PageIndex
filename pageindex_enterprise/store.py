@@ -6580,10 +6580,7 @@ class EnterpriseStore:
         self.require_workspace_access(document["workspace_id"], actor_user_id)
         if not self._can_read_document(document, actor_user_id):
             return None
-        uploads_root = (self.root / "uploads").resolve()
-        upload_dir = (uploads_root / _safe_storage_segment(document["workspace_id"])).resolve()
-        if not _path_is_relative_to(upload_dir, uploads_root):
-            raise ValueError("workspace upload path is invalid")
+        upload_dir = self._managed_upload_dir(document["workspace_id"])
         source_path = Path(str(document["source_path"])).expanduser().resolve()
         if not _path_is_relative_to(source_path, upload_dir):
             raise ValueError("document download is available only for managed uploads")
@@ -6591,18 +6588,107 @@ class EnterpriseStore:
             raise FileNotFoundError(source_path)
         return {"document": document, "path": source_path}
 
-    def _managed_upload_source_path(self, document: dict[str, Any]) -> Path | None:
-        workspace_id = document.get("workspace_id")
-        if not workspace_id:
-            return None
+    def _managed_upload_dir(self, workspace_id: str) -> Path:
         uploads_root = (self.root / "uploads").resolve()
         upload_dir = (uploads_root / _safe_storage_segment(workspace_id)).resolve()
         if not _path_is_relative_to(upload_dir, uploads_root):
             raise ValueError("workspace upload path is invalid")
+        return upload_dir
+
+    def _managed_upload_source_path(self, document: dict[str, Any]) -> Path | None:
+        workspace_id = document.get("workspace_id")
+        if not workspace_id:
+            return None
+        upload_dir = self._managed_upload_dir(workspace_id)
         source_path = Path(str(document["source_path"])).expanduser().resolve()
         if not _path_is_relative_to(source_path, upload_dir):
             return None
         return source_path
+
+    def get_managed_upload_orphan_report(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        *,
+        purge: bool = False,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        if purge:
+            self.require_workspace_role(workspace_id, actor_user_id, {"owner"})
+        upload_dir = self._managed_upload_dir(workspace_id)
+        referenced_paths = set()
+        for row in self.conn.execute(
+            "SELECT source_path FROM documents WHERE workspace_id = ?",
+            (workspace_id,),
+        ):
+            source_path = Path(str(row["source_path"])).expanduser().resolve()
+            if _path_is_relative_to(source_path, upload_dir):
+                referenced_paths.add(source_path)
+
+        upload_files: list[tuple[Path, Path, int]] = []
+        if upload_dir.exists():
+            if not upload_dir.is_dir():
+                raise ValueError("workspace upload path is invalid")
+            for path in sorted(upload_dir.iterdir(), key=lambda entry: entry.name):
+                if not (path.is_file() or path.is_symlink()):
+                    continue
+                try:
+                    byte_count = path.lstat().st_size
+                except OSError:
+                    byte_count = 0
+                upload_files.append((path, path.resolve(), byte_count))
+
+        orphan_files = [
+            (path, byte_count)
+            for path, resolved_path, byte_count in upload_files
+            if resolved_path not in referenced_paths
+        ]
+        orphan_entries = [
+            {
+                "relative_path": path.name,
+                "bytes": byte_count,
+            }
+            for path, byte_count in orphan_files
+        ]
+        failures: list[dict[str, str]] = []
+        purged = 0
+        if purge:
+            for path, _byte_count in orphan_files:
+                try:
+                    path.unlink()
+                    purged += 1
+                except OSError as exc:
+                    failures.append({"relative_path": path.name, "error": str(exc)})
+            with self._atomic():
+                self._insert_audit_event(
+                    workspace_id,
+                    actor_user_id,
+                    "managed_upload.orphan.purge",
+                    target_type="managed_upload_orphans",
+                    target_id=workspace_id,
+                    details={
+                        "matched": len(orphan_files),
+                        "purged": purged,
+                        "failed": len(failures),
+                    },
+                )
+
+        return {
+            "workspace_id": workspace_id,
+            "dry_run": not purge,
+            "upload_file_count": len(upload_files),
+            "referenced_file_count": sum(
+                1
+                for _path, resolved_path, _bytes in upload_files
+                if resolved_path in referenced_paths
+            ),
+            "orphan_file_count": len(orphan_files),
+            "matched": len(orphan_files),
+            "purged": purged,
+            "failed": len(failures),
+            "orphans": orphan_entries,
+            "failures": failures,
+        }
 
     def rename_document(
         self,

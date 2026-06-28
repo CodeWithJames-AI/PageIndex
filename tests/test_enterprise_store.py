@@ -16942,6 +16942,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["wheel_built"], True)
         self.assertEqual(report["checks"]["console_script"], True)
         self.assertEqual(report["checks"]["manifest_generated"], True)
+        self.assertEqual(report["checks"]["manifest_generator"], True)
         self.assertEqual(report["checks"]["manifest_timestamp"], True)
         self.assertEqual(report["checks"]["sbom_generated"], True)
         self.assertEqual(report["checks"]["sbom_describes_root"], True)
@@ -16968,6 +16969,9 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
         self.assertEqual(report["manifest"]["direct_dependencies_pinned"], True)
         self.assertEqual(report["manifest"]["license_declared"], "MIT")
+        self.assertEqual(report["manifest"]["manifest_generator"], "pageindex-enterprise release_smoke.py")
+        self.assertEqual(report["manifest"]["manifest_generator_version"], "0.1.0")
+        self.assertEqual(report["manifest"]["manifest_schema"], "pageindex-enterprise-cleanroom.release-manifest.v1")
         self.assertEqual(Path(report["manifest"]["sbom_path"]).resolve(), sbom_path.resolve())
         self.assertEqual(report["manifest"]["sbom_component_count"], len(manifest["dependencies"]) + 1)
         self.assertEqual(report["manifest"]["sbom_describes_count"], 1)
@@ -16986,6 +16990,14 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["wheel_record_hashes_valid"], True)
         self.assertEqual(manifest["schema_version"], 1)
         self.assertRegex(manifest["created_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertEqual(
+            manifest["generator"],
+            {
+                "name": "pageindex-enterprise release_smoke.py",
+                "schema": "pageindex-enterprise-cleanroom.release-manifest.v1",
+                "version": "0.1.0",
+            },
+        )
         self.assertEqual(
             manifest["package"],
             {
@@ -17113,6 +17125,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "wheel_built": True,
             "console_script": True,
             "manifest_generated": True,
+            "manifest_generator": True,
             "manifest_timestamp": True,
             "sbom_generated": True,
             "sbom_describes_root": True,
@@ -17131,6 +17144,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "secret_hygiene": True,
         }
         bad_record = {**checks, "wheel_record_hashes": False}
+        bad_manifest_generator = {**checks, "manifest_generator": False}
         bad_manifest_timestamp = {**checks, "manifest_timestamp": False}
         bad_eval_summary = {**checks, "eval_checks": {"failed": 1}}
         bad_deployment_summary = {**checks, "deployment_checks": {"failed": 1}}
@@ -17144,6 +17158,7 @@ class EnterpriseStoreTest(unittest.TestCase):
 
         self.assertEqual(_release_checks_ok(checks), True)
         self.assertEqual(_release_checks_ok(bad_record), False)
+        self.assertEqual(_release_checks_ok(bad_manifest_generator), False)
         self.assertEqual(_release_checks_ok(bad_manifest_timestamp), False)
         self.assertEqual(_release_checks_ok(bad_eval_summary), False)
         self.assertEqual(_release_checks_ok(bad_deployment_summary), False)

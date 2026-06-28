@@ -22,6 +22,8 @@ from urllib.parse import quote
 
 PACKAGE_NAME = "pageindex_enterprise_cleanroom"
 VERSION = "0.1.0"
+RELEASE_SMOKE_TOOL = "pageindex-enterprise release_smoke.py"
+MANIFEST_SCHEMA_ID = "pageindex-enterprise-cleanroom.release-manifest.v1"
 SOURCE_DIRTY_PATH_LIMIT = 50
 SECRET_SHAPED_PATTERNS = {
     "api_token": re.compile(r"\bpit_[A-Za-z0-9_-]{20,}\b"),
@@ -157,6 +159,7 @@ def run_release_smoke(
             "wheel_built": wheel.name == f"{PACKAGE_NAME}-{VERSION}-py3-none-any.whl",
             "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
             "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
+            "manifest_generator": _manifest_generator_ok(manifest["generator"]),
             "manifest_timestamp": _utc_timestamp_ok(manifest["created_at"]),
             "sbom_generated": len(sbom["packages"]) == len(dependencies) + 1,
             "sbom_describes_root": _sbom_describes_root_package(sbom),
@@ -187,6 +190,9 @@ def run_release_smoke(
                 "dependency_count": len(manifest["dependencies"]),
                 "direct_dependencies_pinned": manifest["dependency_policy"]["direct_dependencies_pinned"],
                 "license_declared": manifest["package"]["license_declared"],
+                "manifest_generator": manifest["generator"]["name"],
+                "manifest_generator_version": manifest["generator"]["version"],
+                "manifest_schema": manifest["generator"]["schema"],
                 "path": str(manifest_output) if manifest_output is not None else None,
                 "sbom_component_count": len(sbom["packages"]),
                 "sbom_describes_count": len(sbom.get("documentDescribes", [])),
@@ -365,6 +371,7 @@ def _artifact_manifest(
     return {
         "schema_version": 1,
         "created_at": _utc_timestamp(),
+        "generator": _manifest_generator(),
         "package": {
             "name": "pageindex-enterprise-cleanroom",
             "version": VERSION,
@@ -446,7 +453,7 @@ def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
             f"{package['name']}-{package['version']}-{artifact['sha256']}"
         ),
         "creationInfo": {
-            "creators": ["Tool: pageindex-enterprise release_smoke.py"],
+            "creators": [f"Tool: {RELEASE_SMOKE_TOOL}"],
             "created": _utc_timestamp(),
         },
         "packages": packages,
@@ -464,6 +471,18 @@ def _utc_timestamp_ok(value: str) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _manifest_generator() -> dict[str, str]:
+    return {
+        "name": RELEASE_SMOKE_TOOL,
+        "schema": MANIFEST_SCHEMA_ID,
+        "version": VERSION,
+    }
+
+
+def _manifest_generator_ok(generator: dict[str, Any]) -> bool:
+    return generator == _manifest_generator()
 
 
 def _spdx_identifier(value: str) -> str:

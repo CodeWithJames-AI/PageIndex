@@ -119,6 +119,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- CI workflow: {_inline_code(ci_workflow)}",
             f"- Source clean: {_inline_code(checks.get('source_clean', 'not-required'))}",
             f"- Source clean required: {_inline_code(manifest.get('source_clean_required', 'unknown'))}",
+            f"- Source dirty: {_inline_code(manifest.get('source_dirty', 'unknown'))}",
             f"- Source dirty paths: {_inline_code(source_dirty_status)}",
             f"- Eval checks: {_inline_code(eval_count)} passed",
             f"- Deployment checks: {_inline_code(deployment_count)} passed",

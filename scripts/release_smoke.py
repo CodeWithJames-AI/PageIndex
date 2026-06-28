@@ -38,12 +38,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build and smoke-test the PageIndex enterprise wheel.")
     parser.add_argument("--repo-root", default=Path(__file__).resolve().parents[1])
     parser.add_argument("--manifest-output")
+    parser.add_argument("--report-output")
     parser.add_argument("--sbom-output")
     parser.add_argument("--require-clean-source", action="store_true")
     args = parser.parse_args()
     report = run_release_smoke(
         Path(args.repo_root),
         manifest_output=Path(args.manifest_output) if args.manifest_output else None,
+        report_output=Path(args.report_output) if args.report_output else None,
         sbom_output=Path(args.sbom_output) if args.sbom_output else None,
         require_clean_source=args.require_clean_source,
     )
@@ -57,6 +59,7 @@ def run_release_smoke(
     repo_root: Path,
     *,
     manifest_output: Path | None = None,
+    report_output: Path | None = None,
     sbom_output: Path | None = None,
     require_clean_source: bool = False,
 ) -> dict[str, Any]:
@@ -188,6 +191,10 @@ def run_release_smoke(
             checks["source_clean"] = manifest["source"]["dirty"] is False
         report = {
             "ok": _release_checks_ok(checks),
+            "report": {
+                "path": str(report_output.expanduser().resolve()) if report_output is not None else None,
+                "written": report_output is not None,
+            },
             "wheel": wheel.name,
             "manifest": {
                 "artifact_count": len(manifest["artifacts"]),
@@ -241,6 +248,10 @@ def run_release_smoke(
             report["manifest"]["secret_hygiene_finding_count"] = secret_hygiene["finding_count"]
             report["manifest"]["secret_hygiene_ok"] = False
             report["ok"] = _release_checks_ok(report["checks"])
+        if report_output is not None:
+            report_output = report_output.expanduser().resolve()
+            report_output.parent.mkdir(parents=True, exist_ok=True)
+            report_output.write_bytes(_json_document_bytes(report))
         return report
 
 

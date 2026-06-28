@@ -16914,6 +16914,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
             manifest_path = Path(tmp) / "release-manifest.json"
+            report_path = Path(tmp) / "release-report.json"
             sbom_path = Path(tmp) / "release-sbom.spdx.json"
             result = subprocess.run(
                 [
@@ -16923,6 +16924,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     str(repo_root),
                     "--manifest-output",
                     str(manifest_path),
+                    "--report-output",
+                    str(report_path),
                     "--sbom-output",
                     str(sbom_path),
                 ],
@@ -16933,11 +16936,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             report = json.loads(result.stdout)
             manifest_text = manifest_path.read_text(encoding="utf-8")
+            report_text = report_path.read_text(encoding="utf-8")
             sbom_text = sbom_path.read_text(encoding="utf-8")
             manifest = json.loads(manifest_text)
             sbom = json.loads(sbom_text)
 
+        self.assertEqual(report_text, result.stdout)
         self.assertEqual(report["ok"], True)
+        self.assertEqual(report["report"], {"path": str(report_path.resolve()), "written": True})
         self.assertEqual(report["wheel"], "pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl")
         self.assertEqual(report["checks"]["wheel_built"], True)
         self.assertEqual(report["checks"]["console_script"], True)
@@ -16965,7 +16971,9 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("pit_", result.stdout)
         self.assertNotIn("sk-", result.stdout)
         self.assertNotIn("pit_", manifest_text)
+        self.assertNotIn("pit_", report_text)
         self.assertNotIn("sk-", sbom_text)
+        self.assertNotIn("sk-", report_text)
         self.assertEqual(Path(report["manifest"]["path"]).resolve(), manifest_path.resolve())
         self.assertEqual(report["manifest"]["artifact_count"], 1)
         self.assertEqual(report["manifest"]["artifact_media_type"], "application/zip")

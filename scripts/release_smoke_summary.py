@@ -59,6 +59,8 @@ def render_release_smoke_summary(report_path: Path) -> str:
         [
             f"- Result: {_inline_code('pass' if report.get('ok') is True else 'fail')}",
             f"- Wheel: {_inline_code(report.get('wheel', 'unknown'))}",
+            f"- Wheel SHA-256: {_inline_code(manifest.get('wheel_sha256', 'unknown'))}",
+            f"- Wheel size bytes: {_inline_code(manifest.get('wheel_size_bytes', 'unknown'))}",
             f"- Source: {_inline_code(source)}",
             f"- CI context: {_inline_code(ci_context)}",
             f"- CI run: {_inline_code(ci_run)}",

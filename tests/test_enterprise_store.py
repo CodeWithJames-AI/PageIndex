@@ -17444,6 +17444,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "ci_run_url": "https://github.com/CodeWithJames-AI/PageIndex/actions/runs/12345",
                 "source_branch": "codex/enterprise-cleanroom",
                 "source_commit": "abc123",
+                "wheel_sha256": "wheelhash",
+                "wheel_size_bytes": 165251,
                 "manifest_payload_matches_output": True,
                 "manifest_written": True,
                 "manifest_sha256": "manifesthash",
@@ -17463,6 +17465,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("## Release smoke", summary)
         self.assertIn("- Result: `pass`", summary)
         self.assertIn("- Wheel: `pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl`", summary)
+        self.assertIn("- Wheel SHA-256: `wheelhash`", summary)
+        self.assertIn("- Wheel size bytes: `165251`", summary)
         self.assertIn("- Source: `codex/enterprise-cleanroom@abc123`", summary)
         self.assertIn("- CI context: `github-actions:CodeWithJames-AI/PageIndex@codex/enterprise-cleanroom`", summary)
         self.assertIn(
@@ -17515,6 +17519,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("- Result: `fail`", summary)
         self.assertIn("- Source: `detached@abc123`", summary)
+        self.assertIn("- Wheel SHA-256: `unknown`", summary)
+        self.assertIn("- Wheel size bytes: `unknown`", summary)
         self.assertIn("- CI context: `local`", summary)
         self.assertIn("- CI run: `not-applicable`", summary)
         self.assertIn("- Eval checks: `?/?` passed", summary)
@@ -17559,6 +17565,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "ci_run_url": "https://example.invalid/run`one\nnext",
                 "source_branch": "branch`name\nnext",
                 "source_commit": "abc`123",
+                "wheel_sha256": "wheel`hash",
+                "wheel_size_bytes": "123`456\n789",
                 "manifest_sha256": "hash`one",
             },
         }
@@ -17569,11 +17577,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             summary = render_release_smoke_summary(report_path)
 
         self.assertIn("- Wheel: `` wheel`name x.whl ``", summary)
+        self.assertIn("- Wheel SHA-256: `` wheel`hash ``", summary)
+        self.assertIn("- Wheel size bytes: `` 123`456 789 ``", summary)
         self.assertIn("- Source: `` branch`name next@abc`123 ``", summary)
         self.assertIn("- CI context: `` github`actions:repo`name next@ref`name next ``", summary)
         self.assertIn("- CI run: `` https://example.invalid/run`one next attempt=attempt`1 ``", summary)
         self.assertIn("- Manifest SHA-256: `` hash`one ``", summary)
         self.assertNotIn("wheel`name\nx.whl", summary)
+        self.assertNotIn("123`456\n789", summary)
         self.assertNotIn("branch`name\nnext", summary)
         self.assertNotIn("https://example.invalid/run`one\nnext", summary)
 

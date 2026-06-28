@@ -564,6 +564,7 @@ def main() -> None:
     deployment_check.add_argument("--require-provider-api-key", action="store_true")
     deployment_check.add_argument("--require-audit-sink", action="store_true")
     deployment_check.add_argument("--require-audit-sink-format", choices=["jsonl", "siem-jsonl"])
+    deployment_check.add_argument("--require-no-upload-orphans", action="store_true")
     deployment_check.add_argument("--fail-on-unready", action="store_true")
 
     args = parser.parse_args()
@@ -588,6 +589,7 @@ def main() -> None:
             require_provider_api_key=args.require_provider_api_key,
             require_audit_sink=args.require_audit_sink,
             require_audit_sink_format=args.require_audit_sink_format,
+            require_no_upload_orphans=args.require_no_upload_orphans,
         )
         print(json.dumps(report, indent=2))
         if args.fail_on_unready and not report.get("ok"):

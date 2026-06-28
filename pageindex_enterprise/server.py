@@ -2076,6 +2076,7 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 require_provider_api_key=_bool_param(params, "require_provider_api_key", False),
                 require_audit_sink=_bool_param(params, "require_audit_sink", False),
                 require_audit_sink_format=_str_param(params, "require_audit_sink_format"),
+                require_no_upload_orphans=_bool_param(params, "require_no_upload_orphans", False),
             )
         )
 

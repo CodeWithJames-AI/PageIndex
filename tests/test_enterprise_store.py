@@ -16068,7 +16068,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("readinessCheckProviderInput", body)
                     self.assertIn("readinessRequireProviderKeyInput", body)
                     self.assertIn("readinessRequireAuditSinkInput", body)
+                    self.assertIn("readinessRequireNoUploadOrphansInput", body)
                     self.assertIn("readinessAuditSinkFormatInput", body)
+                    self.assertIn("require_no_upload_orphans", body)
                     self.assertIn("require_audit_sink_format", body)
                     self.assertIn("readinessSummary", body)
                     self.assertIn("readinessReportText", body)
@@ -17178,6 +17180,70 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(ready_format_report["checks"]["audit_sink_delivery"]["required_format"], "siem-jsonl")
             self.assertEqual(ready_format_report["checks"]["audit_sink_delivery"]["matching_format_count"], 1)
 
+    def test_deployment_check_can_require_no_managed_upload_orphans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "deployment-root"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Production")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.create_api_token(workspace_id, "alice", name="deploy", scopes=["read", "write", "audit"])
+            upload_dir = store.root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            orphan_path = upload_dir / "deploy-orphan.txt"
+            orphan_bytes = b"orphaned upload bytes"
+            orphan_path.write_bytes(orphan_bytes)
+            store.close()
+
+            optional_report = run_deployment_check(root, require_api_token=True)
+            required_report = run_deployment_check(
+                root,
+                require_api_token=True,
+                require_no_upload_orphans=True,
+            )
+            serialized_storage = json.dumps(
+                required_report["checks"]["managed_upload_storage"],
+                sort_keys=True,
+            )
+
+            store = EnterpriseStore(root)
+            try:
+                purged = store.get_managed_upload_orphan_report(workspace_id, "alice", purge=True)
+            finally:
+                store.close()
+            clean_report = run_deployment_check(
+                root,
+                require_api_token=True,
+                require_no_upload_orphans=True,
+            )
+
+            self.assertEqual(optional_report["ok"], True, optional_report)
+            self.assertEqual(optional_report["checks"]["managed_upload_storage"]["ok"], True)
+            self.assertEqual(optional_report["checks"]["managed_upload_storage"]["required_no_orphans"], False)
+            self.assertEqual(optional_report["checks"]["managed_upload_storage"]["managed_upload_files"], 1)
+            self.assertEqual(
+                optional_report["checks"]["managed_upload_storage"]["orphan_managed_upload_bytes"],
+                len(orphan_bytes),
+            )
+            self.assertEqual(required_report["ok"], False)
+            self.assertEqual(required_report["checks"]["managed_upload_storage"]["ok"], False)
+            self.assertEqual(required_report["checks"]["managed_upload_storage"]["required_no_orphans"], True)
+            self.assertEqual(required_report["checks"]["managed_upload_storage"]["orphan_workspace_count"], 1)
+            self.assertEqual(
+                required_report["checks"]["managed_upload_storage"]["failing_workspaces"][0],
+                {
+                    "workspace_id": workspace_id,
+                    "reason": "orphaned_managed_uploads",
+                    "orphan_managed_upload_files": 1,
+                    "orphan_managed_upload_bytes": len(orphan_bytes),
+                },
+            )
+            self.assertNotIn("deploy-orphan.txt", serialized_storage)
+            self.assertNotIn("relative_path", serialized_storage)
+            self.assertNotIn("source_path", serialized_storage)
+            self.assertEqual(purged["purged"], 1)
+            self.assertEqual(clean_report["ok"], True, clean_report)
+            self.assertEqual(clean_report["checks"]["managed_upload_storage"]["orphan_managed_upload_files"], 0)
+
     def test_deployment_check_reports_unhealthy_audit_sink_delivery(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "deployment-root"
@@ -17292,6 +17358,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             store.conn.commit()
             member_token = member_token_record["token"]
+            upload_dir = root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            (upload_dir / "http-orphan.txt").write_text("orphan", encoding="utf-8")
             store.close()
             strict_server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
             local_server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=False)
@@ -17311,6 +17380,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                     f"{strict_base}/deployment-check?require_audit_sink=maybe",
                     headers=full_headers,
                 )
+                bad_upload_orphan_bool = _get_error(
+                    f"{strict_base}/deployment-check?require_no_upload_orphans=maybe",
+                    headers=full_headers,
+                )
                 bad_audit_sink_format = _get_error(
                     f"{strict_base}/deployment-check?require_audit_sink_format=xml",
                     headers=full_headers,
@@ -17322,6 +17395,10 @@ class EnterpriseStoreTest(unittest.TestCase):
                 )
                 required_sink_format_report = _get_json(
                     f"{strict_base}/deployment-check?require_audit_sink_format=siem-jsonl",
+                    headers=full_headers,
+                )
+                required_upload_orphan_report = _get_json(
+                    f"{strict_base}/deployment-check?require_no_upload_orphans=1",
                     headers=full_headers,
                 )
                 local_report = _get_json(f"{local_base}/deployment-check", headers=full_headers)
@@ -17339,18 +17416,27 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(member_blocked["error"], "api token scope denied")
             self.assertEqual(bad_bool["error"], "check_provider must be boolean")
             self.assertEqual(bad_audit_sink_bool["error"], "require_audit_sink must be boolean")
+            self.assertEqual(bad_upload_orphan_bool["error"], "require_no_upload_orphans must be boolean")
             self.assertEqual(bad_audit_sink_format["error"], "require_audit_sink_format must be jsonl or siem-jsonl")
             self.assertEqual(strict_report["ok"], True, strict_report)
             self.assertEqual(strict_report["checks"]["strict_http"]["ok"], True)
             self.assertEqual(strict_report["checks"]["audit_integrity"]["ok"], True)
             self.assertEqual(strict_report["checks"]["audit_sink_delivery"]["ok"], True)
             self.assertEqual(strict_report["checks"]["audit_sink_delivery"]["skipped"], True)
+            self.assertEqual(strict_report["checks"]["managed_upload_storage"]["ok"], True)
+            self.assertEqual(strict_report["checks"]["managed_upload_storage"]["orphan_managed_upload_files"], 1)
             self.assertEqual(required_sink_report["ok"], False)
             self.assertEqual(required_sink_report["checks"]["audit_sink_delivery"]["required"], True)
             self.assertEqual(required_sink_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]["reason"], "not_configured")
             self.assertEqual(required_sink_format_report["ok"], False)
             self.assertEqual(required_sink_format_report["checks"]["audit_sink_delivery"]["required_format"], "siem-jsonl")
             self.assertEqual(required_sink_format_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]["reason"], "not_configured")
+            self.assertEqual(required_upload_orphan_report["ok"], False)
+            self.assertEqual(required_upload_orphan_report["checks"]["managed_upload_storage"]["required_no_orphans"], True)
+            self.assertEqual(
+                required_upload_orphan_report["checks"]["managed_upload_storage"]["failing_workspaces"][0]["reason"],
+                "orphaned_managed_uploads",
+            )
             self.assertEqual(local_report["ok"], False)
             self.assertEqual(local_report["checks"]["strict_http"]["ok"], False)
             self.assertNotIn("pit_", serialized)
@@ -17364,6 +17450,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             workspace_id = store.create_workspace("Production")
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.create_api_token(workspace_id, "alice", name="deploy", scopes=["read", "write", "audit"])
+            upload_dir = root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            (upload_dir / "cli-orphan.txt").write_text("orphan", encoding="utf-8")
             store.close()
             env = os.environ.copy()
             env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
@@ -17418,6 +17507,23 @@ class EnterpriseStoreTest(unittest.TestCase):
                 check=True,
                 env=env,
             )
+            required_upload_orphans_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pageindex_enterprise",
+                    "--root",
+                    str(root),
+                    "deployment-check",
+                    "--require-api-token",
+                    "--require-no-upload-orphans",
+                ],
+                cwd=Path(tmp),
+                text=True,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
             fail_unready_result = subprocess.run(
                 [
                     sys.executable,
@@ -17455,17 +17561,24 @@ class EnterpriseStoreTest(unittest.TestCase):
             report = json.loads(result.stdout)
             required_sink_report = json.loads(required_sink_result.stdout)
             required_sink_format_report = json.loads(required_sink_format_result.stdout)
+            required_upload_orphans_report = json.loads(required_upload_orphans_result.stdout)
             fail_unready_report = json.loads(fail_unready_result.stdout)
             fail_ready_report = json.loads(fail_ready_result.stdout)
             self.assertEqual(report["ok"], True, report)
             self.assertEqual(report["checks"]["strict_http"]["ok"], True)
             self.assertEqual(report["checks"]["provider_config"]["skipped"], True)
+            self.assertEqual(report["checks"]["managed_upload_storage"]["orphan_managed_upload_files"], 1)
             self.assertEqual(required_sink_report["ok"], False)
             self.assertEqual(required_sink_report["checks"]["audit_sink_delivery"]["required"], True)
             self.assertEqual(required_sink_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]["reason"], "not_configured")
             self.assertEqual(required_sink_format_report["ok"], False)
             self.assertEqual(required_sink_format_report["checks"]["audit_sink_delivery"]["required_format"], "siem-jsonl")
             self.assertEqual(required_sink_format_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]["reason"], "not_configured")
+            self.assertEqual(required_upload_orphans_report["ok"], False)
+            self.assertEqual(
+                required_upload_orphans_report["checks"]["managed_upload_storage"]["failing_workspaces"][0]["reason"],
+                "orphaned_managed_uploads",
+            )
             self.assertEqual(fail_unready_result.returncode, 1, fail_unready_result.stderr)
             self.assertEqual(fail_unready_report["ok"], False)
             self.assertEqual(fail_unready_report["checks"]["audit_sink_delivery"]["failing_workspaces"][0]["reason"], "not_configured")

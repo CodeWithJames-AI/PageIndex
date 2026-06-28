@@ -61,6 +61,7 @@ def run_deployment_check(
     require_provider_api_key: bool = False,
     require_audit_sink: bool = False,
     require_audit_sink_format: str | None = None,
+    require_no_upload_orphans: bool = False,
 ) -> dict[str, Any]:
     root_path = Path(root).expanduser().resolve()
     required_audit_sink_format = _normalize_required_audit_sink_format(require_audit_sink_format)
@@ -83,6 +84,10 @@ def run_deployment_check(
                 "audit_sink_delivery": _unavailable_audit_sink_delivery_check(
                     require_audit_sink,
                     required_format=required_audit_sink_format,
+                    reason="store was not opened because root is not writable",
+                ),
+                "managed_upload_storage": _unavailable_managed_upload_storage_check(
+                    require_no_upload_orphans,
                     reason="store was not opened because root is not writable",
                 ),
                 "strict_http": _strict_http_check(require_api_token),
@@ -110,6 +115,10 @@ def run_deployment_check(
                     required_format=required_audit_sink_format,
                     reason="store was not opened",
                 ),
+                "managed_upload_storage": _unavailable_managed_upload_storage_check(
+                    require_no_upload_orphans,
+                    reason="store was not opened",
+                ),
                 "strict_http": _strict_http_check(require_api_token),
                 "active_api_token": _unavailable_active_api_token_check(reason="store was not opened"),
                 "provider_config": _provider_config_check(
@@ -128,6 +137,10 @@ def run_deployment_check(
                 store,
                 require_audit_sink=require_audit_sink,
                 required_format=required_audit_sink_format,
+            ),
+            "managed_upload_storage": _managed_upload_storage_check(
+                store,
+                require_no_upload_orphans=require_no_upload_orphans,
             ),
             "strict_http": _strict_http_check(require_api_token),
             "active_api_token": _active_api_token_check(store),
@@ -505,6 +518,108 @@ def _latest_audit_event_summary(store: EnterpriseStore, workspace_id: str) -> di
         (workspace_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def _empty_managed_upload_storage_details(*, required_no_orphans: bool) -> dict[str, Any]:
+    return {
+        "required_no_orphans": required_no_orphans,
+        "workspace_count": 0,
+        "managed_upload_files": 0,
+        "managed_upload_bytes": 0,
+        "referenced_managed_upload_files": 0,
+        "referenced_managed_upload_bytes": 0,
+        "orphan_managed_upload_files": 0,
+        "orphan_managed_upload_bytes": 0,
+        "orphan_workspace_count": 0,
+        "inventory_error_count": 0,
+        "failing_workspaces": [],
+    }
+
+
+def _unavailable_managed_upload_storage_check(
+    require_no_upload_orphans: bool,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    return _check(
+        not require_no_upload_orphans,
+        **_empty_managed_upload_storage_details(required_no_orphans=require_no_upload_orphans),
+        skipped=not require_no_upload_orphans,
+        reason=reason,
+    )
+
+
+def _managed_upload_storage_check(
+    store: EnterpriseStore,
+    *,
+    require_no_upload_orphans: bool = False,
+) -> dict[str, Any]:
+    workspace_ids = [row["id"] for row in store.conn.execute("SELECT id FROM workspaces ORDER BY id")]
+    if not workspace_ids:
+        return _check(
+            True,
+            **_empty_managed_upload_storage_details(required_no_orphans=require_no_upload_orphans),
+            skipped=True,
+            reason="no workspaces",
+        )
+
+    totals = _empty_managed_upload_storage_details(required_no_orphans=require_no_upload_orphans)
+    totals["workspace_count"] = len(workspace_ids)
+    failures: list[dict[str, Any]] = []
+    orphan_workspace_count = 0
+    inventory_error_count = 0
+    for workspace_id in workspace_ids:
+        try:
+            summary = store._managed_upload_storage_summary(workspace_id)
+        except ValueError as exc:
+            inventory_error_count += 1
+            failures.append(
+                {
+                    "workspace_id": workspace_id,
+                    "reason": "inventory_error",
+                    "error": str(exc),
+                }
+            )
+            continue
+        except OSError:
+            inventory_error_count += 1
+            failures.append(
+                {
+                    "workspace_id": workspace_id,
+                    "reason": "inventory_error",
+                    "error": "workspace upload inventory failed",
+                }
+            )
+            continue
+
+        for key in (
+            "managed_upload_files",
+            "managed_upload_bytes",
+            "referenced_managed_upload_files",
+            "referenced_managed_upload_bytes",
+            "orphan_managed_upload_files",
+            "orphan_managed_upload_bytes",
+        ):
+            totals[key] += int(summary.get(key, 0))
+        orphan_files = int(summary.get("orphan_managed_upload_files", 0))
+        if orphan_files:
+            orphan_workspace_count += 1
+            if require_no_upload_orphans:
+                failures.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "reason": "orphaned_managed_uploads",
+                        "orphan_managed_upload_files": orphan_files,
+                        "orphan_managed_upload_bytes": int(
+                            summary.get("orphan_managed_upload_bytes", 0)
+                        ),
+                    }
+                )
+
+    totals["orphan_workspace_count"] = orphan_workspace_count
+    totals["inventory_error_count"] = inventory_error_count
+    totals["failing_workspaces"] = failures[:10]
+    return _check(not failures, **totals)
 
 
 def _admin_actor_by_workspace(store: EnterpriseStore) -> dict[str, str]:

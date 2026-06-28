@@ -17203,6 +17203,93 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(_release_checks_ok(bad_build_environment), False)
         self.assertEqual(_release_checks_ok(bad_source_clean), False)
 
+    def test_release_smoke_snapshots_source_before_build(self):
+        from unittest import mock
+
+        import scripts.release_smoke as release_smoke
+
+        events = []
+        source_metadata = {
+            "branch": "main",
+            "commit": "abc123",
+            "dirty": False,
+            "dirty_count": 0,
+            "dirty_paths": [],
+            "dirty_paths_truncated": False,
+            "remote": "https://example.invalid/repo.git",
+            "upstream": "origin/main",
+        }
+
+        def fake_source_metadata(repo_root):
+            events.append("source")
+            return source_metadata
+
+        def fake_run(command, *, cwd, env=None):
+            if "-m" in command and "pip" in command and "wheel" in command:
+                events.append("build")
+            if "-m" in command and "pip" in command and "install" in command:
+                target = Path(command[command.index("--target") + 1])
+                console = target / "bin" / "pageindex-enterprise"
+                console.parent.mkdir(parents=True, exist_ok=True)
+                console.write_text("#!/usr/bin/env python\n", encoding="utf-8")
+            if "--help" in command:
+                return subprocess.CompletedProcess(command, 0, stdout="usage: pageindex-enterprise eval", stderr="")
+            if "eval" in command:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps({"ok": True, "summary": {"failed": 0, "passed": 1, "total": 1}}),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            wheel = repo_root / "pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl"
+            wheel.write_bytes(b"wheel")
+            with (
+                mock.patch.object(release_smoke, "_source_metadata", side_effect=fake_source_metadata),
+                mock.patch.object(release_smoke, "_run", side_effect=fake_run),
+                mock.patch.object(release_smoke, "_single_wheel", return_value=wheel),
+                mock.patch.object(release_smoke, "_inspect_wheel", return_value=None),
+                mock.patch.object(
+                    release_smoke,
+                    "_wheel_package_metadata",
+                    return_value={"license_declared": "MIT", "summary": "test package"},
+                ),
+                mock.patch.object(
+                    release_smoke,
+                    "_wheel_dependencies",
+                    return_value=[
+                        {"name": "pyyaml", "pinned": True, "requirement": "pyyaml==6.0.2", "specifier": "==6.0.2"}
+                    ],
+                ),
+                mock.patch.object(release_smoke, "_wheel_record_integrity", return_value={"ok": True}),
+                mock.patch.object(release_smoke, "_wheel_content_policy", return_value={"ok": True}),
+                mock.patch.object(
+                    release_smoke,
+                    "_build_environment",
+                    return_value={
+                        "architecture": "x86_64",
+                        "platform": "Linux",
+                        "python_executable": "python",
+                        "python_implementation": "CPython",
+                        "python_version": "3.11.15",
+                        "system": "Linux",
+                    },
+                ),
+                mock.patch.object(
+                    release_smoke,
+                    "_run_packaged_deployment_check",
+                    return_value={"ok": True, "summary": {"failed": 0, "passed": 1, "total": 1}},
+                ),
+            ):
+                report = release_smoke.run_release_smoke(repo_root, require_clean_source=True)
+
+        self.assertLess(events.index("source"), events.index("build"))
+        self.assertEqual(report["checks"]["source_clean"], True)
+        self.assertEqual(report["manifest"]["source_dirty"], False)
+
     def test_release_smoke_secret_hygiene_detects_secret_shaped_output(self):
         from scripts.release_smoke import _merge_secret_hygiene, _release_secret_hygiene
 

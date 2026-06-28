@@ -64,6 +64,7 @@ def run_release_smoke(
     require_clean_source: bool = False,
 ) -> dict[str, Any]:
     repo_root = repo_root.expanduser().resolve()
+    source_metadata = _source_metadata(repo_root)
     with tempfile.TemporaryDirectory(prefix="pageindex-release-smoke-") as tmp:
         tmp_path = Path(tmp)
         wheel_dir = tmp_path / "wheels"
@@ -132,7 +133,7 @@ def run_release_smoke(
             wheel,
             package_metadata=package_metadata,
             build_environment=_build_environment(),
-            source=_source_metadata(repo_root),
+            source=source_metadata,
             dependencies=dependencies,
             dependency_policy=dependency_policy,
             wheel_record=wheel_record,

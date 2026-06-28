@@ -17055,7 +17055,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(_release_checks_ok(bad_source_clean), False)
 
     def test_release_smoke_secret_hygiene_detects_secret_shaped_output(self):
-        from scripts.release_smoke import _release_secret_hygiene
+        from scripts.release_smoke import _merge_secret_hygiene, _release_secret_hygiene
 
         safe = _release_secret_hygiene({"report": '{"ok": true}'})
         leaked = _release_secret_hygiene(
@@ -17075,6 +17075,16 @@ class EnterpriseStoreTest(unittest.TestCase):
                 {"output": "stderr", "kind": "provider_api_key"},
             ],
         )
+        report_leak = _release_secret_hygiene(
+            {"release_report": '{"future_field": "pss_abcdefghijklmnopqrstuvwxyz1234567890"}'}
+        )
+        merged = _merge_secret_hygiene(safe, leaked, report_leak)
+
+        self.assertEqual(report_leak["ok"], False)
+        self.assertEqual(report_leak["findings"], [{"output": "release_report", "kind": "source_set_share_token"}])
+        self.assertEqual(merged["ok"], False)
+        self.assertEqual(merged["finding_count"], 3)
+        self.assertEqual(merged["findings"][-1], {"output": "release_report", "kind": "source_set_share_token"})
 
     def test_release_smoke_exit_code_follows_report_ok(self):
         from scripts.release_smoke import _release_smoke_exit_code

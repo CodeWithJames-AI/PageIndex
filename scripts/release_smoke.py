@@ -164,7 +164,7 @@ def run_release_smoke(
         }
         if require_clean_source:
             checks["source_clean"] = manifest["source"]["dirty"] is False
-        return {
+        report = {
             "ok": _release_checks_ok(checks),
             "wheel": wheel.name,
             "manifest": {
@@ -190,6 +190,14 @@ def run_release_smoke(
             },
             "checks": checks,
         }
+        report_secret_hygiene = _release_secret_hygiene({"release_report": json.dumps(report, sort_keys=True)})
+        if not report_secret_hygiene["ok"]:
+            secret_hygiene = _merge_secret_hygiene(secret_hygiene, report_secret_hygiene)
+            report["checks"]["secret_hygiene"] = False
+            report["manifest"]["secret_hygiene_finding_count"] = secret_hygiene["finding_count"]
+            report["manifest"]["secret_hygiene_ok"] = False
+            report["ok"] = _release_checks_ok(report["checks"])
+        return report
 
 
 def _release_smoke_exit_code(report: dict[str, Any]) -> int:
@@ -290,6 +298,15 @@ def _release_secret_hygiene(outputs: dict[str, str]) -> dict[str, Any]:
         for kind, pattern in SECRET_SHAPED_PATTERNS.items():
             if pattern.search(text):
                 findings.append({"output": output_name, "kind": kind})
+    return {
+        "ok": not findings,
+        "finding_count": len(findings),
+        "findings": findings,
+    }
+
+
+def _merge_secret_hygiene(*reports: dict[str, Any]) -> dict[str, Any]:
+    findings = [finding for report in reports for finding in report.get("findings", [])]
     return {
         "ok": not findings,
         "finding_count": len(findings),

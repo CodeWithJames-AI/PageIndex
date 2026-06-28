@@ -92,6 +92,10 @@ def render_release_smoke_summary(report_path: Path) -> str:
         f"python={manifest.get('build_python_version', 'unknown')}, "
         f"platform={manifest.get('build_platform', 'unknown')}"
     )
+    build_gates = (
+        f"environment={checks.get('build_environment', 'unknown')}, "
+        f"package_license={checks.get('package_license', 'unknown')}"
+    )
     package_license = (
         f"declared={manifest.get('license_declared', 'unknown')}, "
         f"check={checks.get('package_license', 'unknown')}"
@@ -154,6 +158,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Dependencies: {_inline_code(dependency_status)}",
             f"- Dependency gates: {_inline_code(dependency_gates)}",
             f"- Build environment: {_inline_code(build_environment)}",
+            f"- Build gates: {_inline_code(build_gates)}",
             f"- Package license: {_inline_code(package_license)}",
             f"- Secret hygiene: {_inline_code(checks.get('secret_hygiene'))}",
             f"- Secret hygiene findings: {_inline_code(manifest.get('secret_hygiene_finding_count', 'unknown'))}",

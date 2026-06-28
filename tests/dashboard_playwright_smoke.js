@@ -640,7 +640,34 @@ async function waitForAnyText(page, selector, expectedValues) {
     assert(readinessReport.ok === true, "deployment readiness report was not ready");
     assert(readinessReport.checks?.strict_http?.ok === true, "deployment readiness did not prove strict HTTP");
     assert(readinessReport.checks?.audit_sink_delivery?.ok === true, "deployment readiness did not include audit sink delivery");
+    const readinessTokenDiagnostics = readinessReport.checks?.active_api_token || {};
+    const tokenDiagnosticFields = [
+      "token_count",
+      "active_token_count",
+      "expired_token_count",
+      "invalid_scope_count",
+      "inaccessible_token_count",
+      "no_effective_scope_count"
+    ];
+    for (const field of tokenDiagnosticFields) {
+      assert(
+        Number.isInteger(readinessTokenDiagnostics[field]) && readinessTokenDiagnostics[field] >= 0,
+        `deployment readiness missing token diagnostic ${field}`
+      );
+    }
+    assert(readinessTokenDiagnostics.active_token_count >= 1, "deployment readiness did not count active token");
+    assert(
+      readinessTokenDiagnostics.token_count === (
+        readinessTokenDiagnostics.active_token_count
+        + readinessTokenDiagnostics.expired_token_count
+        + readinessTokenDiagnostics.invalid_scope_count
+        + readinessTokenDiagnostics.inaccessible_token_count
+        + readinessTokenDiagnostics.no_effective_scope_count
+      ),
+      "deployment readiness token diagnostics did not sum to token count"
+    );
     assert(!JSON.stringify(readinessReport).includes("pit_"), "deployment readiness leaked token secret");
+    assert(!JSON.stringify(readinessReport).includes("token_hash"), "deployment readiness leaked token hash");
 
     await waitForText(page, "#providerConfigSummary", "Provider not configured.");
 
@@ -955,6 +982,7 @@ async function waitForAnyText(page, selector, expectedValues) {
       retentionExercised: true,
       auditSinkExercised: true,
       readinessExercised: true,
+      readinessDiagnosticsExercised: true,
       providerExercised: true,
       queryHistoryExercised: true,
       sourceSetExercised: true,

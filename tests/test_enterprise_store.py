@@ -16870,6 +16870,20 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(report["ok"], False)
             self.assertEqual(report["checks"]["root_writable"]["ok"], False)
             self.assertEqual(report["checks"]["schema"]["ok"], False)
+            self.assertEqual(
+                report["checks"]["active_api_token"],
+                {
+                    "ok": False,
+                    "token_count": 0,
+                    "active_token_count": 0,
+                    "expired_token_count": 0,
+                    "invalid_scope_count": 0,
+                    "inaccessible_token_count": 0,
+                    "no_effective_scope_count": 0,
+                    "skipped": True,
+                    "reason": "store was not opened because root is not writable",
+                },
+            )
             self.assertNotIn("Traceback", result.stderr)
 
 def _get_json(url: str, status: int = 200, headers=None):

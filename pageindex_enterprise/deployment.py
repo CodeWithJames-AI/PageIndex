@@ -79,7 +79,9 @@ def run_deployment_check(
                     reason="store was not opened because root is not writable",
                 ),
                 "strict_http": _strict_http_check(require_api_token),
-                "active_api_token": _check(False, active_token_count=0, skipped=True),
+                "active_api_token": _unavailable_active_api_token_check(
+                    reason="store was not opened because root is not writable"
+                ),
                 "provider_config": _provider_config_check(
                     check_provider=check_provider,
                     require_provider_api_key=require_provider_api_key,
@@ -102,7 +104,7 @@ def run_deployment_check(
                     reason="store was not opened",
                 ),
                 "strict_http": _strict_http_check(require_api_token),
-                "active_api_token": _check(False, active_token_count=0, skipped=True),
+                "active_api_token": _unavailable_active_api_token_check(reason="store was not opened"),
                 "provider_config": _provider_config_check(
                     check_provider=check_provider,
                     require_provider_api_key=require_provider_api_key,
@@ -491,6 +493,20 @@ def _strict_http_check(require_api_token: bool) -> dict[str, Any]:
             if require_api_token
             else "production deployments should run serve --require-api-token"
         ),
+    )
+
+
+def _unavailable_active_api_token_check(*, reason: str) -> dict[str, Any]:
+    return _check(
+        False,
+        token_count=0,
+        active_token_count=0,
+        expired_token_count=0,
+        invalid_scope_count=0,
+        inaccessible_token_count=0,
+        no_effective_scope_count=0,
+        skipped=True,
+        reason=reason,
     )
 
 

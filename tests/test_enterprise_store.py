@@ -17420,6 +17420,17 @@ class EnterpriseStoreTest(unittest.TestCase):
             "## Release smoke\n\nRelease smoke report could not be parsed: `Expecting property name enclosed in double quotes`.\n",
         )
 
+    def test_release_smoke_summary_handles_non_object_report(self):
+        from scripts.release_smoke_summary import render_release_smoke_summary
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "release-report.json"
+            report_path.write_text("[]", encoding="utf-8")
+
+            summary = render_release_smoke_summary(report_path)
+
+        self.assertEqual(summary, "## Release smoke\n\nRelease smoke report was not a JSON object.\n")
+
     def test_release_smoke_exit_code_follows_report_ok(self):
         from scripts.release_smoke import _release_smoke_exit_code
 

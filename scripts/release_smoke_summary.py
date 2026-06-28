@@ -33,6 +33,9 @@ def render_release_smoke_summary(report_path: Path) -> str:
     except json.JSONDecodeError as exc:
         lines.extend([f"Release smoke report could not be parsed: `{exc.msg}`.", ""])
         return "\n".join(lines)
+    if not isinstance(report, dict):
+        lines.extend(["Release smoke report was not a JSON object.", ""])
+        return "\n".join(lines)
     checks = _mapping(report.get("checks"))
     eval_checks = _mapping(checks.get("eval_checks"))
     deployment_checks = _mapping(checks.get("deployment_checks"))

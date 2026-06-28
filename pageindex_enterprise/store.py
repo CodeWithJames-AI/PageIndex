@@ -2099,14 +2099,27 @@ class EnterpriseStore:
             """,
             (workspace_id, workspace_id),
         ).fetchone()
-        api_token_expirations = [
-            row["expires_at"]
-            for row in self.conn.execute(
-                "SELECT expires_at FROM api_tokens WHERE workspace_id = ?",
+        api_token_rows = list(
+            self.conn.execute(
+                """
+                SELECT t.expires_at, t.scopes_json, m.role
+                FROM api_tokens t
+                LEFT JOIN workspace_members m
+                  ON m.workspace_id = t.workspace_id
+                 AND m.user_id = t.user_id
+                WHERE t.workspace_id = ?
+                """,
                 (workspace_id,),
             )
-        ]
+        )
+        api_token_expirations = [row["expires_at"] for row in api_token_rows]
         expired_api_tokens = sum(1 for expires_at in api_token_expirations if expires_at and _is_expired(expires_at))
+        active_api_tokens = sum(
+            1
+            for row in api_token_rows
+            if not _is_expired(row["expires_at"])
+            and _cap_api_token_scopes_to_role(_decode_api_token_scopes(row["scopes_json"]) or [], row["role"])
+        )
         return {
             "workspace_id": workspace_id,
             "documents": {
@@ -2196,7 +2209,7 @@ class EnterpriseStore:
                 ),
             },
             "api_tokens": {
-                "active": len(api_token_expirations) - expired_api_tokens,
+                "active": active_api_tokens,
                 "with_expiration": sum(1 for expires_at in api_token_expirations if expires_at),
                 "expired": expired_api_tokens,
             },
@@ -3652,7 +3665,7 @@ class EnterpriseStore:
             token = dict(row)
             stored_scopes = _decode_api_token_scopes(token.pop("scopes_json")) or []
             token["scopes"] = _cap_api_token_scopes_to_role(stored_scopes, token_owner_role)
-            token["active"] = not _is_expired(token.get("expires_at"))
+            token["active"] = bool(token["scopes"]) and not _is_expired(token.get("expires_at"))
             token.update(_rotation_metadata(token["created_at"], policy["rotation_due_in_days"]))
             tokens.append(token)
         return tokens

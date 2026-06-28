@@ -923,6 +923,12 @@ class EnterpriseStoreTest(unittest.TestCase):
                 name="stale usage",
                 expires_at=past,
             )
+            no_effective_token = store.create_api_token(workspace_id, "bob", name="no effective usage")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["audit"]), no_effective_token["id"]),
+            )
+            store.conn.commit()
             conversation = store.create_conversation(workspace_id, "alice", title="Usage chat")
             store.chat_message(conversation["id"], "alice", "usage analytics", limit=4)
 
@@ -6981,10 +6987,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
             write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
             member_token_record = store.create_api_token(workspace_id, "bob", name="member")
+            no_effective_token = store.create_api_token(workspace_id, "bob", name="no-effective")
             store.create_api_token(workspace_id, "alice", name="expired", expires_at=past)
             store.conn.execute(
                 "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
                 (json.dumps(["read", "write", "audit"]), member_token_record["id"]),
+            )
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["audit"]), no_effective_token["id"]),
             )
             store.conn.commit()
             member_token = member_token_record["token"]
@@ -9901,6 +9912,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             store.conn.commit()
             verified = store.verify_api_token(stale["token"])
+            listed = store.list_api_tokens(workspace_id, "vivi")
             direct_row = store.conn.execute(
                 "SELECT last_used_at FROM api_tokens WHERE id = ?",
                 (stale["id"],),
@@ -9926,6 +9938,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 reopened.close()
 
             self.assertIsNone(verified)
+            self.assertEqual(listed[0]["scopes"], [])
+            self.assertFalse(listed[0]["active"])
             self.assertIsNone(direct_row["last_used_at"])
             self.assertEqual(blocked["status"], 403)
             self.assertEqual(blocked["error"], "invalid api token")
@@ -15440,7 +15454,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("rotateApiToken", body)
                     self.assertIn("revokeApiToken", body)
                     self.assertIn("tokenStatus", body)
-                    self.assertIn('token.active === false ? "expired" : "active"', body)
+                    self.assertIn('token.active === false ? "inactive" : "active"', body)
                     self.assertIn("/api-token-policy", body)
                     self.assertIn("tokenPolicyDefaultExpirationInput", body)
                     self.assertIn("tokenPolicyRotationDueInput", body)

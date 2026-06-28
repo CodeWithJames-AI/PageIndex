@@ -2003,7 +2003,7 @@ DASHBOARD_HTML = """<!doctype html>
       tokenList.innerHTML = tokens.map((token) => {
         const scopes = Array.isArray(token.scopes) ? token.scopes.join(", ") : "";
         const expiry = token.expires_at || "no expiration";
-        const tokenStatus = token.active === false ? "expired" : "active";
+        const tokenStatus = token.active === false ? "inactive" : "active";
         const rotation = token.rotation_due_at ? ` | rotation ${token.rotation_due_at}` : "";
         return `
           <article class="token" data-token-name="${escapeHtml(token.name)}">

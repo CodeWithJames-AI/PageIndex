@@ -14070,6 +14070,39 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(http_dry_run["operations"][0]["source"], "reconcile")
             self.assertEqual(document_access_after_http_dry_run["grants"][0]["role"], "read")
 
+    def test_acl_bulk_reconcile_conflicts_fail_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "acl-conflict.txt"
+            source.write_text("ACL reconcile conflict evidence.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="ACL conflict memo")
+            store.grant_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice", user_id="bob", role="write")
+            policy = {
+                "document_grants": [{"doc_id": doc_id, "user_id": "bob", "role": "read"}],
+                "document_reconciles": [{"doc_id": doc_id, "grants": []}],
+            }
+
+            dry_run = store.apply_acl_bulk(workspace_id, "alice", policy)
+            applied = store.apply_acl_bulk(workspace_id, "alice", policy, dry_run=False)
+            document_access_after_apply = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            store.close()
+
+            self.assertTrue(dry_run["dry_run"])
+            self.assertEqual(dry_run["operation_count"], 2)
+            self.assertEqual(dry_run["applied"], 0)
+            self.assertEqual(dry_run["errors"][0]["error"], "conflicting ACL operations for target/principal")
+            self.assertEqual(dry_run["errors"][0]["target_id"], doc_id)
+            self.assertEqual(dry_run["errors"][0]["principal_id"], "bob")
+            self.assertFalse(applied["dry_run"])
+            self.assertEqual(applied["applied"], 0)
+            self.assertEqual(applied["errors"][0]["error"], "conflicting ACL operations for target/principal")
+            self.assertEqual(document_access_after_apply["grants"][0]["role"], "write")
+
     def test_http_workspace_group_routes_grant_document_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

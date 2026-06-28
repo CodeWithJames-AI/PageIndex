@@ -5671,12 +5671,41 @@ class EnterpriseStore:
                         }
                     )
 
+        def _check_operation_conflicts() -> None:
+            seen: dict[tuple[str, str, str, str], tuple[str, str | None, int]] = {}
+            for index, operation in enumerate(operations):
+                key = (
+                    operation["target_type"],
+                    operation["target_id"],
+                    operation["principal_type"],
+                    operation["principal_id"],
+                )
+                effect = (operation["action"], operation.get("role"))
+                previous = seen.get(key)
+                if previous is None:
+                    seen[key] = (effect[0], effect[1], index)
+                    continue
+                if previous[:2] != effect:
+                    errors.append(
+                        {
+                            "collection": "operations",
+                            "index": index,
+                            "previous_index": previous[2],
+                            "error": "conflicting ACL operations for target/principal",
+                            "target_type": operation["target_type"],
+                            "target_id": operation["target_id"],
+                            "principal_type": operation["principal_type"],
+                            "principal_id": operation["principal_id"],
+                        }
+                    )
+
         _validate_entries("document_grants", "doc_id", "document")
         _validate_entries("folder_grants", "folder_id", "folder")
         _validate_revoke_entries("document_revokes", "doc_id", "document")
         _validate_revoke_entries("folder_revokes", "folder_id", "folder")
         _validate_reconcile_entries("document_reconciles", "doc_id", "document")
         _validate_reconcile_entries("folder_reconciles", "folder_id", "folder")
+        _check_operation_conflicts()
         report = {
             "workspace_id": workspace_id,
             "dry_run": dry_run,

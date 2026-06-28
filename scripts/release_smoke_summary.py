@@ -45,6 +45,10 @@ def render_release_smoke_summary(report_path: Path) -> str:
     source = f"{manifest.get('source_branch') or 'detached'}@{manifest.get('source_commit') or 'unknown'}"
     ci_context = _ci_context(manifest)
     ci_run = _ci_run(manifest)
+    ci_workflow = (
+        f"name={manifest.get('ci_workflow') or 'unknown'}, "
+        f"sha={manifest.get('ci_sha') or 'unknown'}"
+    )
     eval_count = f"{eval_checks.get('passed', '?')}/{eval_checks.get('total', '?')}"
     deployment_count = f"{deployment_checks.get('passed', '?')}/{deployment_checks.get('total', '?')}"
     artifact_identity = (
@@ -104,6 +108,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Source upstream: {_inline_code(manifest.get('source_upstream') or 'unknown')}",
             f"- CI context: {_inline_code(ci_context)}",
             f"- CI run: {_inline_code(ci_run)}",
+            f"- CI workflow: {_inline_code(ci_workflow)}",
             f"- Source clean: {_inline_code(checks.get('source_clean', 'not-required'))}",
             f"- Source dirty paths: {_inline_code(source_dirty_status)}",
             f"- Eval checks: {_inline_code(eval_count)} passed",

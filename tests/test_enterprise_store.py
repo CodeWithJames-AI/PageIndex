@@ -17431,6 +17431,31 @@ class EnterpriseStoreTest(unittest.TestCase):
 
         self.assertEqual(summary, "## Release smoke\n\nRelease smoke report was not a JSON object.\n")
 
+    def test_release_smoke_summary_sanitizes_inline_markdown_values(self):
+        from scripts.release_smoke_summary import render_release_smoke_summary
+
+        report = {
+            "ok": True,
+            "wheel": "wheel`name\nx.whl",
+            "checks": {"source_clean": True, "secret_hygiene": True},
+            "manifest": {
+                "source_branch": "branch`name\nnext",
+                "source_commit": "abc`123",
+                "manifest_sha256": "hash`one",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "release-report.json"
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            summary = render_release_smoke_summary(report_path)
+
+        self.assertIn("- Wheel: `` wheel`name x.whl ``", summary)
+        self.assertIn("- Source: `` branch`name next@abc`123 ``", summary)
+        self.assertIn("- Manifest SHA-256: `` hash`one ``", summary)
+        self.assertNotIn("wheel`name\nx.whl", summary)
+        self.assertNotIn("branch`name\nnext", summary)
+
     def test_release_smoke_exit_code_follows_report_ok(self):
         from scripts.release_smoke import _release_smoke_exit_code
 

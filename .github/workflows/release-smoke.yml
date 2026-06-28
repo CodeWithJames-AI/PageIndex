@@ -44,6 +44,50 @@ jobs:
             --sbom-output "$PAGEINDEX_RELEASE_ARTIFACT_DIR/release-sbom.spdx.json" \
             --require-clean-source
 
+      - name: Summarize release smoke
+        if: always()
+        env:
+          PAGEINDEX_RELEASE_ARTIFACT_DIR: ${{ runner.temp }}/pageindex-release
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if not summary_path:
+              raise SystemExit(0)
+
+          artifact_dir = Path(os.environ["PAGEINDEX_RELEASE_ARTIFACT_DIR"])
+          report_path = artifact_dir / "release-report.json"
+          lines = ["## Release smoke", ""]
+          if not report_path.exists():
+              lines.extend(["Release smoke report was not generated.", ""])
+          else:
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+              checks = report.get("checks", {})
+              eval_checks = checks.get("eval_checks", {})
+              deployment_checks = checks.get("deployment_checks", {})
+              manifest = report.get("manifest", {})
+              lines.extend(
+                  [
+                      f"- Result: `{'pass' if report.get('ok') is True else 'fail'}`",
+                      f"- Wheel: `{report.get('wheel', 'unknown')}`",
+                      f"- Source: `{manifest.get('source_branch') or 'detached'}@{manifest.get('source_commit') or 'unknown'}`",
+                      f"- Source clean: `{checks.get('source_clean', 'not-required')}`",
+                      f"- Eval checks: `{eval_checks.get('passed', '?')}/{eval_checks.get('total', '?')}` passed",
+                      f"- Deployment checks: `{deployment_checks.get('passed', '?')}/{deployment_checks.get('total', '?')}` passed",
+                      f"- Secret hygiene: `{checks.get('secret_hygiene')}`",
+                      f"- Manifest SHA-256: `{manifest.get('manifest_sha256', 'unknown')}`",
+                      f"- SBOM SHA-256: `{manifest.get('sbom_sha256', 'unknown')}`",
+                      "",
+                  ]
+              )
+
+          with open(summary_path, "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines))
+          PY
+
       - name: Upload release smoke artifacts
         if: always()
         uses: actions/upload-artifact@v4

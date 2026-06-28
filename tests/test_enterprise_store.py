@@ -16943,6 +16943,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["console_script"], True)
         self.assertEqual(report["checks"]["manifest_generated"], True)
         self.assertEqual(report["checks"]["sbom_generated"], True)
+        self.assertEqual(report["checks"]["sbom_package_urls"], True)
         self.assertEqual(report["checks"]["build_environment"], True)
         self.assertEqual(report["checks"]["dependency_inventory"], True)
         self.assertEqual(report["checks"]["dependency_pins"], True)
@@ -16965,6 +16966,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["license_declared"], "MIT")
         self.assertEqual(Path(report["manifest"]["sbom_path"]).resolve(), sbom_path.resolve())
         self.assertEqual(report["manifest"]["sbom_component_count"], len(manifest["dependencies"]) + 1)
+        self.assertEqual(report["manifest"]["sbom_external_ref_count"], len(sbom["packages"]))
         self.assertEqual(report["manifest"]["build_platform"], manifest["build_environment"]["platform"])
         self.assertEqual(report["manifest"]["build_python_version"], manifest["build_environment"]["python_version"])
         self.assertEqual(report["manifest"]["source_clean_required"], False)
@@ -17062,6 +17064,16 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(sbom["packages"][0]["versionInfo"], "0.1.0")
         self.assertEqual(sbom["packages"][0]["licenseDeclared"], "MIT")
         self.assertEqual(sbom["packages"][0]["licenseConcluded"], "NOASSERTION")
+        self.assertEqual(
+            sbom["packages"][0]["externalRefs"],
+            [
+                {
+                    "referenceCategory": "PACKAGE-MANAGER",
+                    "referenceType": "purl",
+                    "referenceLocator": "pkg:pypi/pageindex-enterprise-cleanroom@0.1.0",
+                }
+            ],
+        )
         self.assertEqual(sbom["packages"][0]["checksums"][0]["checksumValue"], manifest["artifacts"][0]["sha256"])
         sbom_packages = {package["name"]: package for package in sbom["packages"]}
         for dependency_name, specifier in dependency_specifiers.items():
@@ -17069,6 +17081,16 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(sbom_packages[dependency_name]["versionInfo"], specifier.removeprefix("=="))
             self.assertEqual(sbom_packages[dependency_name]["licenseDeclared"], "NOASSERTION")
             self.assertEqual(sbom_packages[dependency_name]["licenseConcluded"], "NOASSERTION")
+            self.assertEqual(
+                sbom_packages[dependency_name]["externalRefs"],
+                [
+                    {
+                        "referenceCategory": "PACKAGE-MANAGER",
+                        "referenceType": "purl",
+                        "referenceLocator": f"pkg:pypi/{dependency_name}@{specifier.removeprefix('==')}",
+                    }
+                ],
+            )
         self.assertEqual(len(sbom["relationships"]), len(manifest["dependencies"]))
         self.assertTrue(all(relationship["relationshipType"] == "DEPENDS_ON" for relationship in sbom["relationships"]))
 
@@ -17080,6 +17102,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "console_script": True,
             "manifest_generated": True,
             "sbom_generated": True,
+            "sbom_package_urls": True,
             "build_environment": True,
             "dependency_inventory": True,
             "dependency_pins": True,
@@ -17097,6 +17120,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         bad_deployment_summary = {**checks, "deployment_checks": {"failed": 1}}
         bad_secret_hygiene = {**checks, "secret_hygiene": False}
         bad_package_license = {**checks, "package_license": False}
+        bad_sbom_package_urls = {**checks, "sbom_package_urls": False}
         bad_build_environment = {**checks, "build_environment": False}
         bad_source_clean = {**checks, "source_clean": False}
 
@@ -17106,6 +17130,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(_release_checks_ok(bad_deployment_summary), False)
         self.assertEqual(_release_checks_ok(bad_secret_hygiene), False)
         self.assertEqual(_release_checks_ok(bad_package_license), False)
+        self.assertEqual(_release_checks_ok(bad_sbom_package_urls), False)
         self.assertEqual(_release_checks_ok(bad_build_environment), False)
         self.assertEqual(_release_checks_ok(bad_source_clean), False)
 

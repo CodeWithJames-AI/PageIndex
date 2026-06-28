@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from email.parser import Parser
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 
 PACKAGE_NAME = "pageindex_enterprise_cleanroom"
@@ -157,6 +158,7 @@ def run_release_smoke(
             "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
             "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
             "sbom_generated": len(sbom["packages"]) == len(dependencies) + 1,
+            "sbom_package_urls": _sbom_package_url_count(sbom) == len(sbom["packages"]),
             "build_environment": _build_environment_ok(manifest["build_environment"]),
             "dependency_inventory": bool(manifest["dependencies"]),
             "dependency_pins": manifest["dependency_policy"]["direct_dependencies_pinned"],
@@ -183,6 +185,7 @@ def run_release_smoke(
                 "license_declared": manifest["package"]["license_declared"],
                 "path": str(manifest_output) if manifest_output is not None else None,
                 "sbom_component_count": len(sbom["packages"]),
+                "sbom_external_ref_count": _sbom_package_url_count(sbom),
                 "sbom_path": str(sbom_output) if sbom_output is not None else None,
                 "source_clean_required": require_clean_source,
                 "source_branch": manifest["source"]["branch"],
@@ -390,6 +393,7 @@ def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
             "licenseDeclared": package["license_declared"],
             "name": package["name"],
             "versionInfo": package["version"],
+            "externalRefs": _pypi_package_url_refs(package["name"], package["version"]),
             "checksums": [
                 {
                     "algorithm": "SHA256",
@@ -410,6 +414,7 @@ def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
                 "licenseDeclared": "NOASSERTION",
                 "name": dependency["name"],
                 "versionInfo": _dependency_version_info(dependency),
+                "externalRefs": _pypi_package_url_refs(dependency["name"], _dependency_version_info(dependency)),
             }
         )
         relationships.append(
@@ -447,6 +452,31 @@ def _dependency_version_info(dependency: dict[str, Any]) -> str:
     if isinstance(specifier, str) and specifier.startswith("=="):
         return specifier.removeprefix("==")
     return "NOASSERTION"
+
+
+def _pypi_package_url_refs(name: str, version: str) -> list[dict[str, str]]:
+    if not name or not version or version == "NOASSERTION":
+        return []
+    return [
+        {
+            "referenceCategory": "PACKAGE-MANAGER",
+            "referenceType": "purl",
+            "referenceLocator": f"pkg:pypi/{_purl_part(name)}@{_purl_part(version)}",
+        }
+    ]
+
+
+def _purl_part(value: str) -> str:
+    return quote(value.lower(), safe=".-_")
+
+
+def _sbom_package_url_count(sbom: dict[str, Any]) -> int:
+    count = 0
+    for package in sbom.get("packages", []):
+        refs = package.get("externalRefs", [])
+        if any(ref.get("referenceType") == "purl" and ref.get("referenceLocator") for ref in refs):
+            count += 1
+    return count
 
 
 def _wheel_package_metadata(wheel: Path) -> dict[str, str]:

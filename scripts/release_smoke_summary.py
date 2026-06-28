@@ -95,6 +95,10 @@ def render_release_smoke_summary(report_path: Path) -> str:
         f"external_refs={manifest.get('sbom_external_ref_count', 'unknown')}, "
         f"describes={manifest.get('sbom_describes_count', 'unknown')}"
     )
+    sbom_root_supplier = (
+        f"supplier={manifest.get('sbom_root_supplier', 'unknown')}, "
+        f"check={checks.get('sbom_root_supplier', 'unknown')}"
+    )
     lines.extend(
         [
             f"- Result: {_inline_code('pass' if report.get('ok') is True else 'fail')}",
@@ -123,6 +127,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Manifest generator: {_inline_code(manifest_generator)}",
             f"- SBOM sidecar: {_inline_code(sbom_sidecar)}",
             f"- SBOM inventory: {_inline_code(sbom_inventory)}",
+            f"- SBOM root supplier: {_inline_code(sbom_root_supplier)}",
             f"- Manifest SHA-256: {_inline_code(manifest.get('manifest_sha256', 'unknown'))}",
             f"- SBOM SHA-256: {_inline_code(manifest.get('sbom_sha256', 'unknown'))}",
             "",

@@ -17434,6 +17434,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "secret_hygiene": True,
                 "package_license": True,
                 "manifest_generator": True,
+                "sbom_root_supplier": True,
                 "eval_checks": {"passed": 17, "total": 17},
                 "deployment_checks": {"passed": 9, "total": 9},
             },
@@ -17476,6 +17477,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "sbom_component_count": 6,
                 "sbom_external_ref_count": 6,
                 "sbom_describes_count": 1,
+                "sbom_root_supplier": "Organization: PageIndex clean-room contributors",
                 "sbom_sha256": "sbomhash",
             },
         }
@@ -17523,6 +17525,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         )
         self.assertIn("- SBOM sidecar: `written=True, matches=True`", summary)
         self.assertIn("- SBOM inventory: `components=6, external_refs=6, describes=1`", summary)
+        self.assertIn(
+            "- SBOM root supplier: `supplier=Organization: PageIndex clean-room contributors, check=True`",
+            summary,
+        )
         self.assertIn("- Manifest SHA-256: `manifesthash`", summary)
         self.assertIn("- SBOM SHA-256: `sbomhash`", summary)
         self.assertEqual(missing_summary, "## Release smoke\n\nRelease smoke report was not generated.\n")
@@ -17579,6 +17585,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Secret hygiene findings: `unknown`", summary)
         self.assertIn("- Manifest generator: `name=unknown, version=unknown, schema=unknown, check=unknown`", summary)
         self.assertIn("- SBOM inventory: `components=unknown, external_refs=unknown, describes=unknown`", summary)
+        self.assertIn("- SBOM root supplier: `supplier=unknown, check=unknown`", summary)
 
     def test_release_smoke_summary_handles_malformed_report(self):
         from scripts.release_smoke_summary import render_release_smoke_summary
@@ -17616,6 +17623,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "secret_hygiene": True,
                 "package_license": "ok`yes\nnext",
                 "manifest_generator": "ok`generator\nnext",
+                "sbom_root_supplier": "ok`supplier\nnext",
             },
             "manifest": {
                 "artifact_count": "1`artifact\nnext",
@@ -17651,6 +17659,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "sbom_component_count": "6`components\nnext",
                 "sbom_external_ref_count": "6`refs\nnext",
                 "sbom_describes_count": "1`desc\nnext",
+                "sbom_root_supplier": "supplier`name\nnext",
             },
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -17686,6 +17695,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             "- SBOM inventory: `` components=6`components next, external_refs=6`refs next, describes=1`desc next ``",
             summary,
         )
+        self.assertIn(
+            "- SBOM root supplier: `` supplier=supplier`name next, check=ok`supplier next ``",
+            summary,
+        )
         self.assertIn("- Manifest SHA-256: `` hash`one ``", summary)
         self.assertNotIn("wheel`name\nx.whl", summary)
         self.assertNotIn("2026`date\nnext", summary)
@@ -17709,6 +17722,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("schema`id\nnext", summary)
         self.assertNotIn("ok`generator\nnext", summary)
         self.assertNotIn("6`components\nnext", summary)
+        self.assertNotIn("supplier`name\nnext", summary)
+        self.assertNotIn("ok`supplier\nnext", summary)
         self.assertNotIn("branch`name\nnext", summary)
         self.assertNotIn("https://example.invalid/run`one\nnext", summary)
 

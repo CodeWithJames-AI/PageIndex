@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -124,6 +125,7 @@ def run_release_smoke(
         manifest = _artifact_manifest(
             wheel,
             package_metadata=package_metadata,
+            build_environment=_build_environment(),
             source=_source_metadata(repo_root),
             dependencies=dependencies,
             dependency_policy=dependency_policy,
@@ -155,6 +157,7 @@ def run_release_smoke(
             "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
             "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
             "sbom_generated": len(sbom["packages"]) == len(dependencies) + 1,
+            "build_environment": _build_environment_ok(manifest["build_environment"]),
             "dependency_inventory": bool(manifest["dependencies"]),
             "dependency_pins": manifest["dependency_policy"]["direct_dependencies_pinned"],
             "package_license": manifest["package"]["license_declared"] != "NOASSERTION",
@@ -173,6 +176,8 @@ def run_release_smoke(
             "wheel": wheel.name,
             "manifest": {
                 "artifact_count": len(manifest["artifacts"]),
+                "build_platform": manifest["build_environment"]["platform"],
+                "build_python_version": manifest["build_environment"]["python_version"],
                 "dependency_count": len(manifest["dependencies"]),
                 "direct_dependencies_pinned": manifest["dependency_policy"]["direct_dependencies_pinned"],
                 "license_declared": manifest["package"]["license_declared"],
@@ -339,6 +344,7 @@ def _artifact_manifest(
     wheel: Path,
     *,
     package_metadata: dict[str, str],
+    build_environment: dict[str, str],
     source: dict[str, Any],
     dependencies: list[dict[str, Any]],
     dependency_policy: dict[str, Any],
@@ -353,6 +359,7 @@ def _artifact_manifest(
             "license_declared": package_metadata["license_declared"],
             "summary": package_metadata["summary"],
         },
+        "build_environment": build_environment,
         "source": source,
         "dependencies": dependencies,
         "dependency_policy": dependency_policy,
@@ -459,6 +466,29 @@ def _spdx_license_declared(value: str | None) -> str:
     if not normalized or normalized.upper() == "UNKNOWN":
         return "NOASSERTION"
     return normalized
+
+
+def _build_environment() -> dict[str, str]:
+    return {
+        "architecture": platform.machine(),
+        "platform": platform.platform(),
+        "python_executable": Path(sys.executable).name,
+        "python_implementation": platform.python_implementation(),
+        "python_version": platform.python_version(),
+        "system": platform.system(),
+    }
+
+
+def _build_environment_ok(environment: dict[str, str]) -> bool:
+    required = {
+        "architecture",
+        "platform",
+        "python_executable",
+        "python_implementation",
+        "python_version",
+        "system",
+    }
+    return all(isinstance(environment.get(key), str) and bool(environment[key]) for key in required)
 
 
 def _wheel_dependencies(wheel: Path) -> list[dict[str, Any]]:

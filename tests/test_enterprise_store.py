@@ -4,6 +4,7 @@ import http.client
 import io
 import json
 import os
+import platform
 import sqlite3
 import subprocess
 import sys
@@ -16942,6 +16943,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["console_script"], True)
         self.assertEqual(report["checks"]["manifest_generated"], True)
         self.assertEqual(report["checks"]["sbom_generated"], True)
+        self.assertEqual(report["checks"]["build_environment"], True)
         self.assertEqual(report["checks"]["dependency_inventory"], True)
         self.assertEqual(report["checks"]["dependency_pins"], True)
         self.assertEqual(report["checks"]["package_license"], True)
@@ -16963,6 +16965,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["license_declared"], "MIT")
         self.assertEqual(Path(report["manifest"]["sbom_path"]).resolve(), sbom_path.resolve())
         self.assertEqual(report["manifest"]["sbom_component_count"], len(manifest["dependencies"]) + 1)
+        self.assertEqual(report["manifest"]["build_platform"], manifest["build_environment"]["platform"])
+        self.assertEqual(report["manifest"]["build_python_version"], manifest["build_environment"]["python_version"])
         self.assertEqual(report["manifest"]["source_clean_required"], False)
         self.assertEqual(report["manifest"]["source_dirty_count"], manifest["source"]["dirty_count"])
         self.assertEqual(report["manifest"]["source_dirty_paths_truncated"], manifest["source"]["dirty_paths_truncated"])
@@ -16980,6 +16984,17 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "name": "pageindex-enterprise-cleanroom",
                 "summary": "Clean-room PageIndex enterprise control plane and retrieval service.",
                 "version": "0.1.0",
+            },
+        )
+        self.assertEqual(
+            manifest["build_environment"],
+            {
+                "architecture": platform.machine(),
+                "platform": platform.platform(),
+                "python_executable": Path(sys.executable).name,
+                "python_implementation": platform.python_implementation(),
+                "python_version": platform.python_version(),
+                "system": platform.system(),
             },
         )
         self.assertEqual(manifest["source"]["commit"], report["manifest"]["source_commit"])
@@ -17046,6 +17061,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "console_script": True,
             "manifest_generated": True,
             "sbom_generated": True,
+            "build_environment": True,
             "dependency_inventory": True,
             "dependency_pins": True,
             "package_license": True,
@@ -17062,6 +17078,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         bad_deployment_summary = {**checks, "deployment_checks": {"failed": 1}}
         bad_secret_hygiene = {**checks, "secret_hygiene": False}
         bad_package_license = {**checks, "package_license": False}
+        bad_build_environment = {**checks, "build_environment": False}
         bad_source_clean = {**checks, "source_clean": False}
 
         self.assertEqual(_release_checks_ok(checks), True)
@@ -17070,6 +17087,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(_release_checks_ok(bad_deployment_summary), False)
         self.assertEqual(_release_checks_ok(bad_secret_hygiene), False)
         self.assertEqual(_release_checks_ok(bad_package_license), False)
+        self.assertEqual(_release_checks_ok(bad_build_environment), False)
         self.assertEqual(_release_checks_ok(bad_source_clean), False)
 
     def test_release_smoke_secret_hygiene_detects_secret_shaped_output(self):

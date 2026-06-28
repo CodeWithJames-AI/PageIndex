@@ -136,6 +136,7 @@ def run_release_smoke(
             wheel_content=wheel_content,
         )
         sbom = _sbom_document(manifest)
+        sbom_payload = _json_document_bytes(sbom)
         secret_hygiene = _release_secret_hygiene(
             {
                 "console_help_stdout": help_result.stdout,
@@ -154,7 +155,8 @@ def run_release_smoke(
         if sbom_output is not None:
             sbom_output = sbom_output.expanduser().resolve()
             sbom_output.parent.mkdir(parents=True, exist_ok=True)
-            sbom_output.write_text(json.dumps(sbom, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            sbom_output.write_bytes(sbom_payload)
+        sbom_integrity = _document_integrity(sbom_payload, sbom_output)
         checks = {
             "wheel_built": wheel.name == f"{PACKAGE_NAME}-{VERSION}-py3-none-any.whl",
             "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
@@ -164,6 +166,7 @@ def run_release_smoke(
             "manifest_timestamp": _utc_timestamp_ok(manifest["created_at"]),
             "sbom_generated": len(sbom["packages"]) == len(dependencies) + 1,
             "sbom_describes_root": _sbom_describes_root_package(sbom),
+            "sbom_sidecar_integrity": sbom_integrity["ok"],
             "sbom_package_urls": _sbom_package_url_count(sbom) == len(sbom["packages"]),
             "sbom_root_supplier": _sbom_root_supplier_ok(sbom),
             "build_environment": _build_environment_ok(manifest["build_environment"]),
@@ -200,8 +203,12 @@ def run_release_smoke(
                 "sbom_component_count": len(sbom["packages"]),
                 "sbom_describes_count": len(sbom.get("documentDescribes", [])),
                 "sbom_external_ref_count": _sbom_package_url_count(sbom),
+                "sbom_payload_matches_output": sbom_integrity["payload_matches_output"],
                 "sbom_path": str(sbom_output) if sbom_output is not None else None,
                 "sbom_root_supplier": sbom["packages"][0].get("supplier"),
+                "sbom_sha256": sbom_integrity["sha256"],
+                "sbom_size_bytes": sbom_integrity["size_bytes"],
+                "sbom_written": sbom_integrity["written"],
                 "source_clean_required": require_clean_source,
                 "source_branch": manifest["source"]["branch"],
                 "source_commit": manifest["source"]["commit"],
@@ -341,6 +348,24 @@ def _merge_secret_hygiene(*reports: dict[str, Any]) -> dict[str, Any]:
         "ok": not findings,
         "finding_count": len(findings),
         "findings": findings,
+    }
+
+
+def _json_document_bytes(document: dict[str, Any]) -> bytes:
+    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _document_integrity(payload: bytes, output: Path | None) -> dict[str, Any]:
+    payload_sha256 = _sha256_bytes(payload)
+    payload_matches_output: bool | None = None
+    if output is not None:
+        payload_matches_output = output.exists() and output.read_bytes() == payload
+    return {
+        "ok": len(payload_sha256) == 64 and len(payload) > 0 and payload_matches_output is not False,
+        "payload_matches_output": payload_matches_output,
+        "sha256": payload_sha256,
+        "size_bytes": len(payload),
+        "written": output is not None,
     }
 
 
@@ -724,6 +749,10 @@ def _wheel_record_integrity(wheel: Path) -> dict[str, Any]:
 
 def _sha256_record_digest(data: bytes) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def _dependency_policy(dependencies: list[dict[str, Any]]) -> dict[str, Any]:

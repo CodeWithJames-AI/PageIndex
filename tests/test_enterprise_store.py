@@ -16947,6 +16947,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["manifest_timestamp"], True)
         self.assertEqual(report["checks"]["sbom_generated"], True)
         self.assertEqual(report["checks"]["sbom_describes_root"], True)
+        self.assertEqual(report["checks"]["sbom_sidecar_integrity"], True)
         self.assertEqual(report["checks"]["sbom_package_urls"], True)
         self.assertEqual(report["checks"]["sbom_root_supplier"], True)
         self.assertEqual(report["checks"]["build_environment"], True)
@@ -16979,6 +16980,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["sbom_component_count"], len(manifest["dependencies"]) + 1)
         self.assertEqual(report["manifest"]["sbom_describes_count"], 1)
         self.assertEqual(report["manifest"]["sbom_external_ref_count"], len(sbom["packages"]))
+        self.assertEqual(report["manifest"]["sbom_payload_matches_output"], True)
+        self.assertEqual(report["manifest"]["sbom_sha256"], hashlib.sha256(sbom_text.encode("utf-8")).hexdigest())
+        self.assertEqual(report["manifest"]["sbom_size_bytes"], len(sbom_text.encode("utf-8")))
+        self.assertEqual(report["manifest"]["sbom_written"], True)
         self.assertEqual(report["manifest"]["build_platform"], manifest["build_environment"]["platform"])
         self.assertEqual(report["manifest"]["sbom_root_supplier"], "Organization: PageIndex clean-room contributors")
         self.assertEqual(report["manifest"]["build_python_version"], manifest["build_environment"]["python_version"])
@@ -17136,6 +17141,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "manifest_timestamp": True,
             "sbom_generated": True,
             "sbom_describes_root": True,
+            "sbom_sidecar_integrity": True,
             "sbom_package_urls": True,
             "sbom_root_supplier": True,
             "build_environment": True,
@@ -17159,6 +17165,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         bad_secret_hygiene = {**checks, "secret_hygiene": False}
         bad_package_license = {**checks, "package_license": False}
         bad_sbom_describes_root = {**checks, "sbom_describes_root": False}
+        bad_sbom_sidecar_integrity = {**checks, "sbom_sidecar_integrity": False}
         bad_sbom_package_urls = {**checks, "sbom_package_urls": False}
         bad_sbom_root_supplier = {**checks, "sbom_root_supplier": False}
         bad_build_environment = {**checks, "build_environment": False}
@@ -17174,6 +17181,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(_release_checks_ok(bad_secret_hygiene), False)
         self.assertEqual(_release_checks_ok(bad_package_license), False)
         self.assertEqual(_release_checks_ok(bad_sbom_describes_root), False)
+        self.assertEqual(_release_checks_ok(bad_sbom_sidecar_integrity), False)
         self.assertEqual(_release_checks_ok(bad_sbom_package_urls), False)
         self.assertEqual(_release_checks_ok(bad_sbom_root_supplier), False)
         self.assertEqual(_release_checks_ok(bad_build_environment), False)

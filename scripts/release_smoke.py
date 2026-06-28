@@ -157,6 +157,7 @@ def run_release_smoke(
             "wheel_built": wheel.name == f"{PACKAGE_NAME}-{VERSION}-py3-none-any.whl",
             "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
             "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
+            "manifest_timestamp": _utc_timestamp_ok(manifest["created_at"]),
             "sbom_generated": len(sbom["packages"]) == len(dependencies) + 1,
             "sbom_describes_root": _sbom_describes_root_package(sbom),
             "sbom_package_urls": _sbom_package_url_count(sbom) == len(sbom["packages"]),
@@ -182,6 +183,7 @@ def run_release_smoke(
                 "artifact_count": len(manifest["artifacts"]),
                 "build_platform": manifest["build_environment"]["platform"],
                 "build_python_version": manifest["build_environment"]["python_version"],
+                "created_at": manifest["created_at"],
                 "dependency_count": len(manifest["dependencies"]),
                 "direct_dependencies_pinned": manifest["dependency_policy"]["direct_dependencies_pinned"],
                 "license_declared": manifest["package"]["license_declared"],
@@ -362,6 +364,7 @@ def _artifact_manifest(
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
+        "created_at": _utc_timestamp(),
         "package": {
             "name": "pageindex-enterprise-cleanroom",
             "version": VERSION,
@@ -444,11 +447,23 @@ def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
         ),
         "creationInfo": {
             "creators": ["Tool: pageindex-enterprise release_smoke.py"],
-            "created": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "created": _utc_timestamp(),
         },
         "packages": packages,
         "relationships": relationships,
     }
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _utc_timestamp_ok(value: str) -> bool:
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _spdx_identifier(value: str) -> str:

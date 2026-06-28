@@ -16942,6 +16942,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["wheel_built"], True)
         self.assertEqual(report["checks"]["console_script"], True)
         self.assertEqual(report["checks"]["manifest_generated"], True)
+        self.assertEqual(report["checks"]["manifest_timestamp"], True)
         self.assertEqual(report["checks"]["sbom_generated"], True)
         self.assertEqual(report["checks"]["sbom_describes_root"], True)
         self.assertEqual(report["checks"]["sbom_package_urls"], True)
@@ -16963,6 +16964,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("sk-", sbom_text)
         self.assertEqual(Path(report["manifest"]["path"]).resolve(), manifest_path.resolve())
         self.assertEqual(report["manifest"]["artifact_count"], 1)
+        self.assertEqual(report["manifest"]["created_at"], manifest["created_at"])
         self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
         self.assertEqual(report["manifest"]["direct_dependencies_pinned"], True)
         self.assertEqual(report["manifest"]["license_declared"], "MIT")
@@ -16983,6 +16985,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["wheel_content_policy_ok"], True)
         self.assertEqual(report["manifest"]["wheel_record_hashes_valid"], True)
         self.assertEqual(manifest["schema_version"], 1)
+        self.assertRegex(manifest["created_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
         self.assertEqual(
             manifest["package"],
             {
@@ -17110,6 +17113,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "wheel_built": True,
             "console_script": True,
             "manifest_generated": True,
+            "manifest_timestamp": True,
             "sbom_generated": True,
             "sbom_describes_root": True,
             "sbom_package_urls": True,
@@ -17127,6 +17131,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "secret_hygiene": True,
         }
         bad_record = {**checks, "wheel_record_hashes": False}
+        bad_manifest_timestamp = {**checks, "manifest_timestamp": False}
         bad_eval_summary = {**checks, "eval_checks": {"failed": 1}}
         bad_deployment_summary = {**checks, "deployment_checks": {"failed": 1}}
         bad_secret_hygiene = {**checks, "secret_hygiene": False}
@@ -17139,6 +17144,7 @@ class EnterpriseStoreTest(unittest.TestCase):
 
         self.assertEqual(_release_checks_ok(checks), True)
         self.assertEqual(_release_checks_ok(bad_record), False)
+        self.assertEqual(_release_checks_ok(bad_manifest_timestamp), False)
         self.assertEqual(_release_checks_ok(bad_eval_summary), False)
         self.assertEqual(_release_checks_ok(bad_deployment_summary), False)
         self.assertEqual(_release_checks_ok(bad_secret_hygiene), False)

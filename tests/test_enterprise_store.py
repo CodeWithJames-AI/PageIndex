@@ -9887,6 +9887,50 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(allowed["documents"], [])
             self.assertIsNone(expired_row["last_used_at"])
 
+    def test_http_strict_api_token_auth_rejects_tokens_without_effective_scopes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "vivi", "viewer", actor_user_id="alice")
+            stale = store.create_api_token(workspace_id, "vivi", name="stale-viewer")
+            store.conn.execute(
+                "UPDATE api_tokens SET scopes_json = ? WHERE id = ?",
+                (json.dumps(["write", "audit"]), stale["id"]),
+            )
+            store.conn.commit()
+            verified = store.verify_api_token(stale["token"])
+            direct_row = store.conn.execute(
+                "SELECT last_used_at FROM api_tokens WHERE id = ?",
+                (stale["id"],),
+            ).fetchone()
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                blocked = _get_error(f"{base}/documents", headers={"Authorization": f"Bearer {stale['token']}"})
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+            reopened = EnterpriseStore(root)
+            try:
+                http_row = reopened.conn.execute(
+                    "SELECT last_used_at FROM api_tokens WHERE id = ?",
+                    (stale["id"],),
+                ).fetchone()
+            finally:
+                reopened.close()
+
+            self.assertIsNone(verified)
+            self.assertIsNone(direct_row["last_used_at"])
+            self.assertEqual(blocked["status"], 403)
+            self.assertEqual(blocked["error"], "invalid api token")
+            self.assertIsNone(http_row["last_used_at"])
+
     def test_http_strict_api_token_scopes_limit_route_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

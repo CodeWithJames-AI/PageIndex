@@ -3614,6 +3614,8 @@ class EnterpriseStore:
         if scopes is None:
             return None
         scopes = _cap_api_token_scopes_to_role(scopes, self.workspace_role(row["workspace_id"], row["user_id"]))
+        if not scopes:
+            return None
         self.conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (_now(), row["id"]))
         self._commit()
         return {

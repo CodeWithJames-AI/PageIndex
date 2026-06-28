@@ -80,6 +80,10 @@ def render_release_smoke_summary(report_path: Path) -> str:
         f"written={manifest.get('manifest_written', False)}, "
         f"matches={manifest.get('manifest_payload_matches_output', '?')}"
     )
+    sidecar_sizes = (
+        f"manifest_bytes={manifest.get('manifest_size_bytes', 'unknown')}, "
+        f"sbom_bytes={manifest.get('sbom_size_bytes', 'unknown')}"
+    )
     manifest_generator = (
         f"name={manifest.get('manifest_generator', 'unknown')}, "
         f"version={manifest.get('manifest_generator_version', 'unknown')}, "
@@ -124,6 +128,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Secret hygiene findings: {_inline_code(manifest.get('secret_hygiene_finding_count', 'unknown'))}",
             f"- Report output written: {_inline_code(report_output.get('written', False))}",
             f"- Manifest sidecar: {_inline_code(manifest_sidecar)}",
+            f"- Sidecar sizes: {_inline_code(sidecar_sizes)}",
             f"- Manifest generator: {_inline_code(manifest_generator)}",
             f"- SBOM sidecar: {_inline_code(sbom_sidecar)}",
             f"- SBOM inventory: {_inline_code(sbom_inventory)}",

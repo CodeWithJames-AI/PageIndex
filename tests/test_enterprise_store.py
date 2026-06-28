@@ -17468,6 +17468,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "secret_hygiene_finding_count": 0,
                 "manifest_payload_matches_output": True,
                 "manifest_written": True,
+                "manifest_size_bytes": 2048,
                 "manifest_generator": "pageindex-enterprise release_smoke.py",
                 "manifest_generator_version": "0.1.0",
                 "manifest_schema": "pageindex-enterprise-cleanroom.release-manifest.v1",
@@ -17478,6 +17479,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "sbom_external_ref_count": 6,
                 "sbom_describes_count": 1,
                 "sbom_root_supplier": "Organization: PageIndex clean-room contributors",
+                "sbom_size_bytes": 4096,
                 "sbom_sha256": "sbomhash",
             },
         }
@@ -17519,6 +17521,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Secret hygiene findings: `0`", summary)
         self.assertIn("- Report output written: `True`", summary)
         self.assertIn("- Manifest sidecar: `written=True, matches=True`", summary)
+        self.assertIn("- Sidecar sizes: `manifest_bytes=2048, sbom_bytes=4096`", summary)
         self.assertIn(
             "- Manifest generator: `name=pageindex-enterprise release_smoke.py, version=0.1.0, schema=pageindex-enterprise-cleanroom.release-manifest.v1, check=True`",
             summary,
@@ -17584,6 +17587,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Package license: `declared=unknown, check=unknown`", summary)
         self.assertIn("- Secret hygiene findings: `unknown`", summary)
         self.assertIn("- Manifest generator: `name=unknown, version=unknown, schema=unknown, check=unknown`", summary)
+        self.assertIn("- Sidecar sizes: `manifest_bytes=unknown, sbom_bytes=unknown`", summary)
         self.assertIn("- SBOM inventory: `components=unknown, external_refs=unknown, describes=unknown`", summary)
         self.assertIn("- SBOM root supplier: `supplier=unknown, check=unknown`", summary)
 
@@ -17655,11 +17659,13 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "manifest_generator": "generator`name\nnext",
                 "manifest_generator_version": "0`1\nnext",
                 "manifest_schema": "schema`id\nnext",
+                "manifest_size_bytes": "2`048\nnext",
                 "manifest_sha256": "hash`one",
                 "sbom_component_count": "6`components\nnext",
                 "sbom_external_ref_count": "6`refs\nnext",
                 "sbom_describes_count": "1`desc\nnext",
                 "sbom_root_supplier": "supplier`name\nnext",
+                "sbom_size_bytes": "4`096\nnext",
             },
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -17687,6 +17693,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Build environment: `` python=3`11 next, platform=Linux`arm next ``", summary)
         self.assertIn("- Package license: `` declared=MIT`custom next, check=ok`yes next ``", summary)
         self.assertIn("- Secret hygiene findings: `` 1`finding next ``", summary)
+        self.assertIn("- Sidecar sizes: `` manifest_bytes=2`048 next, sbom_bytes=4`096 next ``", summary)
         self.assertIn(
             "- Manifest generator: `` name=generator`name next, version=0`1 next, schema=schema`id next, check=ok`generator next ``",
             summary,
@@ -17717,6 +17724,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("MIT`custom\nnext", summary)
         self.assertNotIn("ok`yes\nnext", summary)
         self.assertNotIn("1`finding\nnext", summary)
+        self.assertNotIn("2`048\nnext", summary)
+        self.assertNotIn("4`096\nnext", summary)
         self.assertNotIn("generator`name\nnext", summary)
         self.assertNotIn("0`1\nnext", summary)
         self.assertNotIn("schema`id\nnext", summary)

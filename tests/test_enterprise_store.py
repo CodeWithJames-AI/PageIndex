@@ -16997,6 +16997,23 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "system": platform.system(),
             },
         )
+        expected_branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip() or None
+        expected_upstream_result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        expected_upstream = expected_upstream_result.stdout.strip() if expected_upstream_result.returncode == 0 else None
+        self.assertEqual(manifest["source"]["branch"], expected_branch)
+        self.assertEqual(report["manifest"]["source_branch"], expected_branch)
         self.assertEqual(manifest["source"]["commit"], report["manifest"]["source_commit"])
         self.assertRegex(manifest["source"]["commit"], r"^[0-9a-f]{40}$")
         self.assertEqual(manifest["source"]["dirty"], report["manifest"]["source_dirty"])
@@ -17010,6 +17027,8 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(len(manifest["source"]["dirty_paths"]), manifest["source"]["dirty_count"])
         self.assertIsInstance(manifest["source"]["dirty"], bool)
         self.assertIsInstance(manifest["source"]["remote"], (str, type(None)))
+        self.assertEqual(manifest["source"]["upstream"], expected_upstream)
+        self.assertEqual(report["manifest"]["source_upstream"], expected_upstream)
         self.assertEqual(manifest["artifacts"][0]["filename"], report["wheel"])
         self.assertEqual(manifest["artifacts"][0]["sha256"], report["manifest"]["wheel_sha256"])
         self.assertEqual(len(manifest["artifacts"][0]["sha256"]), 64)
@@ -17140,10 +17159,14 @@ class EnterpriseStoreTest(unittest.TestCase):
 
             metadata = _source_metadata(repo)
 
+        self.assertIsInstance(metadata["branch"], (str, type(None)))
+        self.assertIsNone(metadata["commit"])
         self.assertEqual(metadata["dirty"], True)
         self.assertEqual(metadata["dirty_count"], SOURCE_DIRTY_PATH_LIMIT + 5)
         self.assertEqual(len(metadata["dirty_paths"]), SOURCE_DIRTY_PATH_LIMIT)
         self.assertEqual(metadata["dirty_paths_truncated"], True)
+        self.assertIsNone(metadata["remote"])
+        self.assertIsNone(metadata["upstream"])
         self.assertTrue(all(path.startswith("?? dirty-") for path in metadata["dirty_paths"]))
 
     def test_deployment_check_reports_readiness_and_redacts_secrets(self):

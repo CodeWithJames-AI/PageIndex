@@ -185,10 +185,12 @@ def run_release_smoke(
                 "sbom_component_count": len(sbom["packages"]),
                 "sbom_path": str(sbom_output) if sbom_output is not None else None,
                 "source_clean_required": require_clean_source,
+                "source_branch": manifest["source"]["branch"],
                 "source_commit": manifest["source"]["commit"],
                 "source_dirty": manifest["source"]["dirty"],
                 "source_dirty_count": manifest["source"]["dirty_count"],
                 "source_dirty_paths_truncated": manifest["source"]["dirty_paths_truncated"],
+                "source_upstream": manifest["source"]["upstream"],
                 "deployment_check_ok": deployment_report.get("ok") is True,
                 "deployment_check_failed": deployment_report.get("summary", {}).get("failed"),
                 "secret_hygiene_finding_count": secret_hygiene["finding_count"],
@@ -636,12 +638,14 @@ def _requirement_specifier(rest: str) -> str | None:
 def _source_metadata(repo_root: Path) -> dict[str, Any]:
     dirty_paths = _git_status_entries(repo_root)
     return {
+        "branch": _git_output(repo_root, "branch", "--show-current"),
         "commit": _git_output(repo_root, "rev-parse", "HEAD"),
         "dirty": bool(dirty_paths),
         "dirty_count": len(dirty_paths),
         "dirty_paths": dirty_paths[:SOURCE_DIRTY_PATH_LIMIT],
         "dirty_paths_truncated": len(dirty_paths) > SOURCE_DIRTY_PATH_LIMIT,
         "remote": _git_output(repo_root, "config", "--get", "remote.origin.url"),
+        "upstream": _git_output(repo_root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"),
     }
 
 

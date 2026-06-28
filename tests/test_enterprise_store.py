@@ -15887,6 +15887,15 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("chat shares", body)
                     self.assertIn("set shares", body)
                     self.assertIn("exhausted", body)
+                    self.assertIn("/managed-upload-orphans", body)
+                    self.assertIn("/managed-upload-orphans/purge", body)
+                    self.assertIn("uploadOrphanSummary", body)
+                    self.assertIn("uploadOrphanReportText", body)
+                    self.assertIn("refreshManagedUploadOrphans", body)
+                    self.assertIn("renderManagedUploadOrphans", body)
+                    self.assertIn("purgeManagedUploadOrphans", body)
+                    self.assertIn("previewUploadOrphansButton", body)
+                    self.assertIn("purgeUploadOrphansButton", body)
                     self.assertIn("/workspace-quota-policy", body)
                     self.assertIn("quotaDocumentsInput", body)
                     self.assertIn("quotaPagesInput", body)
@@ -16364,6 +16373,118 @@ class EnterpriseStoreTest(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+
+    def test_http_managed_upload_orphans_preview_and_purge_are_operator_scoped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team", workspace_id="ws_http_upload_orphans")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "ada", "admin", actor_user_id="alice")
+            upload_dir = store.root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            referenced = upload_dir / "referenced-http.txt"
+            orphan = upload_dir / "orphan-http.txt"
+            referenced.write_text("Referenced HTTP managed upload.", encoding="utf-8")
+            orphan.write_text("Orphan HTTP managed upload.", encoding="utf-8")
+            orphan_size = orphan.stat().st_size
+            store.ingest_file(
+                referenced,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Referenced HTTP upload",
+            )
+            owner_token = store.create_api_token(
+                workspace_id,
+                "alice",
+                name="owner",
+                scopes=["read", "write", "audit"],
+            )["token"]
+            audit_token = store.create_api_token(workspace_id, "alice", name="audit", scopes=["audit"])["token"]
+            write_token = store.create_api_token(workspace_id, "alice", name="write", scopes=["write"])["token"]
+            admin_token = store.create_api_token(
+                workspace_id,
+                "ada",
+                name="admin",
+                scopes=["write", "audit"],
+            )["token"]
+            store.close()
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+            audit_headers = {"Authorization": f"Bearer {audit_token}"}
+            write_headers = {"Authorization": f"Bearer {write_token}"}
+            admin_headers = {"Authorization": f"Bearer {admin_token}"}
+            try:
+                missing_token = _get_error(f"{base}/managed-upload-orphans")
+                write_get_blocked = _get_error(f"{base}/managed-upload-orphans", headers=write_headers)
+                preview = _get_json(f"{base}/managed-upload-orphans", headers=audit_headers)["report"]
+                admin_preview = _get_json(f"{base}/managed-upload-orphans", headers=admin_headers)["report"]
+                post_preview = _post_json(
+                    f"{base}/managed-upload-orphans/purge",
+                    {"dry_run": True},
+                    headers=audit_headers,
+                )["report"]
+                invalid = _post_json(
+                    f"{base}/managed-upload-orphans/purge",
+                    {"dry_run": "yes"},
+                    headers=owner_headers,
+                    status=400,
+                )
+                audit_purge_blocked = _post_json(
+                    f"{base}/managed-upload-orphans/purge",
+                    {},
+                    headers=audit_headers,
+                    status=403,
+                )
+                admin_purge_blocked = _post_json(
+                    f"{base}/managed-upload-orphans/purge",
+                    {},
+                    headers=admin_headers,
+                    status=403,
+                )
+                purged = _post_json(
+                    f"{base}/managed-upload-orphans/purge",
+                    {},
+                    headers=owner_headers,
+                )["report"]
+                after_purge = _get_json(f"{base}/managed-upload-orphans", headers=audit_headers)["report"]
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+            inspected = EnterpriseStore(root)
+            try:
+                events = inspected.list_audit_events(workspace_id, "alice", action="managed_upload.orphan.purge")
+            finally:
+                inspected.close()
+            serialized_events = json.dumps(events, sort_keys=True)
+            purge_event = next(event for event in events if event["details"]["purged"] == 1)
+
+            self.assertEqual(missing_token["error"], "api token required")
+            self.assertEqual(write_get_blocked["error"], "api token scope denied")
+            self.assertTrue(preview["dry_run"])
+            self.assertEqual(preview["upload_file_count"], 2)
+            self.assertEqual(preview["referenced_file_count"], 1)
+            self.assertEqual(preview["orphan_file_count"], 1)
+            self.assertEqual(preview["orphans"], [{"relative_path": "orphan-http.txt", "bytes": orphan_size}])
+            self.assertEqual(admin_preview["orphan_file_count"], 1)
+            self.assertTrue(post_preview["dry_run"])
+            self.assertEqual(post_preview["purged"], 0)
+            self.assertEqual(invalid["error"], "dry_run must be a boolean")
+            self.assertEqual(audit_purge_blocked["error"], "api token scope denied")
+            self.assertEqual(admin_purge_blocked["error"], "workspace role denied")
+            self.assertFalse(purged["dry_run"])
+            self.assertEqual(purged["matched"], 1)
+            self.assertEqual(purged["purged"], 1)
+            self.assertEqual(after_purge["orphan_file_count"], 0)
+            self.assertFalse(orphan.exists())
+            self.assertTrue(referenced.exists())
+            self.assertEqual(purge_event["details"], {"matched": 1, "purged": 1, "failed": 0})
+            self.assertNotIn("orphan-http.txt", serialized_events)
+            self.assertNotIn(str(orphan), serialized_events)
 
     def test_http_document_download_serves_only_managed_uploads(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -467,6 +467,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
                 return
+            if parsed.path == "/managed-upload-orphans":
+                self._get_managed_upload_orphans()
+                return
             group_members_id = _workspace_group_members_path(parsed.path)
             if group_members_id:
                 store = EnterpriseStore(self.server.root)
@@ -600,6 +603,9 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/audit-retention/purge":
                 self._purge_audit_retention(payload)
+                return
+            if parsed.path == "/managed-upload-orphans/purge":
+                self._purge_managed_upload_orphans(payload)
                 return
             if parsed.path == "/audit-sink":
                 self._set_audit_sink_config(payload)
@@ -2162,6 +2168,42 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
         try:
             workspace_id, user_id = self._workspace_context(store, required_scope=("audit", "write"))
             self._json(store.purge_query_runs_by_retention(workspace_id, user_id, dry_run=dry_run))
+        finally:
+            store.close()
+
+    def _get_managed_upload_orphans(self) -> None:
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope="audit",
+                require_api_token=True,
+            )
+            self._json({"report": store.get_managed_upload_orphan_report(workspace_id, user_id)})
+        finally:
+            store.close()
+
+    def _purge_managed_upload_orphans(self, payload: dict[str, Any]) -> None:
+        dry_run = payload.get("dry_run", False)
+        if not isinstance(dry_run, bool):
+            raise ValueError("dry_run must be a boolean")
+        required_scope: str | tuple[str, ...] = "audit" if dry_run else ("audit", "write")
+        store = EnterpriseStore(self.server.root)
+        try:
+            workspace_id, user_id = self._workspace_context(
+                store,
+                required_scope=required_scope,
+                require_api_token=True,
+            )
+            self._json(
+                {
+                    "report": store.get_managed_upload_orphan_report(
+                        workspace_id,
+                        user_id,
+                        purge=not dry_run,
+                    )
+                }
+            )
         finally:
             store.close()
 

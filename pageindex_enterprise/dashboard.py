@@ -496,6 +496,17 @@ DASHBOARD_HTML = """<!doctype html>
             </div>
           </section>
           <section>
+            <h2 class="section-title">Storage</h2>
+            <div class="stack">
+              <div class="provider-actions">
+                <button id="previewUploadOrphansButton" class="secondary" type="button">Preview orphans</button>
+                <button id="purgeUploadOrphansButton" class="secondary" type="button">Purge orphans</button>
+              </div>
+              <div id="uploadOrphanSummary" class="muted">Upload orphan report not loaded.</div>
+              <pre id="uploadOrphanReportText">{}</pre>
+            </div>
+          </section>
+          <section>
             <h2 class="section-title">Quotas</h2>
             <div class="stack">
               <input id="quotaDocumentsInput" value="" placeholder="max documents" aria-label="Maximum documents">
@@ -874,6 +885,8 @@ DASHBOARD_HTML = """<!doctype html>
     const groupList = document.getElementById("groupList");
     const usageSummary = document.getElementById("usageSummary");
     const usageReportText = document.getElementById("usageReportText");
+    const uploadOrphanSummary = document.getElementById("uploadOrphanSummary");
+    const uploadOrphanReportText = document.getElementById("uploadOrphanReportText");
     const quotaDocumentsInput = document.getElementById("quotaDocumentsInput");
     const quotaPagesInput = document.getElementById("quotaPagesInput");
     const quotaMembersInput = document.getElementById("quotaMembersInput");
@@ -1942,6 +1955,22 @@ DASHBOARD_HTML = """<!doctype html>
       usageReportText.textContent = JSON.stringify(usage, null, 2);
     }
 
+    function renderManagedUploadOrphans(report) {
+      if (!report) {
+        uploadOrphanSummary.className = "muted";
+        uploadOrphanSummary.textContent = "Upload orphan report not loaded.";
+        uploadOrphanReportText.textContent = "{}";
+        return;
+      }
+      const matched = Number(report.matched || report.orphan_file_count || 0);
+      const purged = Number(report.purged || 0);
+      const failed = Number(report.failed || 0);
+      const action = report.dry_run ? "Preview" : "Purge";
+      uploadOrphanSummary.className = failed > 0 ? "status error" : (matched > 0 || purged > 0 ? "status warn" : "muted");
+      uploadOrphanSummary.textContent = `${action}: uploads ${report.upload_file_count || 0}, referenced ${report.referenced_file_count || 0}, orphaned ${matched}, purged ${purged}, failed ${failed}`;
+      uploadOrphanReportText.textContent = JSON.stringify(report, null, 2);
+    }
+
     function quotaLimitText(limit) {
       return limit == null ? "unlimited" : String(limit);
     }
@@ -2643,6 +2672,17 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function refreshManagedUploadOrphans(options = {}) {
+      if (!options.quiet) {
+        setStatus("Previewing upload orphans...");
+      }
+      const payload = await api("/managed-upload-orphans");
+      renderManagedUploadOrphans(payload.report);
+      if (!options.quiet) {
+        setStatus("Upload orphan report refreshed.", "ok");
+      }
+    }
+
     async function refreshWorkspaceQuotaPolicy(options = {}) {
       if (!options.quiet) {
         setStatus("Refreshing quota policy...");
@@ -2841,6 +2881,13 @@ DASHBOARD_HTML = """<!doctype html>
         usageSummary.className = "muted";
         usageSummary.textContent = "Usage unavailable.";
         usageReportText.textContent = "{}";
+      }
+      try {
+        await refreshManagedUploadOrphans({ quiet: true });
+      } catch (error) {
+        uploadOrphanSummary.className = "muted";
+        uploadOrphanSummary.textContent = "Upload orphan report unavailable.";
+        uploadOrphanReportText.textContent = "{}";
       }
       try {
         await refreshWorkspaceQuotaPolicy({ quiet: true });
@@ -3697,6 +3744,20 @@ DASHBOARD_HTML = """<!doctype html>
       setStatus("Audit purged.", "ok");
     }
 
+    async function purgeManagedUploadOrphans() {
+      if (!window.confirm("Permanently purge orphaned managed upload files?")) {
+        setStatus("Purge cancelled.", "warn");
+        return;
+      }
+      setStatus("Purging upload orphans...");
+      const payload = await api("/managed-upload-orphans/purge", {
+        method: "POST",
+        body: JSON.stringify({})
+      });
+      renderManagedUploadOrphans(payload.report);
+      setStatus("Upload orphans purged.", "ok");
+    }
+
     async function saveAuditSinkConfig() {
       const relativePath = auditSinkPathInput.value.trim();
       if (!relativePath) {
@@ -4255,6 +4316,8 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById("createGroupButton").addEventListener("click", () => createGroup().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshGroupsButton").addEventListener("click", () => refreshGroups().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshUsageButton").addEventListener("click", () => refreshUsage().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("previewUploadOrphansButton").addEventListener("click", () => refreshManagedUploadOrphans().catch((error) => setStatus(error.message, "error")));
+    document.getElementById("purgeUploadOrphansButton").addEventListener("click", () => purgeManagedUploadOrphans().catch((error) => setStatus(error.message, "error")));
     document.getElementById("refreshQuotaPolicyButton").addEventListener("click", () => refreshWorkspaceQuotaPolicy().catch((error) => setStatus(error.message, "error")));
     document.getElementById("saveQuotaPolicyButton").addEventListener("click", () => saveWorkspaceQuotaPolicy().catch((error) => setStatus(error.message, "error")));
     document.getElementById("clearQuotaPolicyButton").addEventListener("click", () => clearWorkspaceQuotaPolicy().catch((error) => setStatus(error.message, "error")));

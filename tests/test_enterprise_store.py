@@ -17430,6 +17430,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             "ok": True,
             "wheel": "pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl",
             "checks": {
+                "wheel_built": True,
+                "console_script": True,
+                "manifest_generated": True,
                 "source_clean": True,
                 "secret_hygiene": True,
                 "package_license": True,
@@ -17504,6 +17507,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Wheel SHA-256: `wheelhash`", summary)
         self.assertIn("- Wheel size bytes: `165251`", summary)
         self.assertIn("- Artifact identity: `count=1, type=python-wheel, media_type=application/zip`", summary)
+        self.assertIn("- Packaging gates: `wheel_built=True, console_script=True, manifest_generated=True`", summary)
         self.assertIn("- Wheel integrity: `content_ok=True, record_ok=True`", summary)
         self.assertIn("- Source: `codex/enterprise-cleanroom@abc123`", summary)
         self.assertIn("- Source upstream: `origin/codex/enterprise-cleanroom`", summary)
@@ -17585,6 +17589,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Wheel SHA-256: `unknown`", summary)
         self.assertIn("- Wheel size bytes: `unknown`", summary)
         self.assertIn("- Artifact identity: `count=unknown, type=unknown, media_type=unknown`", summary)
+        self.assertIn(
+            "- Packaging gates: `wheel_built=unknown, console_script=unknown, manifest_generated=unknown`",
+            summary,
+        )
         self.assertIn("- Wheel integrity: `content_ok=unknown, record_ok=unknown`", summary)
         self.assertIn("- CI context: `local`", summary)
         self.assertIn("- CI run: `not-applicable`", summary)
@@ -17635,6 +17643,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             "ok": True,
             "wheel": "wheel`name\nx.whl",
             "checks": {
+                "wheel_built": "ok`wheel\nnext",
+                "console_script": "ok`console\nnext",
+                "manifest_generated": "ok`manifest\nnext",
                 "source_clean": True,
                 "secret_hygiene": True,
                 "package_license": "ok`yes\nnext",
@@ -17700,6 +17711,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             "- Artifact identity: `` count=1`artifact next, type=python`wheel next, media_type=application`zip next ``",
             summary,
         )
+        self.assertIn(
+            "- Packaging gates: `` wheel_built=ok`wheel next, console_script=ok`console next, manifest_generated=ok`manifest next ``",
+            summary,
+        )
         self.assertIn("- Wheel integrity: `` content_ok=true`content next, record_ok=true`record next ``", summary)
         self.assertIn("- Source: `` branch`name next@abc`123 ``", summary)
         self.assertIn("- Source upstream: `` origin`branch next ``", summary)
@@ -17737,6 +17752,9 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("1`artifact\nnext", summary)
         self.assertNotIn("python`wheel\nnext", summary)
         self.assertNotIn("application`zip\nnext", summary)
+        self.assertNotIn("ok`wheel\nnext", summary)
+        self.assertNotIn("ok`console\nnext", summary)
+        self.assertNotIn("ok`manifest\nnext", summary)
         self.assertNotIn("origin`branch\nnext", summary)
         self.assertNotIn("workflow`name\nnext", summary)
         self.assertNotIn("sha`one\nnext", summary)

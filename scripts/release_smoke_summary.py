@@ -51,6 +51,11 @@ def render_release_smoke_summary(report_path: Path) -> str:
     )
     eval_count = f"{eval_checks.get('passed', '?')}/{eval_checks.get('total', '?')}"
     deployment_count = f"{deployment_checks.get('passed', '?')}/{deployment_checks.get('total', '?')}"
+    packaging_gates = (
+        f"wheel_built={checks.get('wheel_built', 'unknown')}, "
+        f"console_script={checks.get('console_script', 'unknown')}, "
+        f"manifest_generated={checks.get('manifest_generated', 'unknown')}"
+    )
     command_gates = (
         f"eval_ok={checks.get('eval_command', 'unknown')}, "
         f"deployment_ok={manifest.get('deployment_check_ok', checks.get('deployment_check', 'unknown'))}, "
@@ -116,6 +121,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Wheel SHA-256: {_inline_code(manifest.get('wheel_sha256', 'unknown'))}",
             f"- Wheel size bytes: {_inline_code(manifest.get('wheel_size_bytes', 'unknown'))}",
             f"- Artifact identity: {_inline_code(artifact_identity)}",
+            f"- Packaging gates: {_inline_code(packaging_gates)}",
             f"- Wheel integrity: {_inline_code(wheel_integrity)}",
             f"- Source: {_inline_code(source)}",
             f"- Source upstream: {_inline_code(manifest.get('source_upstream') or 'unknown')}",

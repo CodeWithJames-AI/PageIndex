@@ -16945,6 +16945,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["sbom_generated"], True)
         self.assertEqual(report["checks"]["sbom_describes_root"], True)
         self.assertEqual(report["checks"]["sbom_package_urls"], True)
+        self.assertEqual(report["checks"]["sbom_root_supplier"], True)
         self.assertEqual(report["checks"]["build_environment"], True)
         self.assertEqual(report["checks"]["dependency_inventory"], True)
         self.assertEqual(report["checks"]["dependency_pins"], True)
@@ -16970,6 +16971,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["sbom_describes_count"], 1)
         self.assertEqual(report["manifest"]["sbom_external_ref_count"], len(sbom["packages"]))
         self.assertEqual(report["manifest"]["build_platform"], manifest["build_environment"]["platform"])
+        self.assertEqual(report["manifest"]["sbom_root_supplier"], "Organization: PageIndex clean-room contributors")
         self.assertEqual(report["manifest"]["build_python_version"], manifest["build_environment"]["python_version"])
         self.assertEqual(report["manifest"]["source_clean_required"], False)
         self.assertEqual(report["manifest"]["source_dirty_count"], manifest["source"]["dirty_count"])
@@ -17066,6 +17068,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(sbom["packages"][0]["name"], "pageindex-enterprise-cleanroom")
         self.assertEqual(sbom["packages"][0]["versionInfo"], "0.1.0")
         self.assertEqual(sbom["packages"][0]["primaryPackagePurpose"], "APPLICATION")
+        self.assertEqual(sbom["packages"][0]["supplier"], "Organization: PageIndex clean-room contributors")
         self.assertEqual(sbom["packages"][0]["licenseDeclared"], "MIT")
         self.assertEqual(sbom["packages"][0]["licenseConcluded"], "NOASSERTION")
         self.assertEqual(
@@ -17084,6 +17087,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertIn(dependency_name, sbom_packages)
             self.assertEqual(sbom_packages[dependency_name]["versionInfo"], specifier.removeprefix("=="))
             self.assertEqual(sbom_packages[dependency_name]["primaryPackagePurpose"], "LIBRARY")
+            self.assertEqual(sbom_packages[dependency_name]["supplier"], "NOASSERTION")
             self.assertEqual(sbom_packages[dependency_name]["licenseDeclared"], "NOASSERTION")
             self.assertEqual(sbom_packages[dependency_name]["licenseConcluded"], "NOASSERTION")
             self.assertEqual(
@@ -17109,6 +17113,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "sbom_generated": True,
             "sbom_describes_root": True,
             "sbom_package_urls": True,
+            "sbom_root_supplier": True,
             "build_environment": True,
             "dependency_inventory": True,
             "dependency_pins": True,
@@ -17128,6 +17133,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         bad_package_license = {**checks, "package_license": False}
         bad_sbom_describes_root = {**checks, "sbom_describes_root": False}
         bad_sbom_package_urls = {**checks, "sbom_package_urls": False}
+        bad_sbom_root_supplier = {**checks, "sbom_root_supplier": False}
         bad_build_environment = {**checks, "build_environment": False}
         bad_source_clean = {**checks, "source_clean": False}
 
@@ -17139,6 +17145,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(_release_checks_ok(bad_package_license), False)
         self.assertEqual(_release_checks_ok(bad_sbom_describes_root), False)
         self.assertEqual(_release_checks_ok(bad_sbom_package_urls), False)
+        self.assertEqual(_release_checks_ok(bad_sbom_root_supplier), False)
         self.assertEqual(_release_checks_ok(bad_build_environment), False)
         self.assertEqual(_release_checks_ok(bad_source_clean), False)
 

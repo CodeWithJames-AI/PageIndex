@@ -160,6 +160,7 @@ def run_release_smoke(
             "sbom_generated": len(sbom["packages"]) == len(dependencies) + 1,
             "sbom_describes_root": _sbom_describes_root_package(sbom),
             "sbom_package_urls": _sbom_package_url_count(sbom) == len(sbom["packages"]),
+            "sbom_root_supplier": _sbom_root_supplier_ok(sbom),
             "build_environment": _build_environment_ok(manifest["build_environment"]),
             "dependency_inventory": bool(manifest["dependencies"]),
             "dependency_pins": manifest["dependency_policy"]["direct_dependencies_pinned"],
@@ -189,6 +190,7 @@ def run_release_smoke(
                 "sbom_describes_count": len(sbom.get("documentDescribes", [])),
                 "sbom_external_ref_count": _sbom_package_url_count(sbom),
                 "sbom_path": str(sbom_output) if sbom_output is not None else None,
+                "sbom_root_supplier": sbom["packages"][0].get("supplier"),
                 "source_clean_required": require_clean_source,
                 "source_branch": manifest["source"]["branch"],
                 "source_commit": manifest["source"]["commit"],
@@ -395,6 +397,7 @@ def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
             "licenseDeclared": package["license_declared"],
             "name": package["name"],
             "primaryPackagePurpose": "APPLICATION",
+            "supplier": "Organization: PageIndex clean-room contributors",
             "versionInfo": package["version"],
             "externalRefs": _pypi_package_url_refs(package["name"], package["version"]),
             "checksums": [
@@ -417,6 +420,7 @@ def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
                 "licenseDeclared": "NOASSERTION",
                 "name": dependency["name"],
                 "primaryPackagePurpose": "LIBRARY",
+                "supplier": "NOASSERTION",
                 "versionInfo": _dependency_version_info(dependency),
                 "externalRefs": _pypi_package_url_refs(dependency["name"], _dependency_version_info(dependency)),
             }
@@ -490,6 +494,13 @@ def _sbom_describes_root_package(sbom: dict[str, Any]) -> bool:
         return False
     root_id = packages[0].get("SPDXID")
     return bool(root_id) and sbom.get("documentDescribes") == [root_id]
+
+
+def _sbom_root_supplier_ok(sbom: dict[str, Any]) -> bool:
+    packages = sbom.get("packages", [])
+    if not packages:
+        return False
+    return packages[0].get("supplier") == "Organization: PageIndex clean-room contributors"
 
 
 def _wheel_package_metadata(wheel: Path) -> dict[str, str]:

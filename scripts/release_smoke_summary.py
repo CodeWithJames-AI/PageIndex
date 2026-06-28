@@ -51,6 +51,11 @@ def render_release_smoke_summary(report_path: Path) -> str:
     )
     eval_count = f"{eval_checks.get('passed', '?')}/{eval_checks.get('total', '?')}"
     deployment_count = f"{deployment_checks.get('passed', '?')}/{deployment_checks.get('total', '?')}"
+    command_gates = (
+        f"eval_ok={checks.get('eval_command', 'unknown')}, "
+        f"deployment_ok={manifest.get('deployment_check_ok', checks.get('deployment_check', 'unknown'))}, "
+        f"deployment_failed={manifest.get('deployment_check_failed', deployment_checks.get('failed', 'unknown'))}"
+    )
     artifact_identity = (
         f"count={manifest.get('artifact_count', 'unknown')}, "
         f"type={manifest.get('artifact_type', 'unknown')}, "
@@ -123,6 +128,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Source dirty paths: {_inline_code(source_dirty_status)}",
             f"- Eval checks: {_inline_code(eval_count)} passed",
             f"- Deployment checks: {_inline_code(deployment_count)} passed",
+            f"- Command gates: {_inline_code(command_gates)}",
             f"- Dependencies: {_inline_code(dependency_status)}",
             f"- Build environment: {_inline_code(build_environment)}",
             f"- Package license: {_inline_code(package_license)}",

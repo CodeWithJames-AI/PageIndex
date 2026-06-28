@@ -17435,7 +17435,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "package_license": True,
                 "manifest_generator": True,
                 "sbom_root_supplier": True,
+                "eval_command": True,
                 "eval_checks": {"passed": 17, "total": 17},
+                "deployment_check": True,
                 "deployment_checks": {"passed": 9, "total": 9},
             },
             "report": {"written": True},
@@ -17458,6 +17460,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "source_dirty": False,
                 "source_dirty_count": 0,
                 "source_dirty_paths_truncated": False,
+                "deployment_check_ok": True,
+                "deployment_check_failed": 0,
                 "wheel_sha256": "wheelhash",
                 "wheel_size_bytes": 165251,
                 "wheel_content_policy_ok": True,
@@ -17515,6 +17519,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Source dirty paths: `count=0, paths_truncated=False`", summary)
         self.assertIn("- Eval checks: `17/17` passed", summary)
         self.assertIn("- Deployment checks: `9/9` passed", summary)
+        self.assertIn("- Command gates: `eval_ok=True, deployment_ok=True, deployment_failed=0`", summary)
         self.assertIn("- Dependencies: `count=5, pinned=True`", summary)
         self.assertIn(
             "- Build environment: `python=3.11.15, platform=Linux-6.11.0-1018-azure-x86_64-with-glibc2.39`",
@@ -17587,6 +17592,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Source clean required: `unknown`", summary)
         self.assertIn("- Source dirty: `unknown`", summary)
         self.assertIn("- Eval checks: `?/?` passed", summary)
+        self.assertIn("- Command gates: `eval_ok=unknown, deployment_ok=unknown, deployment_failed=unknown`", summary)
         self.assertIn("- Source dirty paths: `count=unknown, paths_truncated=unknown`", summary)
         self.assertIn("- Dependencies: `count=unknown, pinned=unknown`", summary)
         self.assertIn("- Build environment: `python=unknown, platform=unknown`", summary)
@@ -17634,6 +17640,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "package_license": "ok`yes\nnext",
                 "manifest_generator": "ok`generator\nnext",
                 "sbom_root_supplier": "ok`supplier\nnext",
+                "eval_command": "ok`eval\nnext",
+                "deployment_check": "ok`deployment\nnext",
             },
             "manifest": {
                 "artifact_count": "1`artifact\nnext",
@@ -17654,6 +17662,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "source_dirty": "false`dirty\nnext",
                 "source_dirty_count": "7`paths\nnext",
                 "source_dirty_paths_truncated": "false`ish",
+                "deployment_check_ok": "true`deployment\nnext",
+                "deployment_check_failed": "0`failed\nnext",
                 "wheel_sha256": "wheel`hash",
                 "wheel_size_bytes": "123`456\n789",
                 "wheel_content_policy_ok": "true`content\nnext",
@@ -17699,6 +17709,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Source clean required: `` true`required next ``", summary)
         self.assertIn("- Source dirty: `` false`dirty next ``", summary)
         self.assertIn("- Source dirty paths: `` count=7`paths next, paths_truncated=false`ish ``", summary)
+        self.assertIn(
+            "- Command gates: `` eval_ok=ok`eval next, deployment_ok=true`deployment next, deployment_failed=0`failed next ``",
+            summary,
+        )
         self.assertIn("- Dependencies: `` count=5`deps next, pinned=true`yes ``", summary)
         self.assertIn("- Build environment: `` python=3`11 next, platform=Linux`arm next ``", summary)
         self.assertIn("- Package license: `` declared=MIT`custom next, check=ok`yes next ``", summary)
@@ -17728,6 +17742,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("sha`one\nnext", summary)
         self.assertNotIn("true`required\nnext", summary)
         self.assertNotIn("false`dirty\nnext", summary)
+        self.assertNotIn("ok`eval\nnext", summary)
+        self.assertNotIn("ok`deployment\nnext", summary)
+        self.assertNotIn("true`deployment\nnext", summary)
+        self.assertNotIn("0`failed\nnext", summary)
         self.assertNotIn("true`content\nnext", summary)
         self.assertNotIn("true`record\nnext", summary)
         self.assertNotIn("7`paths\nnext", summary)

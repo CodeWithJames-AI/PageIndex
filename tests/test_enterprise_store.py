@@ -4753,11 +4753,48 @@ class EnterpriseStoreTest(unittest.TestCase):
                     "citation_count": 1,
                     "virtual_node_doc_count": 2,
                     "virtual_node_count": 0,
+                    "managed_upload_file_count": 0,
                 },
             )
             self.assertNotIn(str(source), serialized)
             self.assertNotIn("Deletion target evidence.", serialized)
+            self.assertTrue(source.exists())
             self.assertFalse(store.delete_document("doc_missing", workspace_id=workspace_id, actor_user_id="alice"))
+
+    def test_delete_document_removes_managed_upload_file_after_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            upload_dir = store.root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            managed_source = upload_dir / "managed-delete.txt"
+            managed_source.write_text("Managed delete cleanup evidence.", encoding="utf-8")
+            local_source = root / "local-delete.txt"
+            local_source.write_text("Local delete source remains.", encoding="utf-8")
+            managed_doc_id = store.ingest_file(
+                managed_source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Managed delete",
+            )
+            local_doc_id = store.ingest_file(
+                local_source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Local delete",
+            )
+
+            self.assertTrue(store.delete_document(managed_doc_id, workspace_id=workspace_id, actor_user_id="alice"))
+            managed_events = store.list_audit_events(workspace_id, "alice", action="document.delete")
+            self.assertFalse(managed_source.exists())
+            self.assertEqual(managed_events[0]["details"]["managed_upload_file_count"], 1)
+
+            self.assertTrue(store.delete_document(local_doc_id, workspace_id=workspace_id, actor_user_id="alice"))
+            local_events = store.list_audit_events(workspace_id, "alice", action="document.delete")
+            self.assertTrue(local_source.exists())
+            self.assertEqual(local_events[0]["details"]["managed_upload_file_count"], 0)
 
     def test_delete_document_rolls_back_when_audit_insert_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4782,6 +4819,29 @@ class EnterpriseStoreTest(unittest.TestCase):
                 store.conn.execute("SELECT COUNT(*) AS count FROM document_pages WHERE doc_id = ?", (doc_id,)).fetchone()["count"],
                 1,
             )
+
+    def test_delete_document_audit_failure_keeps_managed_upload_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = EnterpriseStore(root / "workspace")
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            upload_dir = store.root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            managed_source = upload_dir / "rollback-managed-delete.txt"
+            managed_source.write_text("Managed delete rollback evidence.", encoding="utf-8")
+            doc_id = store.ingest_file(managed_source, workspace_id=workspace_id, actor_user_id="alice", name="Managed rollback")
+
+            def fail_audit(*args, **kwargs):
+                raise RuntimeError("audit insert failed")
+
+            store._insert_audit_event = fail_audit
+
+            with self.assertRaisesRegex(RuntimeError, "audit insert failed"):
+                store.delete_document(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+
+            self.assertTrue(managed_source.exists())
+            self.assertEqual(store.get_document(doc_id)["name"], "Managed rollback")
 
     def test_api_tokens_are_hashed_and_verify_workspace_context(self):
         with tempfile.TemporaryDirectory() as tmp:

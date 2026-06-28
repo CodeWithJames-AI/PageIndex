@@ -6591,6 +6591,19 @@ class EnterpriseStore:
             raise FileNotFoundError(source_path)
         return {"document": document, "path": source_path}
 
+    def _managed_upload_source_path(self, document: dict[str, Any]) -> Path | None:
+        workspace_id = document.get("workspace_id")
+        if not workspace_id:
+            return None
+        uploads_root = (self.root / "uploads").resolve()
+        upload_dir = (uploads_root / _safe_storage_segment(workspace_id)).resolve()
+        if not _path_is_relative_to(upload_dir, uploads_root):
+            raise ValueError("workspace upload path is invalid")
+        source_path = Path(str(document["source_path"])).expanduser().resolve()
+        if not _path_is_relative_to(source_path, upload_dir):
+            return None
+        return source_path
+
     def rename_document(
         self,
         doc_id: str,
@@ -7868,6 +7881,8 @@ class EnterpriseStore:
         virtual_node_count = int(
             self._one("SELECT COUNT(*) AS count FROM virtual_nodes WHERE doc_id = ?", (doc_id,))["count"]
         )
+        managed_upload_path = self._managed_upload_source_path(document)
+        managed_upload_file_count = int(managed_upload_path is not None and managed_upload_path.is_file())
         if document["workspace_id"]:
             share_link_count = int(
                 self._one(
@@ -7929,8 +7944,14 @@ class EnterpriseStore:
                         "citation_count": citation_count,
                         "virtual_node_doc_count": virtual_node_doc_count,
                         "virtual_node_count": virtual_node_count,
+                        "managed_upload_file_count": managed_upload_file_count,
                     },
                 )
+        if deleted and managed_upload_path is not None:
+            try:
+                managed_upload_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         return deleted
 
     def create_conversation(

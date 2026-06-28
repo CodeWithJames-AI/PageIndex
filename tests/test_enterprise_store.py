@@ -16917,6 +16917,17 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("python -m pip install -r requirements.txt", workflow)
         self.assertNotIn("python -m pip install --no-deps -r requirements.txt", workflow)
 
+    def test_release_smoke_workflow_uses_node24_actions(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        workflow = (repo_root / ".github" / "workflows" / "release-smoke.yml").read_text(encoding="utf-8")
+
+        self.assertIn("uses: actions/checkout@v7", workflow)
+        self.assertIn("uses: actions/setup-python@v6", workflow)
+        self.assertIn("uses: actions/upload-artifact@v7", workflow)
+        self.assertNotIn("uses: actions/checkout@v4", workflow)
+        self.assertNotIn("uses: actions/setup-python@v5", workflow)
+        self.assertNotIn("uses: actions/upload-artifact@v4", workflow)
+
     def test_release_smoke_builds_packaged_console_and_eval(self):
         repo_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:

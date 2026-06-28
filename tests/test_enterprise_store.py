@@ -17454,6 +17454,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "source_branch": "codex/enterprise-cleanroom",
                 "source_commit": "abc123",
                 "source_upstream": "origin/codex/enterprise-cleanroom",
+                "source_clean_required": True,
                 "source_dirty_count": 0,
                 "source_dirty_paths_truncated": False,
                 "wheel_sha256": "wheelhash",
@@ -17508,6 +17509,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         )
         self.assertIn("- CI workflow: `name=Release smoke, sha=def456`", summary)
         self.assertIn("- Source clean: `True`", summary)
+        self.assertIn("- Source clean required: `True`", summary)
         self.assertIn("- Source dirty paths: `count=0, paths_truncated=False`", summary)
         self.assertIn("- Eval checks: `17/17` passed", summary)
         self.assertIn("- Deployment checks: `9/9` passed", summary)
@@ -17580,6 +17582,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- CI context: `local`", summary)
         self.assertIn("- CI run: `not-applicable`", summary)
         self.assertIn("- CI workflow: `name=unknown, sha=unknown`", summary)
+        self.assertIn("- Source clean required: `unknown`", summary)
         self.assertIn("- Eval checks: `?/?` passed", summary)
         self.assertIn("- Source dirty paths: `count=unknown, paths_truncated=unknown`", summary)
         self.assertIn("- Dependencies: `count=unknown, pinned=unknown`", summary)
@@ -17644,6 +17647,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "source_branch": "branch`name\nnext",
                 "source_commit": "abc`123",
                 "source_upstream": "origin`branch\nnext",
+                "source_clean_required": "true`required\nnext",
                 "source_dirty_count": "7`paths\nnext",
                 "source_dirty_paths_truncated": "false`ish",
                 "wheel_sha256": "wheel`hash",
@@ -17688,6 +17692,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- CI context: `` github`actions:repo`name next@ref`name next ``", summary)
         self.assertIn("- CI run: `` https://example.invalid/run`one next attempt=attempt`1 ``", summary)
         self.assertIn("- CI workflow: `` name=workflow`name next, sha=sha`one next ``", summary)
+        self.assertIn("- Source clean required: `` true`required next ``", summary)
         self.assertIn("- Source dirty paths: `` count=7`paths next, paths_truncated=false`ish ``", summary)
         self.assertIn("- Dependencies: `` count=5`deps next, pinned=true`yes ``", summary)
         self.assertIn("- Build environment: `` python=3`11 next, platform=Linux`arm next ``", summary)
@@ -17716,6 +17721,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("origin`branch\nnext", summary)
         self.assertNotIn("workflow`name\nnext", summary)
         self.assertNotIn("sha`one\nnext", summary)
+        self.assertNotIn("true`required\nnext", summary)
         self.assertNotIn("true`content\nnext", summary)
         self.assertNotIn("true`record\nnext", summary)
         self.assertNotIn("7`paths\nnext", summary)

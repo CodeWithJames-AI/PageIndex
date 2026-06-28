@@ -13,6 +13,7 @@ import sys
 import tempfile
 import zipfile
 from datetime import datetime, timezone
+from email.parser import Parser
 from pathlib import Path
 from typing import Any
 
@@ -115,12 +116,14 @@ def run_release_smoke(
         eval_report = json.loads(eval_result.stdout)
         deployment_report = _run_packaged_deployment_check(console, deployment_root, cwd=tmp_path, env=env)
         _inspect_wheel(wheel)
+        package_metadata = _wheel_package_metadata(wheel)
         dependencies = _wheel_dependencies(wheel)
         dependency_policy = _dependency_policy(dependencies)
         wheel_record = _wheel_record_integrity(wheel)
         wheel_content = _wheel_content_policy(wheel)
         manifest = _artifact_manifest(
             wheel,
+            package_metadata=package_metadata,
             source=_source_metadata(repo_root),
             dependencies=dependencies,
             dependency_policy=dependency_policy,
@@ -154,6 +157,7 @@ def run_release_smoke(
             "sbom_generated": len(sbom["packages"]) == len(dependencies) + 1,
             "dependency_inventory": bool(manifest["dependencies"]),
             "dependency_pins": manifest["dependency_policy"]["direct_dependencies_pinned"],
+            "package_license": manifest["package"]["license_declared"] != "NOASSERTION",
             "wheel_content_policy": manifest["artifacts"][0]["content"]["ok"],
             "wheel_record_hashes": manifest["artifacts"][0]["record"]["ok"],
             "eval_command": eval_report.get("ok") is True,
@@ -171,6 +175,7 @@ def run_release_smoke(
                 "artifact_count": len(manifest["artifacts"]),
                 "dependency_count": len(manifest["dependencies"]),
                 "direct_dependencies_pinned": manifest["dependency_policy"]["direct_dependencies_pinned"],
+                "license_declared": manifest["package"]["license_declared"],
                 "path": str(manifest_output) if manifest_output is not None else None,
                 "sbom_component_count": len(sbom["packages"]),
                 "sbom_path": str(sbom_output) if sbom_output is not None else None,
@@ -333,6 +338,7 @@ def _inspect_wheel(wheel: Path) -> None:
 def _artifact_manifest(
     wheel: Path,
     *,
+    package_metadata: dict[str, str],
     source: dict[str, Any],
     dependencies: list[dict[str, Any]],
     dependency_policy: dict[str, Any],
@@ -344,6 +350,8 @@ def _artifact_manifest(
         "package": {
             "name": "pageindex-enterprise-cleanroom",
             "version": VERSION,
+            "license_declared": package_metadata["license_declared"],
+            "summary": package_metadata["summary"],
         },
         "source": source,
         "dependencies": dependencies,
@@ -369,6 +377,8 @@ def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
             "SPDXID": root_spdx_id,
             "downloadLocation": "NOASSERTION",
             "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": package["license_declared"],
             "name": package["name"],
             "versionInfo": package["version"],
             "checksums": [
@@ -387,6 +397,8 @@ def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
                 "SPDXID": dep_spdx_id,
                 "downloadLocation": "NOASSERTION",
                 "filesAnalyzed": False,
+                "licenseConcluded": "NOASSERTION",
+                "licenseDeclared": "NOASSERTION",
                 "name": dependency["name"],
                 "versionInfo": _dependency_version_info(dependency),
             }
@@ -426,6 +438,27 @@ def _dependency_version_info(dependency: dict[str, Any]) -> str:
     if isinstance(specifier, str) and specifier.startswith("=="):
         return specifier.removeprefix("==")
     return "NOASSERTION"
+
+
+def _wheel_package_metadata(wheel: Path) -> dict[str, str]:
+    metadata_path = f"{PACKAGE_NAME}-{VERSION}.dist-info/METADATA"
+    with zipfile.ZipFile(wheel) as archive:
+        metadata = Parser().parsestr(archive.read(metadata_path).decode("utf-8"))
+    return {
+        "license_declared": _spdx_license_declared(metadata.get("License")),
+        "name": metadata.get("Name", ""),
+        "summary": metadata.get("Summary", ""),
+        "version": metadata.get("Version", ""),
+    }
+
+
+def _spdx_license_declared(value: str | None) -> str:
+    if value is None:
+        return "NOASSERTION"
+    normalized = value.strip()
+    if not normalized or normalized.upper() == "UNKNOWN":
+        return "NOASSERTION"
+    return normalized
 
 
 def _wheel_dependencies(wheel: Path) -> list[dict[str, Any]]:

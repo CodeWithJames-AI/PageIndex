@@ -16899,6 +16899,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn('build-backend = "setuptools.build_meta"', pyproject)
         self.assertIn("name = pageindex-enterprise-cleanroom", setup_cfg)
         self.assertIn("python_requires = >=3.9", setup_cfg)
+        self.assertIn("license = MIT", setup_cfg)
         self.assertIn("pageindex-enterprise = pageindex_enterprise.__main__:main", setup_cfg)
         self.assertIn("    pageindex\n", setup_cfg)
         self.assertIn("    pageindex_enterprise\n", setup_cfg)
@@ -16943,6 +16944,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["sbom_generated"], True)
         self.assertEqual(report["checks"]["dependency_inventory"], True)
         self.assertEqual(report["checks"]["dependency_pins"], True)
+        self.assertEqual(report["checks"]["package_license"], True)
         self.assertEqual(report["checks"]["wheel_content_policy"], True)
         self.assertEqual(report["checks"]["wheel_record_hashes"], True)
         self.assertEqual(report["checks"]["eval_command"], True)
@@ -16958,6 +16960,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["artifact_count"], 1)
         self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
         self.assertEqual(report["manifest"]["direct_dependencies_pinned"], True)
+        self.assertEqual(report["manifest"]["license_declared"], "MIT")
         self.assertEqual(Path(report["manifest"]["sbom_path"]).resolve(), sbom_path.resolve())
         self.assertEqual(report["manifest"]["sbom_component_count"], len(manifest["dependencies"]) + 1)
         self.assertEqual(report["manifest"]["source_clean_required"], False)
@@ -16970,7 +16973,15 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["wheel_content_policy_ok"], True)
         self.assertEqual(report["manifest"]["wheel_record_hashes_valid"], True)
         self.assertEqual(manifest["schema_version"], 1)
-        self.assertEqual(manifest["package"], {"name": "pageindex-enterprise-cleanroom", "version": "0.1.0"})
+        self.assertEqual(
+            manifest["package"],
+            {
+                "license_declared": "MIT",
+                "name": "pageindex-enterprise-cleanroom",
+                "summary": "Clean-room PageIndex enterprise control plane and retrieval service.",
+                "version": "0.1.0",
+            },
+        )
         self.assertEqual(manifest["source"]["commit"], report["manifest"]["source_commit"])
         self.assertRegex(manifest["source"]["commit"], r"^[0-9a-f]{40}$")
         self.assertEqual(manifest["source"]["dirty"], report["manifest"]["source_dirty"])
@@ -17015,11 +17026,15 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertRegex(sbom["creationInfo"]["created"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
         self.assertEqual(sbom["packages"][0]["name"], "pageindex-enterprise-cleanroom")
         self.assertEqual(sbom["packages"][0]["versionInfo"], "0.1.0")
+        self.assertEqual(sbom["packages"][0]["licenseDeclared"], "MIT")
+        self.assertEqual(sbom["packages"][0]["licenseConcluded"], "NOASSERTION")
         self.assertEqual(sbom["packages"][0]["checksums"][0]["checksumValue"], manifest["artifacts"][0]["sha256"])
         sbom_packages = {package["name"]: package for package in sbom["packages"]}
         for dependency_name, specifier in dependency_specifiers.items():
             self.assertIn(dependency_name, sbom_packages)
             self.assertEqual(sbom_packages[dependency_name]["versionInfo"], specifier.removeprefix("=="))
+            self.assertEqual(sbom_packages[dependency_name]["licenseDeclared"], "NOASSERTION")
+            self.assertEqual(sbom_packages[dependency_name]["licenseConcluded"], "NOASSERTION")
         self.assertEqual(len(sbom["relationships"]), len(manifest["dependencies"]))
         self.assertTrue(all(relationship["relationshipType"] == "DEPENDS_ON" for relationship in sbom["relationships"]))
 
@@ -17033,6 +17048,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "sbom_generated": True,
             "dependency_inventory": True,
             "dependency_pins": True,
+            "package_license": True,
             "wheel_content_policy": True,
             "wheel_record_hashes": True,
             "eval_command": True,
@@ -17045,6 +17061,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         bad_eval_summary = {**checks, "eval_checks": {"failed": 1}}
         bad_deployment_summary = {**checks, "deployment_checks": {"failed": 1}}
         bad_secret_hygiene = {**checks, "secret_hygiene": False}
+        bad_package_license = {**checks, "package_license": False}
         bad_source_clean = {**checks, "source_clean": False}
 
         self.assertEqual(_release_checks_ok(checks), True)
@@ -17052,6 +17069,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(_release_checks_ok(bad_eval_summary), False)
         self.assertEqual(_release_checks_ok(bad_deployment_summary), False)
         self.assertEqual(_release_checks_ok(bad_secret_hygiene), False)
+        self.assertEqual(_release_checks_ok(bad_package_license), False)
         self.assertEqual(_release_checks_ok(bad_source_clean), False)
 
     def test_release_smoke_secret_hygiene_detects_secret_shaped_output(self):

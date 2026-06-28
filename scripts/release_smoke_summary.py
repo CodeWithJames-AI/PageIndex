@@ -47,6 +47,10 @@ def render_release_smoke_summary(report_path: Path) -> str:
     ci_run = _ci_run(manifest)
     eval_count = f"{eval_checks.get('passed', '?')}/{eval_checks.get('total', '?')}"
     deployment_count = f"{deployment_checks.get('passed', '?')}/{deployment_checks.get('total', '?')}"
+    source_dirty_status = (
+        f"count={manifest.get('source_dirty_count', 'unknown')}, "
+        f"paths_truncated={manifest.get('source_dirty_paths_truncated', 'unknown')}"
+    )
     dependency_status = (
         f"count={manifest.get('dependency_count', 'unknown')}, "
         f"pinned={manifest.get('direct_dependencies_pinned', 'unknown')}"
@@ -73,6 +77,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- CI context: {_inline_code(ci_context)}",
             f"- CI run: {_inline_code(ci_run)}",
             f"- Source clean: {_inline_code(checks.get('source_clean', 'not-required'))}",
+            f"- Source dirty paths: {_inline_code(source_dirty_status)}",
             f"- Eval checks: {_inline_code(eval_count)} passed",
             f"- Deployment checks: {_inline_code(deployment_count)} passed",
             f"- Dependencies: {_inline_code(dependency_status)}",

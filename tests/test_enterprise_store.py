@@ -17444,6 +17444,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "ci_run_url": "https://github.com/CodeWithJames-AI/PageIndex/actions/runs/12345",
                 "source_branch": "codex/enterprise-cleanroom",
                 "source_commit": "abc123",
+                "source_dirty_count": 0,
+                "source_dirty_paths_truncated": False,
                 "wheel_sha256": "wheelhash",
                 "wheel_size_bytes": 165251,
                 "dependency_count": 5,
@@ -17478,6 +17480,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             summary,
         )
         self.assertIn("- Source clean: `True`", summary)
+        self.assertIn("- Source dirty paths: `count=0, paths_truncated=False`", summary)
         self.assertIn("- Eval checks: `17/17` passed", summary)
         self.assertIn("- Deployment checks: `9/9` passed", summary)
         self.assertIn("- Dependencies: `count=5, pinned=True`", summary)
@@ -17533,6 +17536,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- CI context: `local`", summary)
         self.assertIn("- CI run: `not-applicable`", summary)
         self.assertIn("- Eval checks: `?/?` passed", summary)
+        self.assertIn("- Source dirty paths: `count=unknown, paths_truncated=unknown`", summary)
         self.assertIn("- Dependencies: `count=unknown, pinned=unknown`", summary)
         self.assertIn("- Build environment: `python=unknown, platform=unknown`", summary)
 
@@ -17576,6 +17580,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "ci_run_url": "https://example.invalid/run`one\nnext",
                 "source_branch": "branch`name\nnext",
                 "source_commit": "abc`123",
+                "source_dirty_count": "7`paths\nnext",
+                "source_dirty_paths_truncated": "false`ish",
                 "wheel_sha256": "wheel`hash",
                 "wheel_size_bytes": "123`456\n789",
                 "dependency_count": "5`deps\nnext",
@@ -17597,11 +17603,13 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Source: `` branch`name next@abc`123 ``", summary)
         self.assertIn("- CI context: `` github`actions:repo`name next@ref`name next ``", summary)
         self.assertIn("- CI run: `` https://example.invalid/run`one next attempt=attempt`1 ``", summary)
+        self.assertIn("- Source dirty paths: `` count=7`paths next, paths_truncated=false`ish ``", summary)
         self.assertIn("- Dependencies: `` count=5`deps next, pinned=true`yes ``", summary)
         self.assertIn("- Build environment: `` python=3`11 next, platform=Linux`arm next ``", summary)
         self.assertIn("- Manifest SHA-256: `` hash`one ``", summary)
         self.assertNotIn("wheel`name\nx.whl", summary)
         self.assertNotIn("123`456\n789", summary)
+        self.assertNotIn("7`paths\nnext", summary)
         self.assertNotIn("5`deps\nnext", summary)
         self.assertNotIn("Linux`arm\nnext", summary)
         self.assertNotIn("branch`name\nnext", summary)

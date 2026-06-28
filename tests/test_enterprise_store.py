@@ -17432,6 +17432,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "checks": {
                 "source_clean": True,
                 "secret_hygiene": True,
+                "package_license": True,
                 "eval_checks": {"passed": 17, "total": 17},
                 "deployment_checks": {"passed": 9, "total": 9},
             },
@@ -17452,6 +17453,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "direct_dependencies_pinned": True,
                 "build_platform": "Linux-6.11.0-1018-azure-x86_64-with-glibc2.39",
                 "build_python_version": "3.11.15",
+                "license_declared": "MIT",
                 "manifest_payload_matches_output": True,
                 "manifest_written": True,
                 "manifest_sha256": "manifesthash",
@@ -17488,6 +17490,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "- Build environment: `python=3.11.15, platform=Linux-6.11.0-1018-azure-x86_64-with-glibc2.39`",
             summary,
         )
+        self.assertIn("- Package license: `declared=MIT, check=True`", summary)
         self.assertIn("- Secret hygiene: `True`", summary)
         self.assertIn("- Report output written: `True`", summary)
         self.assertIn("- Manifest sidecar: `written=True, matches=True`", summary)
@@ -17539,6 +17542,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Source dirty paths: `count=unknown, paths_truncated=unknown`", summary)
         self.assertIn("- Dependencies: `count=unknown, pinned=unknown`", summary)
         self.assertIn("- Build environment: `python=unknown, platform=unknown`", summary)
+        self.assertIn("- Package license: `declared=unknown, check=unknown`", summary)
 
     def test_release_smoke_summary_handles_malformed_report(self):
         from scripts.release_smoke_summary import render_release_smoke_summary
@@ -17571,7 +17575,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         report = {
             "ok": True,
             "wheel": "wheel`name\nx.whl",
-            "checks": {"source_clean": True, "secret_hygiene": True},
+            "checks": {"source_clean": True, "secret_hygiene": True, "package_license": "ok`yes\nnext"},
             "manifest": {
                 "ci_provider": "github`actions",
                 "ci_ref": "ref`name\nnext",
@@ -17588,6 +17592,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "direct_dependencies_pinned": "true`yes",
                 "build_python_version": "3`11\nnext",
                 "build_platform": "Linux`arm\nnext",
+                "license_declared": "MIT`custom\nnext",
                 "manifest_sha256": "hash`one",
             },
         }
@@ -17606,12 +17611,15 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Source dirty paths: `` count=7`paths next, paths_truncated=false`ish ``", summary)
         self.assertIn("- Dependencies: `` count=5`deps next, pinned=true`yes ``", summary)
         self.assertIn("- Build environment: `` python=3`11 next, platform=Linux`arm next ``", summary)
+        self.assertIn("- Package license: `` declared=MIT`custom next, check=ok`yes next ``", summary)
         self.assertIn("- Manifest SHA-256: `` hash`one ``", summary)
         self.assertNotIn("wheel`name\nx.whl", summary)
         self.assertNotIn("123`456\n789", summary)
         self.assertNotIn("7`paths\nnext", summary)
         self.assertNotIn("5`deps\nnext", summary)
         self.assertNotIn("Linux`arm\nnext", summary)
+        self.assertNotIn("MIT`custom\nnext", summary)
+        self.assertNotIn("ok`yes\nnext", summary)
         self.assertNotIn("branch`name\nnext", summary)
         self.assertNotIn("https://example.invalid/run`one\nnext", summary)
 

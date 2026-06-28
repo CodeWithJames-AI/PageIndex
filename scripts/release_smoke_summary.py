@@ -59,6 +59,10 @@ def render_release_smoke_summary(report_path: Path) -> str:
         f"python={manifest.get('build_python_version', 'unknown')}, "
         f"platform={manifest.get('build_platform', 'unknown')}"
     )
+    package_license = (
+        f"declared={manifest.get('license_declared', 'unknown')}, "
+        f"check={checks.get('package_license', 'unknown')}"
+    )
     manifest_sidecar = (
         f"written={manifest.get('manifest_written', False)}, "
         f"matches={manifest.get('manifest_payload_matches_output', '?')}"
@@ -82,6 +86,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Deployment checks: {_inline_code(deployment_count)} passed",
             f"- Dependencies: {_inline_code(dependency_status)}",
             f"- Build environment: {_inline_code(build_environment)}",
+            f"- Package license: {_inline_code(package_license)}",
             f"- Secret hygiene: {_inline_code(checks.get('secret_hygiene'))}",
             f"- Report output written: {_inline_code(report_output.get('written', False))}",
             f"- Manifest sidecar: {_inline_code(manifest_sidecar)}",

@@ -17433,6 +17433,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "source_clean": True,
                 "secret_hygiene": True,
                 "package_license": True,
+                "manifest_generator": True,
                 "eval_checks": {"passed": 17, "total": 17},
                 "deployment_checks": {"passed": 9, "total": 9},
             },
@@ -17459,6 +17460,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "secret_hygiene_finding_count": 0,
                 "manifest_payload_matches_output": True,
                 "manifest_written": True,
+                "manifest_generator": "pageindex-enterprise release_smoke.py",
+                "manifest_generator_version": "0.1.0",
+                "manifest_schema": "pageindex-enterprise-cleanroom.release-manifest.v1",
                 "manifest_sha256": "manifesthash",
                 "sbom_payload_matches_output": True,
                 "sbom_written": True,
@@ -17502,6 +17506,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Secret hygiene findings: `0`", summary)
         self.assertIn("- Report output written: `True`", summary)
         self.assertIn("- Manifest sidecar: `written=True, matches=True`", summary)
+        self.assertIn(
+            "- Manifest generator: `name=pageindex-enterprise release_smoke.py, version=0.1.0, schema=pageindex-enterprise-cleanroom.release-manifest.v1, check=True`",
+            summary,
+        )
         self.assertIn("- SBOM sidecar: `written=True, matches=True`", summary)
         self.assertIn("- SBOM inventory: `components=6, external_refs=6, describes=1`", summary)
         self.assertIn("- Manifest SHA-256: `manifesthash`", summary)
@@ -17554,6 +17562,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Build environment: `python=unknown, platform=unknown`", summary)
         self.assertIn("- Package license: `declared=unknown, check=unknown`", summary)
         self.assertIn("- Secret hygiene findings: `unknown`", summary)
+        self.assertIn("- Manifest generator: `name=unknown, version=unknown, schema=unknown, check=unknown`", summary)
         self.assertIn("- SBOM inventory: `components=unknown, external_refs=unknown, describes=unknown`", summary)
 
     def test_release_smoke_summary_handles_malformed_report(self):
@@ -17587,7 +17596,12 @@ class EnterpriseStoreTest(unittest.TestCase):
         report = {
             "ok": True,
             "wheel": "wheel`name\nx.whl",
-            "checks": {"source_clean": True, "secret_hygiene": True, "package_license": "ok`yes\nnext"},
+            "checks": {
+                "source_clean": True,
+                "secret_hygiene": True,
+                "package_license": "ok`yes\nnext",
+                "manifest_generator": "ok`generator\nnext",
+            },
             "manifest": {
                 "ci_provider": "github`actions",
                 "ci_ref": "ref`name\nnext",
@@ -17608,6 +17622,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "build_platform": "Linux`arm\nnext",
                 "license_declared": "MIT`custom\nnext",
                 "secret_hygiene_finding_count": "1`finding\nnext",
+                "manifest_generator": "generator`name\nnext",
+                "manifest_generator_version": "0`1\nnext",
+                "manifest_schema": "schema`id\nnext",
                 "manifest_sha256": "hash`one",
                 "sbom_component_count": "6`components\nnext",
                 "sbom_external_ref_count": "6`refs\nnext",
@@ -17633,6 +17650,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Package license: `` declared=MIT`custom next, check=ok`yes next ``", summary)
         self.assertIn("- Secret hygiene findings: `` 1`finding next ``", summary)
         self.assertIn(
+            "- Manifest generator: `` name=generator`name next, version=0`1 next, schema=schema`id next, check=ok`generator next ``",
+            summary,
+        )
+        self.assertIn(
             "- SBOM inventory: `` components=6`components next, external_refs=6`refs next, describes=1`desc next ``",
             summary,
         )
@@ -17647,6 +17668,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("MIT`custom\nnext", summary)
         self.assertNotIn("ok`yes\nnext", summary)
         self.assertNotIn("1`finding\nnext", summary)
+        self.assertNotIn("generator`name\nnext", summary)
+        self.assertNotIn("0`1\nnext", summary)
+        self.assertNotIn("schema`id\nnext", summary)
+        self.assertNotIn("ok`generator\nnext", summary)
         self.assertNotIn("6`components\nnext", summary)
         self.assertNotIn("branch`name\nnext", summary)
         self.assertNotIn("https://example.invalid/run`one\nnext", summary)

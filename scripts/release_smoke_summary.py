@@ -104,6 +104,11 @@ def render_release_smoke_summary(report_path: Path) -> str:
         f"written={manifest.get('sbom_written', False)}, "
         f"matches={manifest.get('sbom_payload_matches_output', '?')}"
     )
+    sbom_gates = (
+        f"generated={checks.get('sbom_generated', 'unknown')}, "
+        f"describes_root={checks.get('sbom_describes_root', 'unknown')}, "
+        f"package_urls={checks.get('sbom_package_urls', 'unknown')}"
+    )
     sbom_inventory = (
         f"components={manifest.get('sbom_component_count', 'unknown')}, "
         f"external_refs={manifest.get('sbom_external_ref_count', 'unknown')}, "
@@ -145,6 +150,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Sidecar sizes: {_inline_code(sidecar_sizes)}",
             f"- Manifest generator: {_inline_code(manifest_generator)}",
             f"- SBOM sidecar: {_inline_code(sbom_sidecar)}",
+            f"- SBOM gates: {_inline_code(sbom_gates)}",
             f"- SBOM inventory: {_inline_code(sbom_inventory)}",
             f"- SBOM root supplier: {_inline_code(sbom_root_supplier)}",
             f"- Manifest SHA-256: {_inline_code(manifest.get('manifest_sha256', 'unknown'))}",

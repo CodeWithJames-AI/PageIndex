@@ -17437,6 +17437,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "secret_hygiene": True,
                 "package_license": True,
                 "manifest_generator": True,
+                "sbom_generated": True,
+                "sbom_describes_root": True,
+                "sbom_package_urls": True,
                 "sbom_root_supplier": True,
                 "eval_command": True,
                 "eval_checks": {"passed": 17, "total": 17},
@@ -17540,6 +17543,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             summary,
         )
         self.assertIn("- SBOM sidecar: `written=True, matches=True`", summary)
+        self.assertIn("- SBOM gates: `generated=True, describes_root=True, package_urls=True`", summary)
         self.assertIn("- SBOM inventory: `components=6, external_refs=6, describes=1`", summary)
         self.assertIn(
             "- SBOM root supplier: `supplier=Organization: PageIndex clean-room contributors, check=True`",
@@ -17608,6 +17612,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Secret hygiene findings: `unknown`", summary)
         self.assertIn("- Manifest generator: `name=unknown, version=unknown, schema=unknown, check=unknown`", summary)
         self.assertIn("- Sidecar sizes: `manifest_bytes=unknown, sbom_bytes=unknown`", summary)
+        self.assertIn("- SBOM gates: `generated=unknown, describes_root=unknown, package_urls=unknown`", summary)
         self.assertIn("- SBOM inventory: `components=unknown, external_refs=unknown, describes=unknown`", summary)
         self.assertIn("- SBOM root supplier: `supplier=unknown, check=unknown`", summary)
 
@@ -17650,6 +17655,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "secret_hygiene": True,
                 "package_license": "ok`yes\nnext",
                 "manifest_generator": "ok`generator\nnext",
+                "sbom_generated": "ok`sbom\nnext",
+                "sbom_describes_root": "ok`describes\nnext",
+                "sbom_package_urls": "ok`purls\nnext",
                 "sbom_root_supplier": "ok`supplier\nnext",
                 "eval_command": "ok`eval\nnext",
                 "deployment_check": "ok`deployment\nnext",
@@ -17738,6 +17746,10 @@ class EnterpriseStoreTest(unittest.TestCase):
             summary,
         )
         self.assertIn(
+            "- SBOM gates: `` generated=ok`sbom next, describes_root=ok`describes next, package_urls=ok`purls next ``",
+            summary,
+        )
+        self.assertIn(
             "- SBOM inventory: `` components=6`components next, external_refs=6`refs next, describes=1`desc next ``",
             summary,
         )
@@ -17778,6 +17790,9 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("0`1\nnext", summary)
         self.assertNotIn("schema`id\nnext", summary)
         self.assertNotIn("ok`generator\nnext", summary)
+        self.assertNotIn("ok`sbom\nnext", summary)
+        self.assertNotIn("ok`describes\nnext", summary)
+        self.assertNotIn("ok`purls\nnext", summary)
         self.assertNotIn("6`components\nnext", summary)
         self.assertNotIn("supplier`name\nnext", summary)
         self.assertNotIn("ok`supplier\nnext", summary)

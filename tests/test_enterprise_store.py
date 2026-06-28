@@ -17322,6 +17322,82 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(merged["finding_count"], 3)
         self.assertEqual(merged["findings"][-1], {"output": "release_report", "kind": "source_set_share_token"})
 
+    def test_release_smoke_summary_renders_report_and_missing_report(self):
+        from scripts.release_smoke_summary import render_release_smoke_summary
+
+        report = {
+            "ok": True,
+            "wheel": "pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl",
+            "checks": {
+                "source_clean": True,
+                "secret_hygiene": True,
+                "eval_checks": {"passed": 17, "total": 17},
+                "deployment_checks": {"passed": 9, "total": 9},
+            },
+            "manifest": {
+                "source_branch": "codex/enterprise-cleanroom",
+                "source_commit": "abc123",
+                "manifest_sha256": "manifesthash",
+                "sbom_sha256": "sbomhash",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "release-report.json"
+            missing_path = Path(tmp) / "missing-report.json"
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            summary = render_release_smoke_summary(report_path)
+            missing_summary = render_release_smoke_summary(missing_path)
+
+        self.assertIn("## Release smoke", summary)
+        self.assertIn("- Result: `pass`", summary)
+        self.assertIn("- Wheel: `pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl`", summary)
+        self.assertIn("- Source: `codex/enterprise-cleanroom@abc123`", summary)
+        self.assertIn("- Source clean: `True`", summary)
+        self.assertIn("- Eval checks: `17/17` passed", summary)
+        self.assertIn("- Deployment checks: `9/9` passed", summary)
+        self.assertIn("- Secret hygiene: `True`", summary)
+        self.assertIn("- Manifest SHA-256: `manifesthash`", summary)
+        self.assertIn("- SBOM SHA-256: `sbomhash`", summary)
+        self.assertEqual(missing_summary, "## Release smoke\n\nRelease smoke report was not generated.\n")
+
+    def test_release_smoke_summary_cli_appends_to_summary_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "release-report.json"
+            summary_path = Path(tmp) / "summary.md"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "wheel": "wheel.whl",
+                        "checks": {"secret_hygiene": False},
+                        "manifest": {"source_commit": "abc123"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve().parents[1] / "scripts" / "release_smoke_summary.py"),
+                    "--report",
+                    str(report_path),
+                    "--summary-output",
+                    str(summary_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            summary = summary_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result.stdout, "")
+        self.assertIn("- Result: `fail`", summary)
+        self.assertIn("- Source: `detached@abc123`", summary)
+        self.assertIn("- Eval checks: `?/?` passed", summary)
+
     def test_release_smoke_exit_code_follows_report_ok(self):
         from scripts.release_smoke import _release_smoke_exit_code
 

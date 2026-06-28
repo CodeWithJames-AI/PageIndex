@@ -16942,6 +16942,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["wheel_built"], True)
         self.assertEqual(report["checks"]["console_script"], True)
         self.assertEqual(report["checks"]["manifest_generated"], True)
+        self.assertEqual(report["checks"]["artifact_identity"], True)
         self.assertEqual(report["checks"]["manifest_generator"], True)
         self.assertEqual(report["checks"]["manifest_timestamp"], True)
         self.assertEqual(report["checks"]["sbom_generated"], True)
@@ -16965,6 +16966,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("sk-", sbom_text)
         self.assertEqual(Path(report["manifest"]["path"]).resolve(), manifest_path.resolve())
         self.assertEqual(report["manifest"]["artifact_count"], 1)
+        self.assertEqual(report["manifest"]["artifact_media_type"], "application/zip")
+        self.assertEqual(report["manifest"]["artifact_type"], "python-wheel")
         self.assertEqual(report["manifest"]["created_at"], manifest["created_at"])
         self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
         self.assertEqual(report["manifest"]["direct_dependencies_pinned"], True)
@@ -17051,6 +17054,9 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(manifest["source"]["upstream"], expected_upstream)
         self.assertEqual(report["manifest"]["source_upstream"], expected_upstream)
         self.assertEqual(manifest["artifacts"][0]["filename"], report["wheel"])
+        self.assertEqual(manifest["artifacts"][0]["artifact_type"], "python-wheel")
+        self.assertEqual(manifest["artifacts"][0]["media_type"], "application/zip")
+        self.assertEqual(manifest["artifacts"][0]["wheel_tags"], {"abi": "none", "platform": "any", "python": "py3"})
         self.assertEqual(manifest["artifacts"][0]["sha256"], report["manifest"]["wheel_sha256"])
         self.assertEqual(len(manifest["artifacts"][0]["sha256"]), 64)
         self.assertGreater(manifest["artifacts"][0]["size_bytes"], 0)
@@ -17125,6 +17131,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "wheel_built": True,
             "console_script": True,
             "manifest_generated": True,
+            "artifact_identity": True,
             "manifest_generator": True,
             "manifest_timestamp": True,
             "sbom_generated": True,
@@ -17143,6 +17150,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "deployment_checks": {"failed": 0},
             "secret_hygiene": True,
         }
+        bad_artifact_identity = {**checks, "artifact_identity": False}
         bad_record = {**checks, "wheel_record_hashes": False}
         bad_manifest_generator = {**checks, "manifest_generator": False}
         bad_manifest_timestamp = {**checks, "manifest_timestamp": False}
@@ -17157,6 +17165,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         bad_source_clean = {**checks, "source_clean": False}
 
         self.assertEqual(_release_checks_ok(checks), True)
+        self.assertEqual(_release_checks_ok(bad_artifact_identity), False)
         self.assertEqual(_release_checks_ok(bad_record), False)
         self.assertEqual(_release_checks_ok(bad_manifest_generator), False)
         self.assertEqual(_release_checks_ok(bad_manifest_timestamp), False)

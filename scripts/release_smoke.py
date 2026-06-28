@@ -159,6 +159,7 @@ def run_release_smoke(
             "wheel_built": wheel.name == f"{PACKAGE_NAME}-{VERSION}-py3-none-any.whl",
             "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
             "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
+            "artifact_identity": _artifact_identity_ok(manifest["artifacts"][0]),
             "manifest_generator": _manifest_generator_ok(manifest["generator"]),
             "manifest_timestamp": _utc_timestamp_ok(manifest["created_at"]),
             "sbom_generated": len(sbom["packages"]) == len(dependencies) + 1,
@@ -184,6 +185,8 @@ def run_release_smoke(
             "wheel": wheel.name,
             "manifest": {
                 "artifact_count": len(manifest["artifacts"]),
+                "artifact_media_type": manifest["artifacts"][0]["media_type"],
+                "artifact_type": manifest["artifacts"][0]["artifact_type"],
                 "build_platform": manifest["build_environment"]["platform"],
                 "build_python_version": manifest["build_environment"]["python_version"],
                 "created_at": manifest["created_at"],
@@ -384,11 +387,14 @@ def _artifact_manifest(
         "dependency_policy": dependency_policy,
         "artifacts": [
             {
+                "artifact_type": "python-wheel",
                 "content": wheel_content,
                 "filename": wheel.name,
+                "media_type": "application/zip",
                 "record": wheel_record,
                 "sha256": _sha256(wheel),
                 "size_bytes": wheel.stat().st_size,
+                "wheel_tags": _wheel_tags(wheel),
             }
         ],
     }
@@ -483,6 +489,26 @@ def _manifest_generator() -> dict[str, str]:
 
 def _manifest_generator_ok(generator: dict[str, Any]) -> bool:
     return generator == _manifest_generator()
+
+
+def _wheel_tags(wheel: Path) -> dict[str, str]:
+    stem = wheel.name.removesuffix(".whl")
+    parts = stem.split("-")
+    if len(parts) < 5:
+        return {"abi": "NOASSERTION", "platform": "NOASSERTION", "python": "NOASSERTION"}
+    return {
+        "abi": parts[-2],
+        "platform": parts[-1],
+        "python": parts[-3],
+    }
+
+
+def _artifact_identity_ok(artifact: dict[str, Any]) -> bool:
+    return (
+        artifact.get("artifact_type") == "python-wheel"
+        and artifact.get("media_type") == "application/zip"
+        and artifact.get("wheel_tags") == {"abi": "none", "platform": "any", "python": "py3"}
+    )
 
 
 def _spdx_identifier(value: str) -> str:

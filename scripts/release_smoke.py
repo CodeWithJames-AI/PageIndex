@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,11 +26,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build and smoke-test the PageIndex enterprise wheel.")
     parser.add_argument("--repo-root", default=Path(__file__).resolve().parents[1])
     parser.add_argument("--manifest-output")
+    parser.add_argument("--sbom-output")
     parser.add_argument("--require-clean-source", action="store_true")
     args = parser.parse_args()
     report = run_release_smoke(
         Path(args.repo_root),
         manifest_output=Path(args.manifest_output) if args.manifest_output else None,
+        sbom_output=Path(args.sbom_output) if args.sbom_output else None,
         require_clean_source=args.require_clean_source,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -42,6 +45,7 @@ def run_release_smoke(
     repo_root: Path,
     *,
     manifest_output: Path | None = None,
+    sbom_output: Path | None = None,
     require_clean_source: bool = False,
 ) -> dict[str, Any]:
     repo_root = repo_root.expanduser().resolve()
@@ -114,14 +118,20 @@ def run_release_smoke(
             wheel_record=wheel_record,
             wheel_content=wheel_content,
         )
+        sbom = _sbom_document(manifest)
         if manifest_output is not None:
             manifest_output = manifest_output.expanduser().resolve()
             manifest_output.parent.mkdir(parents=True, exist_ok=True)
             manifest_output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if sbom_output is not None:
+            sbom_output = sbom_output.expanduser().resolve()
+            sbom_output.parent.mkdir(parents=True, exist_ok=True)
+            sbom_output.write_text(json.dumps(sbom, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         checks = {
             "wheel_built": wheel.name == f"{PACKAGE_NAME}-{VERSION}-py3-none-any.whl",
             "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
             "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
+            "sbom_generated": len(sbom["packages"]) == len(dependencies) + 1,
             "dependency_inventory": bool(manifest["dependencies"]),
             "dependency_pins": manifest["dependency_policy"]["direct_dependencies_pinned"],
             "wheel_content_policy": manifest["artifacts"][0]["content"]["ok"],
@@ -139,6 +149,8 @@ def run_release_smoke(
                 "dependency_count": len(manifest["dependencies"]),
                 "direct_dependencies_pinned": manifest["dependency_policy"]["direct_dependencies_pinned"],
                 "path": str(manifest_output) if manifest_output is not None else None,
+                "sbom_component_count": len(sbom["packages"]),
+                "sbom_path": str(sbom_output) if sbom_output is not None else None,
                 "source_clean_required": require_clean_source,
                 "source_commit": manifest["source"]["commit"],
                 "source_dirty": manifest["source"]["dirty"],
@@ -215,6 +227,74 @@ def _artifact_manifest(
             }
         ],
     }
+
+
+def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
+    package = manifest["package"]
+    artifact = manifest["artifacts"][0]
+    root_spdx_id = "SPDXRef-Package-pageindex-enterprise-cleanroom"
+    packages = [
+        {
+            "SPDXID": root_spdx_id,
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "name": package["name"],
+            "versionInfo": package["version"],
+            "checksums": [
+                {
+                    "algorithm": "SHA256",
+                    "checksumValue": artifact["sha256"],
+                }
+            ],
+        }
+    ]
+    relationships: list[dict[str, str]] = []
+    for dependency in manifest["dependencies"]:
+        dep_spdx_id = f"SPDXRef-Dependency-{_spdx_identifier(dependency['name'])}"
+        packages.append(
+            {
+                "SPDXID": dep_spdx_id,
+                "downloadLocation": "NOASSERTION",
+                "filesAnalyzed": False,
+                "name": dependency["name"],
+                "versionInfo": _dependency_version_info(dependency),
+            }
+        )
+        relationships.append(
+            {
+                "spdxElementId": root_spdx_id,
+                "relationshipType": "DEPENDS_ON",
+                "relatedSpdxElement": dep_spdx_id,
+            }
+        )
+    return {
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": f"{package['name']}-{package['version']}",
+        "documentNamespace": (
+            "https://pageindex.local/sbom/"
+            f"{package['name']}-{package['version']}-{artifact['sha256']}"
+        ),
+        "creationInfo": {
+            "creators": ["Tool: pageindex-enterprise release_smoke.py"],
+            "created": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        },
+        "packages": packages,
+        "relationships": relationships,
+    }
+
+
+def _spdx_identifier(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9.-]", "-", value)
+    return safe.strip(".-") or "package"
+
+
+def _dependency_version_info(dependency: dict[str, Any]) -> str:
+    specifier = dependency.get("specifier")
+    if isinstance(specifier, str) and specifier.startswith("=="):
+        return specifier.removeprefix("==")
+    return "NOASSERTION"
 
 
 def _wheel_dependencies(wheel: Path) -> list[dict[str, Any]]:

@@ -16912,6 +16912,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
             manifest_path = Path(tmp) / "release-manifest.json"
+            sbom_path = Path(tmp) / "release-sbom.spdx.json"
             result = subprocess.run(
                 [
                     sys.executable,
@@ -16920,6 +16921,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     str(repo_root),
                     "--manifest-output",
                     str(manifest_path),
+                    "--sbom-output",
+                    str(sbom_path),
                 ],
                 cwd="/tmp",
                 capture_output=True,
@@ -16928,12 +16931,14 @@ class EnterpriseStoreTest(unittest.TestCase):
             )
             report = json.loads(result.stdout)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
 
         self.assertEqual(report["ok"], True)
         self.assertEqual(report["wheel"], "pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl")
         self.assertEqual(report["checks"]["wheel_built"], True)
         self.assertEqual(report["checks"]["console_script"], True)
         self.assertEqual(report["checks"]["manifest_generated"], True)
+        self.assertEqual(report["checks"]["sbom_generated"], True)
         self.assertEqual(report["checks"]["dependency_inventory"], True)
         self.assertEqual(report["checks"]["dependency_pins"], True)
         self.assertEqual(report["checks"]["wheel_content_policy"], True)
@@ -16944,6 +16949,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["artifact_count"], 1)
         self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
         self.assertEqual(report["manifest"]["direct_dependencies_pinned"], True)
+        self.assertEqual(Path(report["manifest"]["sbom_path"]).resolve(), sbom_path.resolve())
+        self.assertEqual(report["manifest"]["sbom_component_count"], len(manifest["dependencies"]) + 1)
         self.assertEqual(report["manifest"]["source_clean_required"], False)
         self.assertEqual(report["manifest"]["source_dirty_count"], manifest["source"]["dirty_count"])
         self.assertEqual(report["manifest"]["source_dirty_paths_truncated"], manifest["source"]["dirty_paths_truncated"])
@@ -16989,6 +16996,19 @@ class EnterpriseStoreTest(unittest.TestCase):
         )
         self.assertTrue(all(dependency_pins.values()))
         self.assertEqual(manifest["dependency_policy"], {"direct_dependencies_pinned": True, "unpinned": []})
+        self.assertEqual(sbom["spdxVersion"], "SPDX-2.3")
+        self.assertEqual(sbom["dataLicense"], "CC0-1.0")
+        self.assertEqual(sbom["SPDXID"], "SPDXRef-DOCUMENT")
+        self.assertRegex(sbom["creationInfo"]["created"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertEqual(sbom["packages"][0]["name"], "pageindex-enterprise-cleanroom")
+        self.assertEqual(sbom["packages"][0]["versionInfo"], "0.1.0")
+        self.assertEqual(sbom["packages"][0]["checksums"][0]["checksumValue"], manifest["artifacts"][0]["sha256"])
+        sbom_packages = {package["name"]: package for package in sbom["packages"]}
+        for dependency_name, specifier in dependency_specifiers.items():
+            self.assertIn(dependency_name, sbom_packages)
+            self.assertEqual(sbom_packages[dependency_name]["versionInfo"], specifier.removeprefix("=="))
+        self.assertEqual(len(sbom["relationships"]), len(manifest["dependencies"]))
+        self.assertTrue(all(relationship["relationshipType"] == "DEPENDS_ON" for relationship in sbom["relationships"]))
 
     def test_release_smoke_ok_requires_all_release_checks(self):
         from scripts.release_smoke import _release_checks_ok
@@ -16997,6 +17017,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "wheel_built": True,
             "console_script": True,
             "manifest_generated": True,
+            "sbom_generated": True,
             "dependency_inventory": True,
             "dependency_pins": True,
             "wheel_content_policy": True,

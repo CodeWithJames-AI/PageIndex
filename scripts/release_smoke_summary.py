@@ -47,6 +47,11 @@ def render_release_smoke_summary(report_path: Path) -> str:
     ci_run = _ci_run(manifest)
     eval_count = f"{eval_checks.get('passed', '?')}/{eval_checks.get('total', '?')}"
     deployment_count = f"{deployment_checks.get('passed', '?')}/{deployment_checks.get('total', '?')}"
+    artifact_identity = (
+        f"count={manifest.get('artifact_count', 'unknown')}, "
+        f"type={manifest.get('artifact_type', 'unknown')}, "
+        f"media_type={manifest.get('artifact_media_type', 'unknown')}"
+    )
     wheel_integrity = (
         f"content_ok={manifest.get('wheel_content_policy_ok', checks.get('wheel_content_policy', 'unknown'))}, "
         f"record_ok={manifest.get('wheel_record_hashes_valid', checks.get('wheel_record_hashes', 'unknown'))}"
@@ -92,6 +97,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Wheel: {_inline_code(report.get('wheel', 'unknown'))}",
             f"- Wheel SHA-256: {_inline_code(manifest.get('wheel_sha256', 'unknown'))}",
             f"- Wheel size bytes: {_inline_code(manifest.get('wheel_size_bytes', 'unknown'))}",
+            f"- Artifact identity: {_inline_code(artifact_identity)}",
             f"- Wheel integrity: {_inline_code(wheel_integrity)}",
             f"- Source: {_inline_code(source)}",
             f"- CI context: {_inline_code(ci_context)}",

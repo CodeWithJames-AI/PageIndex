@@ -17439,6 +17439,9 @@ class EnterpriseStoreTest(unittest.TestCase):
             },
             "report": {"written": True},
             "manifest": {
+                "artifact_count": 1,
+                "artifact_media_type": "application/zip",
+                "artifact_type": "python-wheel",
                 "ci_provider": "github-actions",
                 "ci_ref": "codex/enterprise-cleanroom",
                 "ci_repository": "CodeWithJames-AI/PageIndex",
@@ -17485,6 +17488,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Wheel: `pageindex_enterprise_cleanroom-0.1.0-py3-none-any.whl`", summary)
         self.assertIn("- Wheel SHA-256: `wheelhash`", summary)
         self.assertIn("- Wheel size bytes: `165251`", summary)
+        self.assertIn("- Artifact identity: `count=1, type=python-wheel, media_type=application/zip`", summary)
         self.assertIn("- Wheel integrity: `content_ok=True, record_ok=True`", summary)
         self.assertIn("- Source: `codex/enterprise-cleanroom@abc123`", summary)
         self.assertIn("- CI context: `github-actions:CodeWithJames-AI/PageIndex@codex/enterprise-cleanroom`", summary)
@@ -17553,6 +17557,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Source: `detached@abc123`", summary)
         self.assertIn("- Wheel SHA-256: `unknown`", summary)
         self.assertIn("- Wheel size bytes: `unknown`", summary)
+        self.assertIn("- Artifact identity: `count=unknown, type=unknown, media_type=unknown`", summary)
         self.assertIn("- Wheel integrity: `content_ok=unknown, record_ok=unknown`", summary)
         self.assertIn("- CI context: `local`", summary)
         self.assertIn("- CI run: `not-applicable`", summary)
@@ -17603,6 +17608,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "manifest_generator": "ok`generator\nnext",
             },
             "manifest": {
+                "artifact_count": "1`artifact\nnext",
+                "artifact_media_type": "application`zip\nnext",
+                "artifact_type": "python`wheel\nnext",
                 "ci_provider": "github`actions",
                 "ci_ref": "ref`name\nnext",
                 "ci_repository": "repo`name\nnext",
@@ -17640,6 +17648,10 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Wheel: `` wheel`name x.whl ``", summary)
         self.assertIn("- Wheel SHA-256: `` wheel`hash ``", summary)
         self.assertIn("- Wheel size bytes: `` 123`456 789 ``", summary)
+        self.assertIn(
+            "- Artifact identity: `` count=1`artifact next, type=python`wheel next, media_type=application`zip next ``",
+            summary,
+        )
         self.assertIn("- Wheel integrity: `` content_ok=true`content next, record_ok=true`record next ``", summary)
         self.assertIn("- Source: `` branch`name next@abc`123 ``", summary)
         self.assertIn("- CI context: `` github`actions:repo`name next@ref`name next ``", summary)
@@ -17660,6 +17672,9 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Manifest SHA-256: `` hash`one ``", summary)
         self.assertNotIn("wheel`name\nx.whl", summary)
         self.assertNotIn("123`456\n789", summary)
+        self.assertNotIn("1`artifact\nnext", summary)
+        self.assertNotIn("python`wheel\nnext", summary)
+        self.assertNotIn("application`zip\nnext", summary)
         self.assertNotIn("true`content\nnext", summary)
         self.assertNotIn("true`record\nnext", summary)
         self.assertNotIn("7`paths\nnext", summary)

@@ -2120,6 +2120,7 @@ class EnterpriseStore:
             if not _is_expired(row["expires_at"])
             and _cap_api_token_scopes_to_role(_decode_api_token_scopes(row["scopes_json"]) or [], row["role"])
         )
+        storage_summary = self._managed_upload_storage_summary(workspace_id)
         return {
             "workspace_id": workspace_id,
             "documents": {
@@ -2213,6 +2214,7 @@ class EnterpriseStore:
                 "with_expiration": sum(1 for expires_at in api_token_expirations if expires_at),
                 "expired": expired_api_tokens,
             },
+            "storage": storage_summary,
             "conversations": {
                 "count": count("SELECT COUNT(*) AS count FROM conversations WHERE workspace_id = ?"),
                 "messages": count("SELECT COUNT(*) AS count FROM conversation_messages WHERE workspace_id = ?"),
@@ -6605,16 +6607,7 @@ class EnterpriseStore:
             return None
         return source_path
 
-    def get_managed_upload_orphan_report(
-        self,
-        workspace_id: str,
-        actor_user_id: str,
-        *,
-        purge: bool = False,
-    ) -> dict[str, Any]:
-        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
-        if purge:
-            self.require_workspace_role(workspace_id, actor_user_id, {"owner"})
+    def _managed_upload_inventory(self, workspace_id: str) -> tuple[list[tuple[Path, Path, int]], set[Path]]:
         upload_dir = self._managed_upload_dir(workspace_id)
         referenced_paths = set()
         for row in self.conn.execute(
@@ -6637,7 +6630,40 @@ class EnterpriseStore:
                 except OSError:
                     byte_count = 0
                 upload_files.append((path, path.resolve(), byte_count))
+        return upload_files, referenced_paths
 
+    def _managed_upload_storage_summary(self, workspace_id: str) -> dict[str, int]:
+        upload_files, referenced_paths = self._managed_upload_inventory(workspace_id)
+        referenced_files = [
+            (path, byte_count)
+            for path, resolved_path, byte_count in upload_files
+            if resolved_path in referenced_paths
+        ]
+        orphan_files = [
+            (path, byte_count)
+            for path, resolved_path, byte_count in upload_files
+            if resolved_path not in referenced_paths
+        ]
+        return {
+            "managed_upload_files": len(upload_files),
+            "managed_upload_bytes": sum(byte_count for _path, _resolved_path, byte_count in upload_files),
+            "referenced_managed_upload_files": len(referenced_files),
+            "referenced_managed_upload_bytes": sum(byte_count for _path, byte_count in referenced_files),
+            "orphan_managed_upload_files": len(orphan_files),
+            "orphan_managed_upload_bytes": sum(byte_count for _path, byte_count in orphan_files),
+        }
+
+    def get_managed_upload_orphan_report(
+        self,
+        workspace_id: str,
+        actor_user_id: str,
+        *,
+        purge: bool = False,
+    ) -> dict[str, Any]:
+        self.require_workspace_role(workspace_id, actor_user_id, WORKSPACE_ADMIN_ROLES)
+        if purge:
+            self.require_workspace_role(workspace_id, actor_user_id, {"owner"})
+        upload_files, referenced_paths = self._managed_upload_inventory(workspace_id)
         orphan_files = [
             (path, byte_count)
             for path, resolved_path, byte_count in upload_files

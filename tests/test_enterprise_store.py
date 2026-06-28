@@ -890,14 +890,25 @@ class EnterpriseStoreTest(unittest.TestCase):
     def test_workspace_usage_summary_counts_admin_surface(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source = tmp_path / "usage.txt"
-            source.write_text("Usage analytics evidence.", encoding="utf-8")
             root = tmp_path / "workspace"
             store = EnterpriseStore(root)
             workspace_id = store.create_workspace("Team")
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
-            doc_id = store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="Usage memo")
+            upload_dir = store.root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            managed_source = upload_dir / "usage-managed.txt"
+            orphan_source = upload_dir / "usage-orphan.txt"
+            managed_source.write_text("Usage analytics evidence.", encoding="utf-8")
+            orphan_source.write_text("Usage orphan bytes.", encoding="utf-8")
+            managed_size = managed_source.stat().st_size
+            orphan_size = orphan_source.stat().st_size
+            doc_id = store.ingest_file(
+                managed_source,
+                workspace_id=workspace_id,
+                actor_user_id="alice",
+                name="Usage memo",
+            )
             store.rebuild_virtual_index()
             group = store.create_workspace_group(workspace_id, "alice", "Analysts")
             store.add_workspace_group_member(workspace_id, "alice", group["id"], "bob")
@@ -933,6 +944,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.chat_message(conversation["id"], "alice", "usage analytics", limit=4)
 
             summary = store.get_workspace_usage_summary(workspace_id, "alice")
+            serialized_summary = json.dumps(summary, sort_keys=True)
             with self.assertRaisesRegex(PermissionError, "workspace role denied"):
                 store.get_workspace_usage_summary(workspace_id, "bob")
 
@@ -950,6 +962,19 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(summary["api_tokens"]["active"], 1)
             self.assertEqual(summary["api_tokens"]["with_expiration"], 2)
             self.assertEqual(summary["api_tokens"]["expired"], 1)
+            self.assertEqual(
+                summary["storage"],
+                {
+                    "managed_upload_files": 2,
+                    "managed_upload_bytes": managed_size + orphan_size,
+                    "referenced_managed_upload_files": 1,
+                    "referenced_managed_upload_bytes": managed_size,
+                    "orphan_managed_upload_files": 1,
+                    "orphan_managed_upload_bytes": orphan_size,
+                },
+            )
+            self.assertNotIn("usage-orphan.txt", serialized_summary)
+            self.assertNotIn(str(upload_dir), serialized_summary)
             self.assertEqual(summary["conversations"]["count"], 1)
             self.assertEqual(summary["conversations"]["messages"], 2)
             self.assertEqual(summary["retrieval"]["query_runs"], 1)
@@ -1039,6 +1064,17 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(usage["workspace_id"], "ws_usage")
             self.assertEqual(usage["team"]["members"], 2)
             self.assertEqual(usage["team"]["members_by_role"], {"member": 1, "owner": 1})
+            self.assertEqual(
+                usage["storage"],
+                {
+                    "managed_upload_files": 0,
+                    "managed_upload_bytes": 0,
+                    "referenced_managed_upload_files": 0,
+                    "referenced_managed_upload_bytes": 0,
+                    "orphan_managed_upload_files": 0,
+                    "orphan_managed_upload_bytes": 0,
+                },
+            )
             self.assertNotEqual(denied.returncode, 0)
             self.assertIn("workspace role denied", denied.stderr)
             self.assertNotIn("Traceback", denied.stderr)
@@ -7301,6 +7337,11 @@ class EnterpriseStoreTest(unittest.TestCase):
             store.add_workspace_member(workspace_id, "alice", "owner")
             store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
             store.ingest_file(source, workspace_id=workspace_id, actor_user_id="alice", name="HTTP usage memo")
+            upload_dir = store.root / "uploads" / workspace_id
+            upload_dir.mkdir(parents=True)
+            orphan_source = upload_dir / "http-usage-orphan.txt"
+            orphan_source.write_text("HTTP usage orphan bytes.", encoding="utf-8")
+            orphan_size = orphan_source.stat().st_size
             store.create_workspace_group(workspace_id, "alice", "Analysts")
             past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
             owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
@@ -7346,8 +7387,15 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(usage["api_tokens"]["active"], 3)
             self.assertEqual(usage["api_tokens"]["expired"], 1)
             self.assertEqual(usage["api_tokens"]["with_expiration"], 1)
+            self.assertEqual(usage["storage"]["managed_upload_files"], 1)
+            self.assertEqual(usage["storage"]["managed_upload_bytes"], orphan_size)
+            self.assertEqual(usage["storage"]["referenced_managed_upload_files"], 0)
+            self.assertEqual(usage["storage"]["orphan_managed_upload_files"], 1)
+            self.assertEqual(usage["storage"]["orphan_managed_upload_bytes"], orphan_size)
             self.assertNotIn("pit_", serialized)
             self.assertNotIn("token_hash", serialized)
+            self.assertNotIn("http-usage-orphan.txt", serialized)
+            self.assertNotIn(str(upload_dir), serialized)
 
     def test_http_workspace_quota_policy_requires_admin_audit_write_and_blocks_ingest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -15880,6 +15928,9 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("renderWorkspaceUsage", body)
                     self.assertIn("tokenText", body)
                     self.assertIn("tokens ${tokenText}", body)
+                    self.assertIn("storageText", body)
+                    self.assertIn("storage ${storageText}", body)
+                    self.assertIn("orphan_managed_upload_files", body)
                     self.assertIn("documentShareText", body)
                     self.assertIn("conversationShareText", body)
                     self.assertIn("sourceSetShareText", body)

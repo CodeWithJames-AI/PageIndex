@@ -17547,6 +17547,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Build gates: `environment=True, package_license=True`", summary)
         self.assertIn("- Package license: `declared=MIT, check=True`", summary)
         self.assertIn("- Secret hygiene: `True`", summary)
+        self.assertIn("- Secret gates: `hygiene=True, findings=0`", summary)
         self.assertIn("- Secret hygiene findings: `0`", summary)
         self.assertIn("- Report output written: `True`", summary)
         self.assertIn("- Manifest sidecar: `written=True, matches=True`", summary)
@@ -17628,6 +17629,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Build environment: `python=unknown, platform=unknown`", summary)
         self.assertIn("- Build gates: `environment=unknown, package_license=unknown`", summary)
         self.assertIn("- Package license: `declared=unknown, check=unknown`", summary)
+        self.assertIn("- Secret gates: `hygiene=False, findings=unknown`", summary)
         self.assertIn("- Secret hygiene findings: `unknown`", summary)
         self.assertIn("- Manifest generator: `name=unknown, version=unknown, schema=unknown, check=unknown`", summary)
         self.assertIn("- Sidecar sizes: `manifest_bytes=unknown, sbom_bytes=unknown`", summary)
@@ -17675,7 +17677,7 @@ class EnterpriseStoreTest(unittest.TestCase):
                 "manifest_timestamp": "ok`timestamp\nnext",
                 "sbom_sidecar_integrity": "ok`sbom-sidecar\nnext",
                 "source_clean": True,
-                "secret_hygiene": True,
+                "secret_hygiene": "ok`secret\nnext",
                 "dependency_inventory": "ok`inventory\nnext",
                 "dependency_pins": "ok`pins\nnext",
                 "build_environment": "ok`build\nnext",
@@ -17771,6 +17773,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertIn("- Build environment: `` python=3`11 next, platform=Linux`arm next ``", summary)
         self.assertIn("- Build gates: `` environment=ok`build next, package_license=ok`yes next ``", summary)
         self.assertIn("- Package license: `` declared=MIT`custom next, check=ok`yes next ``", summary)
+        self.assertIn("- Secret gates: `` hygiene=ok`secret next, findings=1`finding next ``", summary)
         self.assertIn("- Secret hygiene findings: `` 1`finding next ``", summary)
         self.assertIn("- Sidecar sizes: `` manifest_bytes=2`048 next, sbom_bytes=4`096 next ``", summary)
         self.assertIn(
@@ -17821,6 +17824,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertNotIn("Linux`arm\nnext", summary)
         self.assertNotIn("ok`build\nnext", summary)
         self.assertNotIn("MIT`custom\nnext", summary)
+        self.assertNotIn("ok`secret\nnext", summary)
         self.assertNotIn("ok`yes\nnext", summary)
         self.assertNotIn("1`finding\nnext", summary)
         self.assertNotIn("2`048\nnext", summary)

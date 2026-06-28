@@ -100,6 +100,10 @@ def render_release_smoke_summary(report_path: Path) -> str:
         f"declared={manifest.get('license_declared', 'unknown')}, "
         f"check={checks.get('package_license', 'unknown')}"
     )
+    secret_gates = (
+        f"hygiene={checks.get('secret_hygiene', 'unknown')}, "
+        f"findings={manifest.get('secret_hygiene_finding_count', 'unknown')}"
+    )
     manifest_sidecar = (
         f"written={manifest.get('manifest_written', False)}, "
         f"matches={manifest.get('manifest_payload_matches_output', '?')}"
@@ -161,6 +165,7 @@ def render_release_smoke_summary(report_path: Path) -> str:
             f"- Build gates: {_inline_code(build_gates)}",
             f"- Package license: {_inline_code(package_license)}",
             f"- Secret hygiene: {_inline_code(checks.get('secret_hygiene'))}",
+            f"- Secret gates: {_inline_code(secret_gates)}",
             f"- Secret hygiene findings: {_inline_code(manifest.get('secret_hygiene_finding_count', 'unknown'))}",
             f"- Report output written: {_inline_code(report_output.get('written', False))}",
             f"- Manifest sidecar: {_inline_code(manifest_sidecar)}",

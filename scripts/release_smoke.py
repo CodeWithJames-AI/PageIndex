@@ -53,6 +53,7 @@ def run_release_smoke(
         tmp_path = Path(tmp)
         wheel_dir = tmp_path / "wheels"
         install_dir = tmp_path / "install"
+        deployment_root = tmp_path / "deployment-root"
         eval_root = tmp_path / "eval-root"
         wheel_dir.mkdir()
         install_dir.mkdir()
@@ -105,6 +106,7 @@ def run_release_smoke(
             env=env,
         )
         eval_report = json.loads(eval_result.stdout)
+        deployment_report = _run_packaged_deployment_check(console, deployment_root, cwd=tmp_path, env=env)
         _inspect_wheel(wheel)
         dependencies = _wheel_dependencies(wheel)
         dependency_policy = _dependency_policy(dependencies)
@@ -138,6 +140,8 @@ def run_release_smoke(
             "wheel_record_hashes": manifest["artifacts"][0]["record"]["ok"],
             "eval_command": eval_report.get("ok") is True,
             "eval_checks": eval_report.get("summary", {}),
+            "deployment_check": deployment_report.get("ok") is True,
+            "deployment_checks": deployment_report.get("summary", {}),
         }
         if require_clean_source:
             checks["source_clean"] = manifest["source"]["dirty"] is False
@@ -156,6 +160,8 @@ def run_release_smoke(
                 "source_dirty": manifest["source"]["dirty"],
                 "source_dirty_count": manifest["source"]["dirty_count"],
                 "source_dirty_paths_truncated": manifest["source"]["dirty_paths_truncated"],
+                "deployment_check_ok": deployment_report.get("ok") is True,
+                "deployment_check_failed": deployment_report.get("summary", {}).get("failed"),
                 "wheel_content_policy_ok": manifest["artifacts"][0]["content"]["ok"],
                 "wheel_record_hashes_valid": manifest["artifacts"][0]["record"]["ok"],
                 "wheel_sha256": manifest["artifacts"][0]["sha256"],
@@ -180,7 +186,80 @@ def _release_checks_ok(checks: dict[str, Any]) -> bool:
     bool_checks_ok = all(value is True for value in checks.values() if isinstance(value, bool))
     eval_checks = checks.get("eval_checks")
     eval_summary_ok = isinstance(eval_checks, dict) and eval_checks.get("failed") == 0
-    return bool_checks_ok and eval_summary_ok
+    deployment_checks = checks.get("deployment_checks")
+    deployment_summary_ok = isinstance(deployment_checks, dict) and deployment_checks.get("failed") == 0
+    return bool_checks_ok and eval_summary_ok and deployment_summary_ok
+
+
+def _run_packaged_deployment_check(
+    console: Path,
+    deployment_root: Path,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    workspace_id = "release-smoke-workspace"
+    owner_id = "release-smoke-owner"
+    _run(
+        [
+            str(console),
+            "--root",
+            str(deployment_root),
+            "workspace",
+            "Release Smoke",
+            "--workspace-id",
+            workspace_id,
+        ],
+        cwd=cwd,
+        env=env,
+    )
+    _run(
+        [
+            str(console),
+            "--root",
+            str(deployment_root),
+            "add-member",
+            workspace_id,
+            owner_id,
+            "--role",
+            "owner",
+        ],
+        cwd=cwd,
+        env=env,
+    )
+    _run(
+        [
+            str(console),
+            "--root",
+            str(deployment_root),
+            "create-token",
+            workspace_id,
+            owner_id,
+            "--name",
+            "release-smoke",
+            "--scope",
+            "read",
+            "--scope",
+            "write",
+            "--scope",
+            "audit",
+        ],
+        cwd=cwd,
+        env=env,
+    )
+    result = _run(
+        [
+            str(console),
+            "--root",
+            str(deployment_root),
+            "deployment-check",
+            "--require-api-token",
+            "--fail-on-unready",
+        ],
+        cwd=cwd,
+        env=env,
+    )
+    return json.loads(result.stdout)
 
 
 def _inspect_wheel(wheel: Path) -> None:

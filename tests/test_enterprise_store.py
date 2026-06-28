@@ -16945,6 +16945,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["wheel_record_hashes"], True)
         self.assertEqual(report["checks"]["eval_command"], True)
         self.assertEqual(report["checks"]["eval_checks"]["failed"], 0)
+        self.assertEqual(report["checks"]["deployment_check"], True)
+        self.assertEqual(report["checks"]["deployment_checks"]["failed"], 0)
         self.assertEqual(Path(report["manifest"]["path"]).resolve(), manifest_path.resolve())
         self.assertEqual(report["manifest"]["artifact_count"], 1)
         self.assertEqual(report["manifest"]["dependency_count"], len(manifest["dependencies"]))
@@ -16954,6 +16956,8 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["source_clean_required"], False)
         self.assertEqual(report["manifest"]["source_dirty_count"], manifest["source"]["dirty_count"])
         self.assertEqual(report["manifest"]["source_dirty_paths_truncated"], manifest["source"]["dirty_paths_truncated"])
+        self.assertEqual(report["manifest"]["deployment_check_ok"], True)
+        self.assertEqual(report["manifest"]["deployment_check_failed"], 0)
         self.assertEqual(report["manifest"]["wheel_content_policy_ok"], True)
         self.assertEqual(report["manifest"]["wheel_record_hashes_valid"], True)
         self.assertEqual(manifest["schema_version"], 1)
@@ -17024,14 +17028,18 @@ class EnterpriseStoreTest(unittest.TestCase):
             "wheel_record_hashes": True,
             "eval_command": True,
             "eval_checks": {"failed": 0},
+            "deployment_check": True,
+            "deployment_checks": {"failed": 0},
         }
         bad_record = {**checks, "wheel_record_hashes": False}
         bad_eval_summary = {**checks, "eval_checks": {"failed": 1}}
+        bad_deployment_summary = {**checks, "deployment_checks": {"failed": 1}}
         bad_source_clean = {**checks, "source_clean": False}
 
         self.assertEqual(_release_checks_ok(checks), True)
         self.assertEqual(_release_checks_ok(bad_record), False)
         self.assertEqual(_release_checks_ok(bad_eval_summary), False)
+        self.assertEqual(_release_checks_ok(bad_deployment_summary), False)
         self.assertEqual(_release_checks_ok(bad_source_clean), False)
 
     def test_release_smoke_exit_code_follows_report_ok(self):

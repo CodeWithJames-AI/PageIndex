@@ -16882,6 +16882,16 @@ class EnterpriseStoreTest(unittest.TestCase):
                 },
             )
             self.assertEqual(
+                report["checks"]["workspace_owner"],
+                {
+                    "ok": False,
+                    "workspace_count": 0,
+                    "owner_count": 0,
+                    "skipped": True,
+                    "reason": "store was not opened because root is not writable",
+                },
+            )
+            self.assertEqual(
                 report["checks"]["audit_integrity"],
                 {
                     "ok": False,

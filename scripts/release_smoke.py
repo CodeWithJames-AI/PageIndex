@@ -158,6 +158,7 @@ def run_release_smoke(
             "console_script": "usage:" in help_result.stdout and "eval" in help_result.stdout,
             "manifest_generated": len(manifest["artifacts"]) == 1 and len(manifest["artifacts"][0]["sha256"]) == 64,
             "sbom_generated": len(sbom["packages"]) == len(dependencies) + 1,
+            "sbom_describes_root": _sbom_describes_root_package(sbom),
             "sbom_package_urls": _sbom_package_url_count(sbom) == len(sbom["packages"]),
             "build_environment": _build_environment_ok(manifest["build_environment"]),
             "dependency_inventory": bool(manifest["dependencies"]),
@@ -185,6 +186,7 @@ def run_release_smoke(
                 "license_declared": manifest["package"]["license_declared"],
                 "path": str(manifest_output) if manifest_output is not None else None,
                 "sbom_component_count": len(sbom["packages"]),
+                "sbom_describes_count": len(sbom.get("documentDescribes", [])),
                 "sbom_external_ref_count": _sbom_package_url_count(sbom),
                 "sbom_path": str(sbom_output) if sbom_output is not None else None,
                 "source_clean_required": require_clean_source,
@@ -392,6 +394,7 @@ def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
             "licenseConcluded": "NOASSERTION",
             "licenseDeclared": package["license_declared"],
             "name": package["name"],
+            "primaryPackagePurpose": "APPLICATION",
             "versionInfo": package["version"],
             "externalRefs": _pypi_package_url_refs(package["name"], package["version"]),
             "checksums": [
@@ -413,6 +416,7 @@ def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
                 "licenseConcluded": "NOASSERTION",
                 "licenseDeclared": "NOASSERTION",
                 "name": dependency["name"],
+                "primaryPackagePurpose": "LIBRARY",
                 "versionInfo": _dependency_version_info(dependency),
                 "externalRefs": _pypi_package_url_refs(dependency["name"], _dependency_version_info(dependency)),
             }
@@ -429,6 +433,7 @@ def _sbom_document(manifest: dict[str, Any]) -> dict[str, Any]:
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
         "name": f"{package['name']}-{package['version']}",
+        "documentDescribes": [root_spdx_id],
         "documentNamespace": (
             "https://pageindex.local/sbom/"
             f"{package['name']}-{package['version']}-{artifact['sha256']}"
@@ -477,6 +482,14 @@ def _sbom_package_url_count(sbom: dict[str, Any]) -> int:
         if any(ref.get("referenceType") == "purl" and ref.get("referenceLocator") for ref in refs):
             count += 1
     return count
+
+
+def _sbom_describes_root_package(sbom: dict[str, Any]) -> bool:
+    packages = sbom.get("packages", [])
+    if not packages:
+        return False
+    root_id = packages[0].get("SPDXID")
+    return bool(root_id) and sbom.get("documentDescribes") == [root_id]
 
 
 def _wheel_package_metadata(wheel: Path) -> dict[str, str]:

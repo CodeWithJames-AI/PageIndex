@@ -16943,6 +16943,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["checks"]["console_script"], True)
         self.assertEqual(report["checks"]["manifest_generated"], True)
         self.assertEqual(report["checks"]["sbom_generated"], True)
+        self.assertEqual(report["checks"]["sbom_describes_root"], True)
         self.assertEqual(report["checks"]["sbom_package_urls"], True)
         self.assertEqual(report["checks"]["build_environment"], True)
         self.assertEqual(report["checks"]["dependency_inventory"], True)
@@ -16966,6 +16967,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(report["manifest"]["license_declared"], "MIT")
         self.assertEqual(Path(report["manifest"]["sbom_path"]).resolve(), sbom_path.resolve())
         self.assertEqual(report["manifest"]["sbom_component_count"], len(manifest["dependencies"]) + 1)
+        self.assertEqual(report["manifest"]["sbom_describes_count"], 1)
         self.assertEqual(report["manifest"]["sbom_external_ref_count"], len(sbom["packages"]))
         self.assertEqual(report["manifest"]["build_platform"], manifest["build_environment"]["platform"])
         self.assertEqual(report["manifest"]["build_python_version"], manifest["build_environment"]["python_version"])
@@ -17059,9 +17061,11 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(sbom["spdxVersion"], "SPDX-2.3")
         self.assertEqual(sbom["dataLicense"], "CC0-1.0")
         self.assertEqual(sbom["SPDXID"], "SPDXRef-DOCUMENT")
+        self.assertEqual(sbom["documentDescribes"], ["SPDXRef-Package-pageindex-enterprise-cleanroom"])
         self.assertRegex(sbom["creationInfo"]["created"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
         self.assertEqual(sbom["packages"][0]["name"], "pageindex-enterprise-cleanroom")
         self.assertEqual(sbom["packages"][0]["versionInfo"], "0.1.0")
+        self.assertEqual(sbom["packages"][0]["primaryPackagePurpose"], "APPLICATION")
         self.assertEqual(sbom["packages"][0]["licenseDeclared"], "MIT")
         self.assertEqual(sbom["packages"][0]["licenseConcluded"], "NOASSERTION")
         self.assertEqual(
@@ -17079,6 +17083,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         for dependency_name, specifier in dependency_specifiers.items():
             self.assertIn(dependency_name, sbom_packages)
             self.assertEqual(sbom_packages[dependency_name]["versionInfo"], specifier.removeprefix("=="))
+            self.assertEqual(sbom_packages[dependency_name]["primaryPackagePurpose"], "LIBRARY")
             self.assertEqual(sbom_packages[dependency_name]["licenseDeclared"], "NOASSERTION")
             self.assertEqual(sbom_packages[dependency_name]["licenseConcluded"], "NOASSERTION")
             self.assertEqual(
@@ -17102,6 +17107,7 @@ class EnterpriseStoreTest(unittest.TestCase):
             "console_script": True,
             "manifest_generated": True,
             "sbom_generated": True,
+            "sbom_describes_root": True,
             "sbom_package_urls": True,
             "build_environment": True,
             "dependency_inventory": True,
@@ -17120,6 +17126,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         bad_deployment_summary = {**checks, "deployment_checks": {"failed": 1}}
         bad_secret_hygiene = {**checks, "secret_hygiene": False}
         bad_package_license = {**checks, "package_license": False}
+        bad_sbom_describes_root = {**checks, "sbom_describes_root": False}
         bad_sbom_package_urls = {**checks, "sbom_package_urls": False}
         bad_build_environment = {**checks, "build_environment": False}
         bad_source_clean = {**checks, "source_clean": False}
@@ -17130,6 +17137,7 @@ class EnterpriseStoreTest(unittest.TestCase):
         self.assertEqual(_release_checks_ok(bad_deployment_summary), False)
         self.assertEqual(_release_checks_ok(bad_secret_hygiene), False)
         self.assertEqual(_release_checks_ok(bad_package_license), False)
+        self.assertEqual(_release_checks_ok(bad_sbom_describes_root), False)
         self.assertEqual(_release_checks_ok(bad_sbom_package_urls), False)
         self.assertEqual(_release_checks_ok(bad_build_environment), False)
         self.assertEqual(_release_checks_ok(bad_source_clean), False)

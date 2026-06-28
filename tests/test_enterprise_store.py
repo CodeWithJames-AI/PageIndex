@@ -13964,6 +13964,112 @@ class EnterpriseStoreTest(unittest.TestCase):
             self.assertEqual(document_access_after_revoke["group_grants"][0]["role"], "deny")
             self.assertEqual(folder_access_after_revoke["group_grants"], [])
 
+    def test_acl_bulk_reconcile_dry_runs_and_removes_access_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "workspace"
+            source = tmp_path / "acl-reconcile.txt"
+            source.write_text("ACL reconcile drift evidence.", encoding="utf-8")
+            store = EnterpriseStore(root)
+            workspace_id = store.create_workspace("Team")
+            store.add_workspace_member(workspace_id, "alice", "owner")
+            store.add_workspace_member(workspace_id, "bob", "member", actor_user_id="alice")
+            store.add_workspace_member(workspace_id, "vera", "viewer", actor_user_id="alice")
+            folder_id = store.create_folder("Deals", workspace_id=workspace_id, actor_user_id="alice")
+            doc_id = store.ingest_file(source, folder_id=folder_id, workspace_id=workspace_id, actor_user_id="alice", name="ACL reconcile memo")
+            group = store.create_workspace_group(workspace_id, "alice", "Reviewers")
+            store.add_workspace_group_member(workspace_id, "alice", group["id"], "bob")
+            store.grant_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice", user_id="bob", role="write")
+            store.grant_document_group_access(doc_id, workspace_id=workspace_id, actor_user_id="alice", group_id=group["id"], role="read")
+            store.grant_folder_access(folder_id, workspace_id=workspace_id, actor_user_id="alice", user_id="bob", role="read")
+            store.grant_folder_group_access(folder_id, workspace_id=workspace_id, actor_user_id="alice", group_id=group["id"], role="write")
+            owner_token = store.create_api_token(workspace_id, "alice", name="owner")["token"]
+            policy = {
+                "document_reconciles": [
+                    {"doc_id": doc_id, "grants": [{"user_id": "bob", "role": "read"}]},
+                ],
+                "folder_reconciles": [
+                    {"folder_id": folder_id, "grants": [{"group_id": group["id"], "role": "deny"}]},
+                ],
+            }
+
+            dry_run = store.apply_acl_bulk(workspace_id, "alice", policy)
+            document_access_after_dry_run = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            folder_access_after_dry_run = store.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id="alice")
+            applied = store.apply_acl_bulk(workspace_id, "alice", policy, dry_run=False)
+            document_access_after_apply = store.list_document_access(doc_id, workspace_id=workspace_id, actor_user_id="alice")
+            folder_access_after_apply = store.list_folder_access(folder_id, workspace_id=workspace_id, actor_user_id="alice")
+            invalid = store.apply_acl_bulk(
+                workspace_id,
+                "alice",
+                {"document_reconciles": [{"doc_id": doc_id, "grants": [{"user_id": "vera", "role": "write"}]}]},
+                dry_run=False,
+            )
+            store.close()
+
+            server = EnterpriseHTTPServer(("127.0.0.1", 0), root, require_api_token=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                http_dry_run = _post_json(
+                    f"http://127.0.0.1:{server.server_port}/acl-bulk",
+                    {"document_reconciles": [{"doc_id": doc_id, "grants": []}]},
+                    headers={"Authorization": f"Bearer {owner_token}"},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+            inspected = EnterpriseStore(root)
+            try:
+                document_access_after_http_dry_run = inspected.list_document_access(
+                    doc_id,
+                    workspace_id=workspace_id,
+                    actor_user_id="alice",
+                )
+            finally:
+                inspected.close()
+
+            self.assertTrue(dry_run["dry_run"])
+            self.assertEqual(dry_run["operation_count"], 4)
+            self.assertEqual(dry_run["applied"], 0)
+            self.assertEqual(
+                {
+                    (
+                        operation["action"],
+                        operation["target_type"],
+                        operation["principal_type"],
+                        operation["principal_id"],
+                        operation.get("role"),
+                        operation.get("source"),
+                    )
+                    for operation in dry_run["operations"]
+                },
+                {
+                    ("grant", "document", "user", "bob", "read", "reconcile"),
+                    ("revoke", "document", "group", group["id"], None, "reconcile"),
+                    ("grant", "folder", "group", group["id"], "deny", "reconcile"),
+                    ("revoke", "folder", "user", "bob", None, "reconcile"),
+                },
+            )
+            self.assertEqual(document_access_after_dry_run["grants"][0]["role"], "write")
+            self.assertEqual(document_access_after_dry_run["group_grants"][0]["role"], "read")
+            self.assertEqual(folder_access_after_dry_run["grants"][0]["role"], "read")
+            self.assertEqual(folder_access_after_dry_run["group_grants"][0]["role"], "write")
+            self.assertFalse(applied["dry_run"])
+            self.assertEqual(applied["applied"], 4)
+            self.assertEqual(document_access_after_apply["grants"][0]["role"], "read")
+            self.assertEqual(document_access_after_apply["group_grants"], [])
+            self.assertEqual(folder_access_after_apply["grants"], [])
+            self.assertEqual(folder_access_after_apply["group_grants"][0]["role"], "deny")
+            self.assertEqual(invalid["applied"], 0)
+            self.assertEqual(invalid["errors"][0]["error"], "write grant requires workspace write role")
+            self.assertTrue(http_dry_run["dry_run"])
+            self.assertEqual(http_dry_run["operation_count"], 1)
+            self.assertEqual(http_dry_run["operations"][0]["action"], "revoke")
+            self.assertEqual(http_dry_run["operations"][0]["source"], "reconcile")
+            self.assertEqual(document_access_after_http_dry_run["grants"][0]["role"], "read")
+
     def test_http_workspace_group_routes_grant_document_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -15232,6 +15338,8 @@ class EnterpriseStoreTest(unittest.TestCase):
                     self.assertIn("previewFolderEffectiveAccess", body)
                     self.assertIn("effective_access", body)
                     self.assertIn("aclBulkPolicyInput", body)
+                    self.assertIn("document_reconciles", body)
+                    self.assertIn("folder_reconciles", body)
                     self.assertIn("/acl-bulk", body)
                     self.assertIn("runAclBulk", body)
                     self.assertIn("data-rename-folder-id", body)

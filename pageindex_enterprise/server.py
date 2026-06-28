@@ -1304,6 +1304,8 @@ class EnterpriseHandler(BaseHTTPRequestHandler):
                 "folder_grants": payload.get("folder_grants", []),
                 "document_revokes": payload.get("document_revokes", []),
                 "folder_revokes": payload.get("folder_revokes", []),
+                "document_reconciles": payload.get("document_reconciles", []),
+                "folder_reconciles": payload.get("folder_reconciles", []),
             }
         if not isinstance(policy, dict):
             raise ValueError("policy must be an object")

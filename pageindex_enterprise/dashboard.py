@@ -706,7 +706,7 @@ DASHBOARD_HTML = """<!doctype html>
           <section>
             <h2 class="section-title">ACL bulk</h2>
             <div class="stack">
-              <textarea id="aclBulkPolicyInput" aria-label="ACL bulk policy">{"document_grants":[],"folder_grants":[]}</textarea>
+              <textarea id="aclBulkPolicyInput" aria-label="ACL bulk policy">{"document_grants":[],"folder_grants":[],"document_revokes":[],"folder_revokes":[],"document_reconciles":[],"folder_reconciles":[]}</textarea>
               <div class="provider-actions">
                 <button id="dryRunAclBulkButton" class="secondary" type="button">Dry run</button>
                 <button id="applyAclBulkButton" type="button">Apply</button>

@@ -5523,10 +5523,160 @@ class EnterpriseStore:
                     }
                 )
 
+        def _existing_direct_acl(target_type: str, target_id: str) -> dict[tuple[str, str], str]:
+            if target_type == "document":
+                user_rows = self.conn.execute(
+                    """
+                    SELECT user_id, role
+                    FROM document_access_grants
+                    WHERE workspace_id = ? AND doc_id = ?
+                    """,
+                    (workspace_id, target_id),
+                )
+                group_rows = self.conn.execute(
+                    """
+                    SELECT group_id, role
+                    FROM document_group_access_grants
+                    WHERE workspace_id = ? AND doc_id = ?
+                    """,
+                    (workspace_id, target_id),
+                )
+            else:
+                user_rows = self.conn.execute(
+                    """
+                    SELECT user_id, role
+                    FROM folder_access_grants
+                    WHERE workspace_id = ? AND folder_id = ?
+                    """,
+                    (workspace_id, target_id),
+                )
+                group_rows = self.conn.execute(
+                    """
+                    SELECT group_id, role
+                    FROM folder_group_access_grants
+                    WHERE workspace_id = ? AND folder_id = ?
+                    """,
+                    (workspace_id, target_id),
+                )
+            existing = {("user", row["user_id"]): row["role"] for row in user_rows}
+            existing.update({("group", row["group_id"]): row["role"] for row in group_rows})
+            return existing
+
+        def _validate_reconcile_entries(collection: str, target_key: str, target_type: str) -> None:
+            entries = policy.get(collection, [])
+            if entries is None:
+                return
+            if not isinstance(entries, list):
+                errors.append({"collection": collection, "error": "must be a list"})
+                return
+            for index, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    errors.append({"collection": collection, "index": index, "error": "entry must be an object"})
+                    continue
+                target_id = entry.get(target_key)
+                if not isinstance(target_id, str) or not target_id.strip():
+                    errors.append({"collection": collection, "index": index, "error": f"{target_key} must be a non-empty string"})
+                    continue
+                target_id = target_id.strip()
+                if target_type == "document":
+                    target = self.get_document(target_id)
+                    if not target or target["workspace_id"] != workspace_id:
+                        errors.append({"collection": collection, "index": index, "error": "document not found", "doc_id": target_id})
+                        continue
+                else:
+                    target = self._one("SELECT * FROM folders WHERE id = ?", (target_id,))
+                    if not target or target["workspace_id"] != workspace_id:
+                        errors.append({"collection": collection, "index": index, "error": "folder not found", "folder_id": target_id})
+                        continue
+                grants = entry.get("grants")
+                if not isinstance(grants, list):
+                    errors.append({"collection": collection, "index": index, "error": "grants must be a list"})
+                    continue
+                desired: dict[tuple[str, str], str] = {}
+                for grant_index, grant in enumerate(grants):
+                    if not isinstance(grant, dict):
+                        errors.append(
+                            {
+                                "collection": collection,
+                                "index": index,
+                                "grant_index": grant_index,
+                                "error": "grant must be an object",
+                            }
+                        )
+                        continue
+                    principal = _validate_principal(grant, collection, index)
+                    if not principal:
+                        continue
+                    try:
+                        role = _normalize_document_access_role(grant.get("role", "read"))
+                    except ValueError as exc:
+                        errors.append(
+                            {
+                                "collection": collection,
+                                "index": index,
+                                "grant_index": grant_index,
+                                "error": str(exc),
+                            }
+                        )
+                        continue
+                    principal_type, principal_id = principal
+                    if role == "write" and principal_type == "user" and self.workspace_role(workspace_id, principal_id) not in WORKSPACE_WRITE_ROLES:
+                        errors.append(
+                            {
+                                "collection": collection,
+                                "index": index,
+                                "grant_index": grant_index,
+                                "error": "write grant requires workspace write role",
+                                "user_id": principal_id,
+                            }
+                        )
+                        continue
+                    key = (principal_type, principal_id)
+                    if key in desired:
+                        errors.append(
+                            {
+                                "collection": collection,
+                                "index": index,
+                                "grant_index": grant_index,
+                                "error": "duplicate desired principal",
+                                "principal_type": principal_type,
+                                "principal_id": principal_id,
+                            }
+                        )
+                        continue
+                    desired[key] = role
+                existing = _existing_direct_acl(target_type, target_id)
+                for (principal_type, principal_id), role in sorted(desired.items()):
+                    if existing.get((principal_type, principal_id)) != role:
+                        operations.append(
+                            {
+                                "action": "grant",
+                                "source": "reconcile",
+                                "target_type": target_type,
+                                "target_id": target_id,
+                                "principal_type": principal_type,
+                                "principal_id": principal_id,
+                                "role": role,
+                            }
+                        )
+                for principal_type, principal_id in sorted(set(existing) - set(desired)):
+                    operations.append(
+                        {
+                            "action": "revoke",
+                            "source": "reconcile",
+                            "target_type": target_type,
+                            "target_id": target_id,
+                            "principal_type": principal_type,
+                            "principal_id": principal_id,
+                        }
+                    )
+
         _validate_entries("document_grants", "doc_id", "document")
         _validate_entries("folder_grants", "folder_id", "folder")
         _validate_revoke_entries("document_revokes", "doc_id", "document")
         _validate_revoke_entries("folder_revokes", "folder_id", "folder")
+        _validate_reconcile_entries("document_reconciles", "doc_id", "document")
+        _validate_reconcile_entries("folder_reconciles", "folder_id", "folder")
         report = {
             "workspace_id": workspace_id,
             "dry_run": dry_run,
